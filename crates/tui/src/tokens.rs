@@ -27,10 +27,7 @@ pub(crate) struct TokenTracker {
     /// whole assistant message is billed, tool name and arguments included, so
     /// counting those again locally charged a large write_file twice.
     reported_usage: bool,
-    /// What the model wrote in this request, so the server's own count of it
-    /// can be used to measure the model. Every server says how many tokens
-    /// it wrote, and the app has the text: together they are an exact
-    /// measurement of the model, and it costs nothing extra.
+    /// The streamed text, paired with usage only when that count covers it.
     request_text: String,
     /// Whether this request carried a tool call. The server counts the call
     /// as part of what the model wrote, and the app has the name and the
@@ -120,7 +117,6 @@ impl TokenTracker {
         if text.is_empty() {
             return;
         }
-        // Kept for the measurement: the server counts this text too.
         self.request_text.push_str(text);
         let now = std::time::Instant::now();
         if self.first_token_time.is_none() {
@@ -157,9 +153,13 @@ impl TokenTracker {
         // wrote. That is a measurement of the model itself, and the counter
         // uses it: the model that is being talked to is the one that decides
         // how many tokens a token is.
-        if let Some(c) = usage.completion.filter(|c| *c > 0) {
-            if !self.request_had_tool {
-                flashagent_llm::note_measured(&self.model, &self.request_text, c as usize);
+        // Responses calibrates its raw text before the loop strips tool markup
+        // or repeated continuation tails. Relearning from UI text would undo it.
+        let sample = (usage.completion_measurement == flashagent_llm::CompletionMeasurement::Full)
+            .then_some(usage.completion).flatten().filter(|c| *c > 0);
+        if !self.request_had_tool {
+            if let Some(count) = sample {
+                flashagent_llm::note_measured(&self.model, &self.request_text, count as usize);
             }
         }
         if let Some(mtp) = usage.mtp.filter(|m| m.total_draft_tokens > 0) {
@@ -339,6 +339,144 @@ impl TokenTracker {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn responses_wire_calibrates_raw_output_before_ui_transformations() {
+        use std::io::{BufRead, BufReader, Read, Write};
+        use futures::StreamExt;
+        use flashagent_llm::{ApiProtocol, Client, Endpoint, LlmBackend, LlmEvent};
+
+        let model = "responses-wire-calibration-integration-test";
+        let reference = "responses-wire-calibration-integration-reference";
+        let answer = "The displayed answer contains only the fresh prose from this response. ".repeat(10);
+        let raw = "A repeated continuation prefix. ".repeat(8) + &answer
+            + "<tool_call>{\"name\":\"read_file\",\"arguments\":{\"path\":\"a.rs\"}}</tool_call>";
+        let visible = flashagent_llm::count_tokens(model, &raw) * 3 / 5;
+        let total = visible + 2000;
+        let reply = serde_json::json!({
+            "type":"response", "status":"completed", "output":[
+                {"type":"reasoning","summary":[{"type":"summary_text","text":"A short summary of hidden reasoning."}],"encrypted_content":"opaque"},
+                {"type":"message","content":[{"type":"output_text","text":raw}]}
+            ],
+            "usage":{"input_tokens":1000,"input_tokens_details":{"cached_tokens":800},
+                "output_tokens":total,"output_tokens_details":{"reasoning_tokens":2000}}
+        }).to_string();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/v1/responses", listener.local_addr().unwrap());
+        let server = std::thread::spawn(move || {
+            let (mut connection, _) = listener.accept().unwrap();
+            let mut reader = BufReader::new(connection.try_clone().unwrap());
+            let mut line = String::new();
+            reader.read_line(&mut line).unwrap();
+            assert!(line.starts_with("POST /v1/responses "), "{line}");
+            let mut length = 0;
+            loop {
+                line.clear();
+                reader.read_line(&mut line).unwrap();
+                if line == "\r\n" || line.is_empty() { break; }
+                if let Some(value) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+                    length = value.trim().parse::<usize>().unwrap();
+                }
+            }
+            reader.read_exact(&mut vec![0; length]).unwrap();
+            write!(connection, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", reply.len(), reply).unwrap();
+        });
+        let client = Client::new(Endpoint::new(ApiProtocol::OpenAi, url, None), model);
+        let mut stream = client.stream(&[ChatMessage::user("answer")], &[]).await.unwrap();
+        let mut tracker = TokenTracker::new(model.into());
+        tracker.on_turn_start(model.into(), 0);
+        while let Some(event) = stream.next().await {
+            match event.unwrap() {
+                LlmEvent::TextDelta(text) => {
+                    assert_eq!(text, raw);
+                    // The core keeps only fresh prose after extracting calls and overlaps.
+                    tracker.on_delta(&answer);
+                }
+                LlmEvent::ReasoningDelta(summary) => tracker.on_delta(&summary),
+                LlmEvent::Usage(usage) => tracker.on_usage(&usage),
+                _ => {}
+            }
+        }
+        server.join().unwrap();
+        flashagent_llm::note_measured(reference, &raw, visible);
+        assert_eq!(flashagent_llm::measurement_of(model), flashagent_llm::measurement_of(reference));
+        assert_eq!(flashagent_llm::measurement_of(model).unwrap().samples, 1);
+        assert_eq!(tracker.turn_output(), total);
+        assert_eq!(tracker.server_prompt, Some(1000));
+        assert_eq!(tracker.last_f_keep, Some(0.8));
+    }
+
+    #[test]
+    fn responses_output_is_not_relearned_from_filtered_or_repeated_ui_text() {
+        let model = "gpt-6.1-sol.responses-wire-calibration-test";
+        let answer = "This is the visible answer after the loop removes repeated prefixes and tool markup. ".repeat(10);
+        let raw = "A repeated continuation tail. ".repeat(8) + &answer
+            + "<tool_call>{\"name\":\"read_file\",\"arguments\":{\"path\":\"a.rs\"}}</tool_call>";
+        let visible = flashagent_llm::count_tokens(model, &raw) * 3 / 5;
+        flashagent_llm::note_measured(model, &raw, visible);
+        let learned = flashagent_llm::measurement_of(model).unwrap();
+        assert_eq!(learned.samples, 1);
+        let mut tracker = TokenTracker::new(model.into());
+        tracker.on_turn_start(model.into(), 0);
+        tracker.on_delta("A summary of hidden reasoning. ");
+        tracker.on_delta(&answer);
+        let total = visible + 2000;
+        tracker.on_usage(&flashagent_llm::Usage {
+            prompt: Some(1000), cached: Some(800), completion: Some(total as i64),
+            completion_measurement: flashagent_llm::CompletionMeasurement::Text(visible as i64),
+            ..Default::default()
+        });
+        assert_eq!(flashagent_llm::measurement_of(model), Some(learned));
+        assert_eq!(tracker.turn_output(), total, "hidden reasoning remains billed");
+        assert_eq!(tracker.server_prompt, Some(1000));
+        assert_eq!(tracker.last_f_keep, Some(0.8));
+        tracker.on_tool_call("read_file", "{}");
+        assert_eq!(flashagent_llm::measurement_of(model), Some(learned), "tool detection can arrive after usage");
+        tracker.on_request_start();
+        tracker.on_delta(&answer);
+        tracker.on_usage(&flashagent_llm::Usage {
+            completion: Some(visible as i64),
+            completion_measurement: flashagent_llm::CompletionMeasurement::Text(visible as i64),
+            ..Default::default()
+        });
+        assert_eq!(flashagent_llm::measurement_of(model), Some(learned));
+        assert_eq!(tracker.turn_output(), total + visible);
+    }
+
+    #[test]
+    fn unavailable_responses_measurements_do_not_poison_a_plausible_ratio() {
+        let model = "responses-unavailable-calibration-test";
+        let answer = "An incomplete measurement can still look like a plausible tokenizer ratio. ".repeat(10);
+        let count = flashagent_llm::count_tokens(model, &answer);
+        let mut tracker = TokenTracker::new(model.into());
+        tracker.on_turn_start(model.into(), 0);
+        tracker.on_delta(&answer);
+        tracker.on_usage(&flashagent_llm::Usage {
+            completion: Some((count + count / 5) as i64),
+            completion_measurement: flashagent_llm::CompletionMeasurement::Unavailable,
+            ..Default::default()
+        });
+        assert!(flashagent_llm::measurement_of(model).is_none());
+        assert_eq!(tracker.turn_output(), count + count / 5);
+    }
+
+    #[test]
+    fn full_reasoning_streams_keep_the_existing_calibration_path() {
+        let model = "full-reasoning-calibration-test";
+        let reference = "full-reasoning-reference-test";
+        let thought = "All of the reasoning is available on this protocol. ".repeat(8);
+        let answer = "And this is the answer that follows it. ".repeat(8);
+        let full = thought.clone() + &answer;
+        let count = flashagent_llm::count_tokens(model, &full) * 3 / 5;
+        let mut tracker = TokenTracker::new(model.into());
+        tracker.on_turn_start(model.into(), 0);
+        tracker.on_delta(&thought);
+        tracker.on_delta(&answer);
+        tracker.on_usage(&usage(count));
+        flashagent_llm::note_measured(reference, &full, count);
+        assert_eq!(flashagent_llm::measurement_of(model), flashagent_llm::measurement_of(reference));
+        assert_eq!(flashagent_llm::measurement_of(model).unwrap().samples, 1);
+    }
 
     #[test]
     fn a_draft_model_s_hit_rate_shows_while_the_turn_runs() {

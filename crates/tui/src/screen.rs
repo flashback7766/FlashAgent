@@ -54,7 +54,7 @@ pub struct Screen {
     cursor: Option<(u16, u16)>,
     /// Rows are compared before the theme recolours them, so a new theme has to
     /// rewrite them all.
-    theme: Option<crate::theme::ColorTheme>,
+    theme: Option<crate::theme::ResolvedTheme>,
     /// False until the first frame, and after anything else drew on the screen.
     valid: bool,
 }
@@ -95,13 +95,17 @@ impl Screen {
     /// frame is the one already shown.
     pub fn paint(&mut self, rows: &[String], cursor: Option<(u16, u16)>) {
         let (width, height) = crossterm::terminal::size().unwrap_or((100, 24));
-        let theme = crate::theme::active();
+        let theme = crate::theme::current();
+        self.use_theme(theme);
+        if let Some(frame) = self.compose(rows, cursor, width, height) {
+            let _ = write_frame(&crate::theme::recolor_with(theme, &frame));
+        }
+    }
+
+    fn use_theme(&mut self, theme: crate::theme::ResolvedTheme) {
         if self.theme != Some(theme) {
             self.theme = Some(theme);
             self.valid = false;
-        }
-        if let Some(frame) = self.compose(rows, cursor, width, height) {
-            let _ = write_frame(&crate::theme::recolor(&frame));
         }
     }
 
@@ -330,6 +334,37 @@ mod tests {
         assert!(frame.contains('a') && frame.contains('b'));
         let frame = s.compose(&rows(&["a", "b"]), None, 30, 5).unwrap();
         assert!(frame.contains('a') && frame.contains('b'));
+    }
+
+    #[test]
+    fn changing_a_palette_color_with_the_same_base_rewrites_all_raw_rows() {
+        use crate::theme::{recolor_with, ColorTheme, ResolvedTheme};
+        use flashagent_core::{RgbColor, ThemeColors};
+
+        let first = ResolvedTheme {
+            base: ColorTheme::Dark,
+            colors: ThemeColors { accent: Some(RgbColor(100, 150, 200)), ..ThemeColors::default() },
+        };
+        let second = ResolvedTheme {
+            colors: ThemeColors { accent: Some(RgbColor(200, 100, 150)), ..first.colors },
+            ..first
+        };
+        let raw = rows(&["\x1b[38;2;225;175;95malpha\x1b[0m", "beta", "gamma"]);
+        let mut s = Screen::new();
+        s.use_theme(first);
+        s.compose(&raw, None, 20, 4).unwrap();
+        s.use_theme(first);
+        assert!(s.compose(&raw, None, 20, 4).is_none());
+
+        s.use_theme(second);
+        let frame = s.compose(&raw, None, 20, 4).unwrap();
+        for row in ["alpha", "beta", "gamma", "\x1b[4;1H"] {
+            assert!(frame.contains(row), "old raw row was skipped: {frame:?}");
+        }
+        assert!(recolor_with(second, &frame).contains("38;2;200;100;150m"));
+        assert_eq!(s.rows[..3], raw);
+        s.use_theme(second);
+        assert!(s.compose(&raw, None, 20, 4).is_none());
     }
 
     #[test]

@@ -1585,7 +1585,7 @@ impl Renderer {
             // Every card closes from its own corner: the top row's last dash
             // becomes the ✕, and its cell is what a click there hits.
             if let Some(first) = tail.get_mut(first_overlay_line) {
-                self.overlay_close_col = with_close_button(&mut first.1);
+                self.overlay_close_col = with_close_button(&mut first.1, st.overlay_hover);
             }
             input_line_idx = tail.len().saturating_sub(1);
         } else {
@@ -1899,7 +1899,7 @@ impl Renderer {
 
 /// The card's top border gives its last dash to a ✕: same width, one cell of
 /// the run now says click-here-to-close. Returns the ✕'s visible column.
-fn with_close_button(line: &mut String) -> Option<u16> {
+fn with_close_button(line: &mut String, hover: Option<(usize, u16)>) -> Option<u16> {
     let corner = ['╮', '╯', '┤'].iter().filter_map(|c| line.rfind(*c)).max()?;
     let dash = line[..corner].rfind('─')?;
     let close_col = visible_width(&line[..dash]) as u16;
@@ -1908,10 +1908,12 @@ fn with_close_button(line: &mut String) -> Option<u16> {
         let rest = &line[at..];
         rest.split_once('m').map_or(String::new(), |(seq, _)| format!("{seq}m"))
     });
-    let styled = match border {
-        Some(border) => format!("\x1b[1;38;2;225;175;95m✕\x1b[0m{border}"),
-        None => "\x1b[1;38;2;225;175;95m✕\x1b[0m".to_string(),
+    let highlight = if hover.is_some_and(|(row, col)| row == 0 && (close_col..close_col + 2).contains(&col)) {
+        "\x1b[7;1;38;2;245;230;205m"
+    } else {
+        "\x1b[1;38;2;225;175;95m"
     };
+    let styled = format!("{highlight}✕\x1b[0m{}", border.unwrap_or_default());
     line.replace_range(dash..dash + '─'.len_utf8(), &styled);
     Some(close_col)
 }
@@ -1923,11 +1925,12 @@ impl App {
         self.show_progress(cx);
         // Read every frame, so leaving settings without saving restores the theme;
         // while Settings is open, the theme picked there is the one shown.
-        let shown_theme = match &self.overlay {
-            Some(Overlay::Settings(view)) => view.config.color_theme,
-            _ => self.config.color_theme,
+        let shown_config = match &self.overlay {
+            Some(Overlay::Settings(view)) => &view.config,
+            Some(Overlay::Theme(picker)) => &picker.preview,
+            _ => &self.config,
         };
-        theme::set(shown_theme);
+        theme::set_config(shown_config);
         let composer_flash = self.composer_flash();
         let channel_prompt: Option<String> = if self.uninstall_confirm {
             Some(
@@ -2245,14 +2248,19 @@ mod scrollbar_tests {
         let border = "\x1b[38;2;95;90;85m";
         let mut line = format!("{border}╭─ \x1b[1;38;2;225;175;95mPick\x1b[0m {border}{}╮\x1b[0m", "─".repeat(20));
         let width = visible_width(&line);
-        let col = with_close_button(&mut line);
+        let original = line.clone();
+        let col = with_close_button(&mut line, None);
         assert_eq!(col, Some(width as u16 - 2), "the cell before the corner");
         assert_eq!(visible_width(&line), width, "the corner keeps the card's width");
         assert!(line.contains('✕'), "{line:?}");
         assert!(line.contains("95;90;85m╮"), "the corner keeps its border colour: {line:?}");
+        let mut hovered = original;
+        assert_eq!(with_close_button(&mut hovered, Some((0, col.unwrap()))), col);
+        assert!(hovered.contains("\x1b[7;1;"), "the close button must answer its own hover");
+        assert_eq!(visible_width(&hovered), width);
         // A card whose top row is not a border gains nothing.
         let mut text = "no card here".to_string();
-        assert_eq!(with_close_button(&mut text), None);
+        assert_eq!(with_close_button(&mut text, None), None);
         assert_eq!(text, "no card here");
     }
 

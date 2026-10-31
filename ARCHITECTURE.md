@@ -126,7 +126,12 @@ Counting is one function, `flashagent_llm::count_tokens(model, text)`, for
 the budget, the context bar, the compaction, the memory block and the status
 line. The server's own usage corrects the estimate per model, and the
 difference is written to `~/.flashagent/tokens.json` and carried into the
-next run.
+next run. Responses calibration pairs the raw visible output with its count
+minus reported reasoning tokens, before the loop strips tool markup or repeated
+continuation tails. A reasoning summary is never measured against the hidden
+reasoning it describes. Native tool calls, unsupported output and reasoning
+without a usable breakdown are not calibration samples. The full reported
+completion still counts towards usage and budgets.
 
 The last line of the system prompt carries what the context has used and
 what is left, rounded down to a twentieth of the window. It moves in steps
@@ -292,7 +297,12 @@ graph LR
   layout lacks (`{` on a Russian one) comes from the console as an Alt code,
   a key release with no press before it, and is taken as typed.
 - Themes are applied to the finished frame by rewriting its 24-bit colour
-  sequences, so the drawing code has one palette.
+  sequences, so the drawing code has one palette. Configured `theme_palettes`
+  inherit a built-in base and override named colour roles matched to that
+  palette's anchors and nearby shades. `Screen` compares the resolved base and
+  colours, so switching two palettes with the same base repaints settled rows.
+  `/theme` previews without changing config; Enter saves, Esc and the close
+  button restore the previous selection.
 - Motion (Settings → Animations) goes through `anim::enabled()`. Off, only
   the spinner moves.
 - The composer is `composer::Composer`: text and a cursor that steps over

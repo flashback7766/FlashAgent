@@ -6,6 +6,7 @@ use flashagent_tui::memory_view::MemoryModal;
 /// one is open; opening another replaces it.
 pub(crate) enum Overlay {
     Effort(SelectMenu<String>),
+    Theme(Box<ThemePicker>),
     Model(SelectMenu<String>),
     /// /provider: switch, add or edit.
     Provider(SelectMenu<String>),
@@ -37,6 +38,7 @@ impl Overlay {
     pub(crate) fn select_menu_mut(&mut self) -> Option<&mut SelectMenu<String>> {
         match self {
             Overlay::Effort(menu) | Overlay::Model(menu) | Overlay::Provider(menu) | Overlay::Sessions(menu) | Overlay::Palette(menu) => Some(menu),
+            Overlay::Theme(picker) => Some(&mut picker.menu),
             _ => None,
         }
     }
@@ -47,6 +49,11 @@ impl Overlay {
     /// passing it to the conversation behind it.
     pub(crate) fn wheel(&mut self, dir: i32) -> bool {
         match self {
+            Overlay::Theme(picker) => {
+                let moved = picker.menu.wheel(dir);
+                picker.refresh_preview();
+                moved
+            }
             Overlay::Settings(view) => view.wheel(dir),
             Overlay::Providers(view) => view.wheel(dir),
             Overlay::Sampling(view) => view.wheel(dir),
@@ -73,6 +80,7 @@ impl Overlay {
             Overlay::Effort(menu) | Overlay::Model(menu) | Overlay::Provider(menu) | Overlay::Sessions(menu) | Overlay::Palette(menu) => {
                 menu.render_in(width, height.saturating_sub(MENU_FOOTER_ROWS), hover.map(|(line, _)| line), flash)
             }
+            Overlay::Theme(picker) => picker.menu.render_in(width, height.saturating_sub(MENU_FOOTER_ROWS), hover.map(|(line, _)| line), flash),
             Overlay::Providers(view) => view.render(width),
             Overlay::Rewind(card) => card.render(width),
             Overlay::Settings(view) => view.render(width, hover, flash),
@@ -139,14 +147,18 @@ impl App {
                 // the keys use — the palette runs its command, the model menu
                 // switches. A pending question outranks the menu, so the
                 // click only moves the selection and waits for the keys.
-                let confirms = other.select_menu_mut().is_some_and(|menu| menu.click(line));
-                if confirms && cx.gate.pending().is_none() && cx.question_gate.pending().is_none() {
+                use flashagent_tui::select::MenuClick;
+                let action = other.select_menu_mut().map_or(MenuClick::None, |menu| menu.click(line));
+                if let Overlay::Theme(picker) = &mut other {
+                    picker.refresh_preview();
+                }
+                if action == MenuClick::Select && cx.gate.pending().is_none() && cx.question_gate.pending().is_none() {
                     self.overlay = Some(other);
                     self.handle_overlay_key(cx, KeyCode::Enter, KeyModifiers::NONE).await;
                     return true;
                 }
                 self.overlay = Some(other);
-                false
+                action != MenuClick::None
             }
             None => false,
         }
@@ -177,6 +189,14 @@ impl App {
             })
             .collect();
         self.open_overlay(Overlay::Palette(SelectMenu::new(flashagent_tui::i18n::tr("Command palette"), items).with_noun(flashagent_tui::select::Noun::COMMANDS)));
+    }
+
+    pub(crate) fn dismiss_overlay(&mut self) {
+        self.overlay = match self.overlay.take() {
+            Some(Overlay::Theme(picker)) => picker.return_to.map(Overlay::Settings),
+            _ => None,
+        };
+        self.renderer.request_reprint();
     }
 
     pub(crate) fn open_overlay(&mut self, overlay: Overlay) {

@@ -1895,7 +1895,7 @@ mod tests {
                 MockTurn {
                     events: vec![
                         Ok(LlmEvent::ToolCallDelta { index: 0, id: Some("a".into()), name: Some("shell".into()), args_delta: "{}".into() }),
-                        Ok(LlmEvent::Usage(flashagent_llm::Usage { prompt: Some(5000), completion: Some(5000), cached: None, mtp: None, cost: None, cost_details: None })),
+                        Ok(LlmEvent::Usage(flashagent_llm::Usage { prompt: Some(5000), completion: Some(5000), cached: None, mtp: None, cost: None, cost_details: None, ..Default::default() })),
                         Ok(LlmEvent::Done(FinishReason::ToolUse)),
                     ],
                 },
@@ -1984,6 +1984,7 @@ mod tests {
                     cached: None,
                     mtp: None,
                     cost: None, cost_details: None,
+                    ..Default::default()
                 })),
                 Ok(LlmEvent::Done(FinishReason::ToolUse)),
             ],
@@ -2199,7 +2200,7 @@ mod tests {
         let cut_off = || MockTurn {
             events: vec![
                 Ok(LlmEvent::ToolCallDelta { index: 0, id: Some("c".into()), name: Some("shell".into()), args_delta: "{\"cmd\":\"l".into() }),
-                Ok(LlmEvent::Usage(flashagent_llm::Usage { prompt: Some(10), completion: Some(600), cached: None, mtp: None, cost: None, cost_details: None })),
+                Ok(LlmEvent::Usage(flashagent_llm::Usage { prompt: Some(10), completion: Some(600), cached: None, mtp: None, cost: None, cost_details: None, ..Default::default() })),
                 Ok(LlmEvent::Done(FinishReason::Length)),
             ],
         };

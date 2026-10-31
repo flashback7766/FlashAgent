@@ -29,7 +29,7 @@ pub use tokenizer::{
     count_tokens, load_measurements, measurement_of, measurements, measurements_path, note_measured, save_measurements,
     set_measurement, Measurement,
 };
-pub use types::{ChatMessage, FinishReason, LlmError, LlmEvent, MtpStats, Role, ThinkingEffort, ToolCall, ToolSpec, TurnOptions, Usage, estimate_tokens};
+pub use types::{ChatMessage, CompletionMeasurement, FinishReason, LlmError, LlmEvent, MtpStats, Role, ThinkingEffort, ToolCall, ToolSpec, TurnOptions, Usage, estimate_tokens};
 
 use async_trait::async_trait;
 use futures::stream::BoxStream;

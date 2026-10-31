@@ -15,7 +15,7 @@
 
 </div>
 
-> **Status:** Stable v1.0.0 · Beta b634 — small changes roll out on the beta first and ride into the next stable release.
+> **Status:** Stable v1.0.0 · Beta b649 — small changes roll out on the beta first and ride into the next stable release.
 
 ## Quick start
 
@@ -329,6 +329,41 @@ FlashAgent starts in the mode you left it in. Reads inside the project and web t
 
 **Interface** — English or Russian, chosen in Settings → General and switched on the spot: the footer, `/help`, the panels, the cards and the notifications follow the choice. The system prompt stays English, and the model answers in the language the user wrote in.
 
+**Reasoning** — readable thoughts or Responses summaries are folded by default; <kbd>F2</kbd> or <kbd>Ctrl</kbd>+<kbd>O</kbd> opens them, and “click to show all” expands a long preview. Encrypted reasoning replay is opaque state returned to the provider, not text the app can display. Reasoning token usage alone does not mean the provider sent a readable summary.
+
+### Color themes
+
+`/theme` opens a searchable picker with live preview. Move with the arrows, page keys or mouse wheel; **Enter** or a click on a theme saves it, **Esc** or **✕** restores the previous theme. `/theme <name>` switches directly, including while the model is answering. Settings → UI → Color theme opens the same picker and returns to Settings; selecting a theme saves only that choice, not other pending settings.
+
+The built-in identifiers are `dark`, `midnight`, `high_contrast`, `monochrome`, `ansi16` and `light`. They still use the existing `color_theme` setting. To add a palette, merge these fields into `config.json` and restart the app:
+
+```json
+{
+  "color_theme": "midnight",
+  "active_theme_palette": "aurora",
+  "theme_palettes": {
+    "aurora": {
+      "base": "midnight",
+      "colors": {
+        "text": "#e5e9f0",
+        "muted": "#a0abc0",
+        "border": "#596779",
+        "surface": "#253449",
+        "accent": "#b48ead",
+        "info": "#88c0d0",
+        "success": "#a3be8c",
+        "warning": "#ebcb8b",
+        "error": "#bf616a"
+      }
+    }
+  }
+}
+```
+
+Every color is optional and uses `#RRGGBB`; omitted roles inherit `base` (Dark when omitted). Names are 1–64 ASCII letters, digits, `_` or `-`, start with a letter or digit, and must not collide with built-in names or one another ignoring case. A malformed palette is reported and skipped without losing valid siblings or other settings. A missing selected palette falls back to `color_theme`; older builds can still read that built-in fallback.
+
+Roles match the app's existing RGB palette and nearby shades at frame output, preserving brightness variations in animations. Unmatched colors retain the base theme; this is not a new drawing API or a change to the terminal's own default background. `ansi16` palettes stay within the terminal's 16 colors. An explicitly selected custom palette keeps its chosen base even when `COLORFGBG` reports a light terminal.
+
 **MCP** — add servers in `.mcp.json` (project) or `~/.flashagent/mcp.json` (global), browse a small vetted marketplace with `/mcp market`, install with `/mcp add <id>`, test with `/mcp test <name>`. A server named in a project's `.mcp.json` asks before it starts, and remembers the answer together with the command it approved. Mark a server or individual tools `read_only` to skip approval for them — only your config can do that; a server's own claims (tool names, `readOnlyHint`) never bypass an approval card.
 
 ```json
@@ -383,7 +418,7 @@ FlashAgent starts in the mode you left it in. Reads inside the project and web t
 | <kbd>→</kbd> | Accept the suggested follow-up prompt |
 | <kbd>PgUp</kbd> / <kbd>PgDn</kbd> · <kbd>Shift</kbd>+<kbd>↑</kbd> / <kbd>Shift</kbd>+<kbd>↓</kbd> · mouse wheel | Scroll the conversation; the prompt stays where it is · <kbd>End</kbd> or <kbd>Esc</kbd> returns to the bottom |
 
-Type `/help` for every slash command: `/goal`, `/mode`, `/model`, `/provider`, `/effort`, `/context`, `/compact`, `/rewind`, `/resume`, `/mcp`, `/skills`, `/tools`, `/rules`, `/safe`, `/sampling`, `/notices`, `/cost`, `/tasks`, `/diff`, `/commit`, `/export`, `/update`, `/channel`, `/exit` and more.
+Type `/help` for every slash command: `/goal`, `/mode`, `/model`, `/provider`, `/theme`, `/effort`, `/context`, `/compact`, `/rewind`, `/resume`, `/mcp`, `/skills`, `/tools`, `/rules`, `/safe`, `/sampling`, `/notices`, `/cost`, `/tasks`, `/diff`, `/commit`, `/export`, `/update`, `/channel`, `/exit` and more.
 
 ---
 

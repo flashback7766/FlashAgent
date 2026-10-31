@@ -1376,6 +1376,7 @@ mod tests {
                         cached: Some(30),
                         mtp: None,
                         cost: None, cost_details: None,
+                        ..Default::default()
                     })),
                     Ok(LlmEvent::TextDelta("done".into())),
                     Ok(LlmEvent::Done(FinishReason::Stop)),

@@ -76,6 +76,7 @@ impl App {
                 Overlay::Providers(view) => self.providers_key(cx, view, code, mods).await,
                 Overlay::Rewind(card) => self.rewind_key(cx, card, code),
                 Overlay::Effort(menu) => self.effort_menu_key(cx, menu, code),
+                Overlay::Theme(picker) => self.theme_menu_key(picker, code, mods),
                 Overlay::Tools(view) => self.tools_key(cx, view, code, mods),
                 Overlay::Notices(mut view) => {
                     use flashagent_tui::notice_log::NoticeAction;
@@ -359,6 +360,7 @@ impl App {
                 self.keep_settings(cx, &settings.config, shown_mode, shown_effort);
                 self.open_effort_menu(cx.source);
             }
+            SettingsAction::OpenThemeMenu => self.open_theme_menu(Some(settings)),
             SettingsAction::OpenWizard => {
                 self.keep_settings(cx, &settings.config, shown_mode, shown_effort);
                 self.run_setup_in_app(cx, false).await;
@@ -960,6 +962,38 @@ impl App {
         let mut menu = build_model_menu(source, &self.config.active_profile().name);
         menu.select_by_value(&self.current_model);
         self.open_overlay(Overlay::Model(menu));
+    }
+
+    pub(crate) fn open_theme_menu(&mut self, settings: Option<Box<SettingsView>>) {
+        let config = settings.as_ref().map_or(&self.config, |view| &view.config).clone();
+        self.open_overlay(Overlay::Theme(Box::new(ThemePicker::new(&config, settings))));
+    }
+
+    fn theme_menu_key(&mut self, mut picker: Box<ThemePicker>, code: KeyCode, mods: KeyModifiers) {
+        match code {
+            KeyCode::Esc => {
+                self.overlay = picker.return_to.map(Overlay::Settings);
+                return;
+            }
+            KeyCode::Enter if !picker.menu.filtered_indices().is_empty() => {
+                picker.refresh_preview();
+                self.config.color_theme = picker.preview.color_theme;
+                self.config.active_theme_palette = picker.preview.active_theme_palette.clone();
+                self.save_config();
+                let theme = picker.preview.color_theme;
+                let palette = picker.preview.active_theme_palette.clone();
+                self.overlay = picker.return_to.map(|mut settings| {
+                    settings.config.color_theme = theme;
+                    settings.config.active_theme_palette = palette;
+                    Overlay::Settings(settings)
+                });
+                return;
+            }
+            KeyCode::Tab => picker.menu.down(),
+            _ => navigate_menu(&mut picker.menu, code, mods),
+        }
+        picker.refresh_preview();
+        self.overlay = Some(Overlay::Theme(picker));
     }
 
     pub(crate) fn open_effort_menu(&mut self, source: &BackendSource) {

@@ -1,5 +1,81 @@
 use super::*;
 
+pub(crate) struct ThemePicker {
+    pub menu: SelectMenu<String>,
+    pub preview: AppConfig,
+    pub return_to: Option<Box<SettingsView>>,
+    original: (flashagent_core::ColorTheme, Option<String>),
+}
+
+impl ThemePicker {
+    pub fn new(config: &AppConfig, return_to: Option<Box<SettingsView>>) -> Self {
+        let mut menu = SelectMenu::new(
+            tr("Color theme · preview"),
+            flashagent_tui::autocomplete::theme_entries(config).into_iter().map(|(name, label)| {
+                SelectItem::new(label, name.clone()).with_search_text(name)
+            }).collect(),
+        ).with_noun(flashagent_tui::select::Noun::OPTIONS);
+        menu.select_by_value(&config.theme_name().to_string());
+        Self {
+            menu,
+            preview: config.clone(),
+            return_to,
+            original: (config.color_theme, config.active_theme_palette.clone()),
+        }
+    }
+
+    pub fn refresh_preview(&mut self) {
+        self.preview.color_theme = self.original.0;
+        self.preview.active_theme_palette = self.original.1.clone();
+        if !self.menu.filtered_indices().is_empty() {
+            if let Some(name) = self.menu.selected_value() {
+                self.preview.select_theme(name);
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod theme_picker_tests {
+    use super::*;
+
+    #[test]
+    fn builtin_identifiers_are_searchable_alongside_translated_labels() {
+        let config = AppConfig::default();
+        for theme in flashagent_core::ColorTheme::all() {
+            let mut picker = ThemePicker::new(&config, None);
+            for item in &mut picker.menu.items {
+                item.label = flashagent_tui::i18n::translate(flashagent_tui::i18n::Lang::Russian, &item.label).to_string();
+            }
+            theme.id().chars().for_each(|c| picker.menu.push_filter_char(c));
+            assert!(!picker.menu.filtered_indices().is_empty(), "{} must match in either language", theme.id());
+            assert_eq!(picker.menu.selected_value().map(String::as_str), Some(theme.id()));
+            picker.refresh_preview();
+            assert_eq!(picker.preview.theme_name(), theme.id());
+        }
+    }
+
+    #[test]
+    fn the_picker_keeps_builtin_and_custom_themes_and_previews_without_mutating_config() {
+        let (config, rejected) = AppConfig::from_json_str(r##"{
+            "color_theme":"midnight",
+            "active_theme_palette":"aurora",
+            "theme_palettes":{"aurora":{"base":"midnight","colors":{"accent":"#abcdef"}}}
+        }"##);
+        assert!(rejected.is_empty());
+        let mut picker = ThemePicker::new(&config, None);
+        assert_eq!(picker.menu.items.len(), flashagent_core::ColorTheme::all().len() + 1);
+        assert_eq!(picker.menu.selected_value().map(String::as_str), Some("aurora"));
+        picker.menu.select_by_value(&"light".to_string());
+        picker.refresh_preview();
+        assert_eq!(picker.preview.theme_name(), "light");
+        assert_eq!(config.theme_name(), "aurora");
+        picker.menu.push_filter_char('!');
+        picker.refresh_preview();
+        assert_eq!(picker.preview.theme_name(), "aurora", "an empty search cannot preview a hidden item");
+    }
+}
+
 /// Titled with the provider, so a switch shows whose models these are.
 pub(crate) fn build_model_menu(source: &BackendSource, provider: &str) -> SelectMenu<String> {
     let title = flashagent_tui::i18n::tr("Select model · {provider}").replace("{provider}", provider);

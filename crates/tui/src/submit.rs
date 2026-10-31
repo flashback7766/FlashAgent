@@ -25,6 +25,7 @@ const HELP_COMMANDS: &[(&str, &str)] = &[
     ("/goal <task>", "an autonomous run; its limits are in Settings \u{2192} Goal"),
     ("/resume", "pick a saved session from this folder and continue it"),
     ("/settings, Tab", "settings"),
+    ("/theme [name]", "preview a color theme; Enter saves, Esc cancels"),
     ("/model, /m, F3", "choose and switch the model"),
     ("/provider [name]", "switch to another saved provider, local or cloud; add or edit them"),
     ("/effort, /t, F4", "thinking effort (also Ctrl+T)"),
@@ -155,7 +156,7 @@ fn while_running(name: &str) -> WhileRunning {
     match name {
         "help" | "?" | "whatsnew" | "changelog" | "memory" | "memories" | "context" | "verbose" | "expand" | "think"
         | "o" | "diff" | "commit" | "settings" | "config" | "sampling" | "params" | "effort" | "thinking" | "t"
-        | "model" | "models" | "m" | "mode" | "skills" | "tools" | "notices" | "log" | "safe" | "rules" | "cost" => {
+        | "model" | "models" | "m" | "mode" | "skills" | "tools" | "notices" | "log" | "safe" | "rules" | "cost" | "theme" => {
             WhileRunning::Now
         }
         "compact" | "clear" | "export" | "rewind" => WhileRunning::AfterTurn,
@@ -374,6 +375,17 @@ impl App {
             "settings" | "config" => {
                 let view = self.runtime_settings(cx.perm.state().mode(), cx.source);
                 self.open_overlay(Overlay::Settings(Box::new(view)));
+            }
+            "theme" if arg.is_empty() => self.open_theme_menu(None),
+            "theme" => {
+                if self.config.select_theme(arg) {
+                    self.save_config();
+                } else {
+                    self.input.set(typed);
+                    self.say(BackgroundNotice::fading(
+                        tr_fill("Unknown color theme: {name}; /theme lists the available themes", &[("name", arg)]), 8,
+                    ).warning());
+                }
             }
             "cost" => self.show_cost(),
             "whatsnew" | "changelog" => self.show_whatsnew(cx).await,
@@ -1348,7 +1360,7 @@ mod tests {
 
     #[test]
     fn a_command_typed_during_a_turn_runs_waits_or_is_refused_by_what_it_touches() {
-        for name in ["help", "verbose", "diff", "mode", "effort", "model", "memory", "context", "cost"] {
+        for name in ["help", "verbose", "diff", "mode", "effort", "model", "memory", "context", "cost", "theme"] {
             assert_eq!(while_running(name), WhileRunning::Now, "{name}");
         }
         // The conversation belongs to the turn until it ends.

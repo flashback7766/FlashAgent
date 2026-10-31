@@ -15,6 +15,7 @@ pub enum SettingsAction {
     OpenModelMenu,
     /// The F4 effort menu.
     OpenEffortMenu,
+    OpenThemeMenu,
     OpenWizard,
     /// The sampling menu (advanced).
     OpenSamplingMenu,
@@ -229,7 +230,11 @@ impl SettingsView {
             (crate::i18n::tr("Generation speed"), if self.config.show_tokens { crate::i18n::tr("Enabled (t/s while the model writes)").into() } else { crate::i18n::tr("Disabled").into() }),
             (crate::i18n::tr("Clipboard toasts"), if self.config.show_toasts { crate::i18n::tr("Enabled").into() } else { crate::i18n::tr("Disabled").into() }),
             (crate::i18n::tr("Animations"), if self.config.animations { crate::i18n::tr("Enabled (sweeps, pulses, unfolding panels)").into() } else { crate::i18n::tr("Reduced (spinners only)").into() }),
-            (crate::i18n::tr("Color theme"), crate::i18n::tr(self.config.color_theme.label()).to_string()),
+            (crate::i18n::tr("Color theme"), if self.config.active_palette().is_some() {
+                self.config.theme_name().to_string()
+            } else {
+                crate::i18n::tr(self.config.color_theme.label()).to_string()
+            }),
         ],
         SettingsTab::Reasoning => vec![
             (crate::i18n::tr("Thinking effort"), self.config.thinking_effort.clone()),
@@ -465,10 +470,7 @@ impl SettingsView {
                     self.config.animations = !self.config.animations;
                     SettingsAction::None
                 }
-                6 => {
-                    self.cycle_theme();
-                    SettingsAction::None
-                }
+                6 => SettingsAction::OpenThemeMenu,
                 _ => SettingsAction::None,
             },
             SettingsTab::Reasoning => match self.selected_index {
@@ -549,7 +551,7 @@ impl SettingsView {
                 3 => self.config.show_tokens = !self.config.show_tokens,
                 4 => self.config.show_toasts = !self.config.show_toasts,
                 5 => self.config.animations = !self.config.animations,
-                6 => self.cycle_theme(),
+                6 => self.cycle_theme(delta),
                 _ => {}
             },
             SettingsTab::Reasoning => match self.selected_index {
@@ -637,9 +639,11 @@ impl SettingsView {
     }
 
     /// Applied at once: a theme picked by name is guesswork until seen.
-    fn cycle_theme(&mut self) {
-        self.config.color_theme = self.config.color_theme.next();
-        crate::theme::set(self.config.color_theme);
+    fn cycle_theme(&mut self, delta: i32) {
+        let entries = crate::autocomplete::theme_entries(&self.config);
+        let current = entries.iter().position(|(name, _)| name == self.config.theme_name()).unwrap_or(0);
+        let next = (current as i32 + delta).rem_euclid(entries.len() as i32) as usize;
+        self.config.select_theme(&entries[next].0);
     }
 
     fn cycle_sampling(&mut self) {
@@ -1012,15 +1016,19 @@ mod tests {
     }
 
     #[test]
-    fn the_color_theme_row_changes_the_theme() {
+    fn the_color_theme_row_opens_a_picker_without_committing_a_theme() {
         let mut view = SettingsView::new(AppConfig::default(), Vec::new());
         view.handle_key(KeyCode::Char('3'), KeyModifiers::empty());
         while view.items()[view.selected_index].0 != "Color theme" {
             view.handle_key(KeyCode::Down, KeyModifiers::empty());
         }
         let before = view.config.color_theme;
-        view.handle_key(KeyCode::Enter, KeyModifiers::empty());
+        assert_eq!(view.handle_key(KeyCode::Enter, KeyModifiers::empty()), SettingsAction::OpenThemeMenu);
+        assert_eq!(view.config.color_theme, before);
+        view.handle_key(KeyCode::Right, KeyModifiers::empty());
         assert_ne!(view.config.color_theme, before);
+        view.handle_key(KeyCode::Left, KeyModifiers::empty());
+        assert_eq!(view.config.color_theme, before);
     }
 
     #[test]

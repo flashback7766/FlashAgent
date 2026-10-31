@@ -648,6 +648,27 @@ fn a_click_on_a_thought_opens_it() {
 }
 
 #[test]
+fn a_keyboard_expanded_thought_can_be_opened_past_its_preview() {
+    let thought = (0..30).map(|i| format!("Reasoning step {i} checks candidate {}", i * 7 + 1)).collect::<Vec<_>>().join("\n") + "\nREASONING_TAIL";
+    let server = MockServer::start(vec![Reply::Text(format!("<think>{thought}</think>Reasoning answer complete."))]);
+    let home = Home::new();
+    let mut term = ready_with(&home, &server, serde_json::json!({"animations":false}));
+    ask(&term, "think through the answer", "Reasoning answer complete.");
+    let folded = term.wait_for("Thought:", WAIT);
+    assert!(!folded.contains("REASONING_TAIL"));
+    term.type_text("/verbose all");
+    term.send(ENTER);
+    term.wait_for("click to show all", WAIT);
+    let (row, col) = term.find_on_screen("click to show all").unwrap();
+    term.click(row, col);
+    term.wait_gone("click to show all", WAIT);
+    term.send("\x1b[F");
+    term.wait_for("REASONING_TAIL", WAIT);
+    assert_eq!(server.turns().len(), 1);
+    quit(&mut term);
+}
+
+#[test]
 fn uninstall_asks_first_and_no_keeps_the_app_running() {
     let server = MockServer::start(Vec::new());
     let home = Home::new();
@@ -941,6 +962,579 @@ fn the_colour_theme_repaints_the_whole_screen() {
     );
 }
 
+const THEME_PREVIEW: &str = "Color theme · preview";
+const THEME_TEXT: vt100::Color = vt100::Color::Rgb(232, 227, 218);
+const AURORA_TEXT: vt100::Color = vt100::Color::Rgb(171, 205, 239);
+const EMBER_TEXT: vt100::Color = vt100::Color::Rgb(18, 52, 86);
+
+fn theme_palettes_config() -> serde_json::Value {
+    serde_json::json!({
+        "color_theme": "dark",
+        "theme_palettes": {
+            "aurora": { "base": "midnight", "colors": { "text": "#abcdef", "accent": "#fedcba" } },
+            "ember": { "base": "midnight", "colors": { "text": "#123456", "accent": "#fdb975" } }
+        }
+    })
+}
+
+fn theme_config(home: &Home) -> serde_json::Value {
+    serde_json::from_str(&std::fs::read_to_string(home.config_path()).expect("the config is readable")).unwrap()
+}
+
+fn theme_start(home: &Home, args: &[&str], size: (u16, u16)) -> Term {
+    // The host terminal must not turn the canonical dark text into Light.
+    Term::start_with_env(home, args, size.0, size.1, &[
+        ("FLASHAGENT_RECAP_IDLE_SECS", "0"), ("COLORFGBG", "15;0"),
+    ])
+}
+
+fn theme_ready(home: &Home, server: &MockServer, mut config: serde_json::Value) -> Term {
+    config["animations"] = serde_json::json!(false);
+    home.set_up_with(&server.url, config);
+    let term = theme_start(home, &["-y"], (COLS, ROWS));
+    term.wait_for(PROMPT, WAIT);
+    term
+}
+
+fn theme_picker(term: &Term) -> String {
+    term.type_text("/theme");
+    term.send(ENTER);
+    let screen = term.wait_for("Esc cancel", WAIT);
+    assert!(screen.contains(THEME_PREVIEW), "the theme picker has no preview title:\n{screen}");
+    assert!(screen.contains("Enter select"), "the complete picker footer is missing:\n{screen}");
+    screen
+}
+
+fn wait_theme_foreground(term: &Term, marker: &str, expected: vt100::Color) {
+    let start = Instant::now();
+    loop {
+        let actual = term.foreground_of(marker);
+        if actual == Some(expected) {
+            return;
+        }
+        assert!(start.elapsed() < WAIT,
+            "waited {WAIT:?} for {marker:?} to be {expected:?}, got {actual:?}:\n{}", term.screen());
+        std::thread::sleep(Duration::from_millis(40));
+    }
+}
+
+fn wait_settings_row(term: &Term, label: &str, value: &str) -> String {
+    let start = Instant::now();
+    loop {
+        let screen = term.screen();
+        if screen.lines().any(|line| line.contains(label) && line.contains(value)) {
+            return screen;
+        }
+        assert!(start.elapsed() < WAIT, "waited {WAIT:?} for {label:?} = {value:?}:\n{screen}");
+        std::thread::sleep(Duration::from_millis(40));
+    }
+}
+
+#[test]
+fn theme_picker_previews_rolls_back_and_persists_builtin_on_restart() {
+    let marker = "Settled builtin theme marker.";
+    let server = MockServer::start(vec![Reply::Text(marker.into())]);
+    let home = Home::new();
+    let mut term = theme_ready(&home, &server, theme_palettes_config());
+    ask(&term, "leave a colour marker", marker);
+    wait_theme_foreground(&term, marker, THEME_TEXT);
+    let original = theme_config(&home);
+
+    let screen = theme_picker(&term);
+    for label in ["Dark", "Midnight", "High contrast", "Monochrome", "Terminal 16 colors", "Light background"] {
+        assert!(screen.contains(label), "the picker omitted {label:?}:\n{screen}");
+    }
+    term.send(DOWN);
+    term.wait_for("› Midnight", WAIT);
+    wait_theme_foreground(&term, marker, vt100::Color::Rgb(180, 199, 255));
+    assert_eq!(theme_config(&home), original, "moving the selection saved the preview");
+    term.send("\x1b[6~");
+    term.wait_for("› ember", WAIT);
+    wait_theme_foreground(&term, marker, EMBER_TEXT);
+    assert_eq!(theme_config(&home), original, "PageDown saved the preview");
+    term.send(ESC);
+    term.wait_gone(THEME_PREVIEW, WAIT);
+    term.wait_for(PROMPT, WAIT);
+    wait_theme_foreground(&term, marker, THEME_TEXT);
+    assert_eq!(theme_config(&home), original, "Esc saved a cancelled preview");
+
+    theme_picker(&term);
+    term.type_text("monochrome");
+    term.wait_for("› Monochrome", WAIT);
+    wait_theme_foreground(&term, marker, vt100::Color::Rgb(231, 231, 231));
+    assert_eq!(theme_config(&home), original, "filtering committed without Enter");
+    term.send(ENTER);
+    term.wait_gone(THEME_PREVIEW, WAIT);
+    term.wait_for(PROMPT, WAIT);
+    let saved = theme_config(&home);
+    assert_eq!(saved["color_theme"], "monochrome", "{saved}");
+    assert!(saved["active_theme_palette"].is_null(), "a builtin kept a custom palette: {saved}");
+    quit(&mut term);
+
+    let mut term = theme_start(&home, &["-y", "--continue"], (COLS, ROWS));
+    term.wait_for(marker, WAIT);
+    term.wait_for("Resumed session", WAIT);
+    wait_theme_foreground(&term, marker, vt100::Color::Rgb(231, 231, 231));
+    assert_eq!(theme_config(&home)["color_theme"], "monochrome");
+    quit(&mut term);
+}
+
+#[test]
+fn theme_custom_commands_repaint_settled_rows_and_survive_restart() {
+    let marker = "Settled same-base palette marker.";
+    let server = MockServer::start(vec![Reply::Text(marker.into())]);
+    let home = Home::new();
+    let mut term = theme_ready(&home, &server, theme_palettes_config());
+    ask(&term, "leave an old transcript row", marker);
+    wait_theme_foreground(&term, marker, THEME_TEXT);
+    let palettes = theme_config(&home)["theme_palettes"].clone();
+
+    for (name, colour) in [("aurora", AURORA_TEXT), ("ember", EMBER_TEXT)] {
+        term.type_text(&format!("/theme {name}"));
+        term.send(ENTER);
+        term.wait_for(PROMPT, WAIT);
+        // Both bases are Midnight: a cache keyed only by the builtin misses this repaint.
+        wait_theme_foreground(&term, marker, colour);
+        let saved = theme_config(&home);
+        assert_eq!(saved["color_theme"], "midnight", "{saved}");
+        assert_eq!(saved["active_theme_palette"], name, "{saved}");
+        assert_eq!(saved["theme_palettes"], palettes, "choosing a palette rewrote its definition");
+    }
+    assert_eq!(server.turns().len(), 1, "a theme command became a model turn");
+    quit(&mut term);
+
+    let mut term = theme_start(&home, &["-y", "--continue"], (COLS, ROWS));
+    term.wait_for(marker, WAIT);
+    term.wait_for("Resumed session", WAIT);
+    wait_theme_foreground(&term, marker, EMBER_TEXT);
+    assert_eq!(theme_config(&home)["active_theme_palette"], "ember");
+    term.type_text("/theme dark");
+    term.send(ENTER);
+    term.wait_gone("› /theme dark", WAIT);
+    wait_theme_foreground(&term, marker, THEME_TEXT);
+    let saved = theme_config(&home);
+    assert_eq!(saved["color_theme"], "dark", "{saved}");
+    assert!(saved["active_theme_palette"].is_null(), "a builtin did not clear the custom choice: {saved}");
+    assert_eq!(saved["theme_palettes"], palettes);
+    quit(&mut term);
+}
+
+#[test]
+fn theme_unknown_name_keeps_the_config_and_typed_command() {
+    let marker = "Settled unknown-theme marker.";
+    let server = MockServer::start(vec![Reply::Text(marker.into())]);
+    let home = Home::new();
+    let mut config = theme_palettes_config();
+    config["color_theme"] = serde_json::json!("midnight");
+    config["active_theme_palette"] = serde_json::json!("aurora");
+    let mut term = theme_ready(&home, &server, config);
+    ask(&term, "leave a marker before a typo", marker);
+    wait_theme_foreground(&term, marker, AURORA_TEXT);
+    let original = theme_config(&home);
+
+    term.type_text("/theme not-a-palette");
+    term.send(ENTER);
+    term.wait_for("Unknown color theme: not-a-palette; /theme lists the available themes", WAIT);
+    term.wait_for("› /theme not-a-palette", WAIT);
+    wait_theme_foreground(&term, marker, AURORA_TEXT);
+    assert_eq!(theme_config(&home), original, "an unknown name changed the config");
+    assert_eq!(server.turns().len(), 1, "the typo was sent to the model");
+    term.send("\x15");
+    term.wait_for(PROMPT, WAIT);
+    quit(&mut term);
+}
+
+#[test]
+fn theme_custom_preview_close_and_empty_filter_cannot_commit() {
+    let marker = "Settled cancelled-custom marker.";
+    let server = MockServer::start(vec![Reply::Text(marker.into())]);
+    let home = Home::new();
+    let mut config = theme_palettes_config();
+    config["color_theme"] = serde_json::json!("midnight");
+    config["active_theme_palette"] = serde_json::json!("aurora");
+    let mut term = theme_ready(&home, &server, config);
+    ask(&term, "leave a row before previewing", marker);
+    wait_theme_foreground(&term, marker, AURORA_TEXT);
+    let original = theme_config(&home);
+
+    theme_picker(&term);
+    let (row, col) = term.find_on_screen(THEME_PREVIEW).expect("the whole picker is visible");
+    term.send(&format!("\x1b[<65;{col};{row}M"));
+    term.wait_for("› ember", WAIT);
+    wait_theme_foreground(&term, marker, EMBER_TEXT);
+    assert_eq!(theme_config(&home), original, "wheel preview saved a custom choice");
+    term.send(&format!("\x1b[<64;{col};{row}M"));
+    term.wait_for("› aurora", WAIT);
+    wait_theme_foreground(&term, marker, AURORA_TEXT);
+    paste(&term, "ember");
+    term.wait_for("› ember", WAIT);
+    wait_theme_foreground(&term, marker, EMBER_TEXT);
+    assert_eq!(theme_config(&home), original);
+    let (row, col) = term.find_on_screen("✕").expect("the theme picker carries its close button");
+    let idle = term.foreground_of("✕").expect("the close button is painted");
+    term.send(&format!("\x1b[<35;{col};{row}M"));
+    let start = Instant::now();
+    loop {
+        if term.foreground_of("✕").is_some_and(|colour| colour != idle) {
+            break;
+        }
+        assert!(start.elapsed() < WAIT, "the close button did not answer hover:\n{}", term.screen());
+        std::thread::sleep(Duration::from_millis(40));
+    }
+    term.click(row, col);
+    term.wait_gone(THEME_PREVIEW, WAIT);
+    term.wait_for(PROMPT, WAIT);
+    wait_theme_foreground(&term, marker, AURORA_TEXT);
+    assert_eq!(theme_config(&home), original, "the close button saved a preview");
+
+    theme_picker(&term);
+    term.type_text("ember");
+    term.wait_for("› ember", WAIT);
+    wait_theme_foreground(&term, marker, EMBER_TEXT);
+    paste(&term, "!no-match");
+    term.wait_for("No matching option found", WAIT);
+    wait_theme_foreground(&term, marker, AURORA_TEXT);
+    term.send(ENTER);
+    // A further filter key proves Enter left the picker open, not merely that an old frame survived.
+    term.send("x");
+    let screen = term.wait_for("\"ember!no-matchx\"", WAIT);
+    assert!(screen.contains(THEME_PREVIEW) && screen.contains("No matching option found"), "{screen}");
+    assert!(screen.contains("Esc cancel") && screen.contains("Enter select"), "{screen}");
+    assert_eq!(theme_config(&home), original, "Enter committed a choice hidden by an empty search");
+    term.send(ESC);
+    term.wait_gone(THEME_PREVIEW, WAIT);
+    term.wait_for(PROMPT, WAIT);
+    wait_theme_foreground(&term, marker, AURORA_TEXT);
+    quit(&mut term);
+}
+
+#[test]
+fn theme_mouse_selection_confirms_and_saves_the_clicked_palette() {
+    let marker = "Settled mouse-theme marker.";
+    let server = MockServer::start(vec![Reply::Text(marker.into())]);
+    let home = Home::new();
+    let mut term = theme_ready(&home, &server, theme_palettes_config());
+    ask(&term, "leave a row for a mouse choice", marker);
+    wait_theme_foreground(&term, marker, THEME_TEXT);
+    let original = theme_config(&home);
+
+    let screen = theme_picker(&term);
+    assert!(screen.contains("aurora") && screen.contains("ember"), "custom names were omitted:\n{screen}");
+    let (row, col) = term.find_on_screen("ember").expect("the unselected palette is visible");
+    term.click(row, col);
+    term.wait_gone(THEME_PREVIEW, WAIT);
+    term.wait_for(PROMPT, WAIT);
+    wait_theme_foreground(&term, marker, EMBER_TEXT);
+    let saved = theme_config(&home);
+    assert_eq!(saved["color_theme"], "midnight", "{saved}");
+    assert_eq!(saved["active_theme_palette"], "ember", "{saved}");
+    assert_eq!(saved["theme_palettes"], original["theme_palettes"]);
+    assert_eq!(server.turns().len(), 1, "clicking a palette sent a prompt");
+    quit(&mut term);
+}
+
+#[test]
+fn theme_settings_picker_restores_the_view_and_saves_only_the_theme() {
+    let marker = "Settled settings-theme marker.";
+    let server = MockServer::start(vec![Reply::Text(marker.into())]);
+    let home = Home::new();
+    let mut config = theme_palettes_config();
+    config["show_tips"] = serde_json::json!(true);
+    config["show_tokens"] = serde_json::json!(true);
+    let term = theme_ready(&home, &server, config);
+    ask(&term, "leave a row before opening settings", marker);
+    wait_theme_foreground(&term, marker, THEME_TEXT);
+    let original = theme_config(&home);
+
+    term.send(TAB);
+    term.wait_for("Esc save and close", WAIT);
+    term.send("3");
+    term.wait_for("[3 UI]", WAIT);
+    term.send(DOWN);
+    term.send(ENTER);
+    wait_settings_row(&term, "Developer tips", "Disabled");
+    term.send(DOWN);
+    term.send(DOWN);
+    term.send(ENTER);
+    wait_settings_row(&term, "Generation speed", "Disabled");
+    for _ in 0..3 {
+        term.send(DOWN);
+    }
+    term.wait_for("▸ Color theme", WAIT);
+    let check_view = |name: &str| {
+        let screen = wait_settings_row(&term, "Color theme", name);
+        assert!(screen.contains("[3 UI]") && screen.contains("▸ Color theme"), "the tab or row was reset:\n{screen}");
+        assert!(screen.contains("Esc save and close"), "the settings view has no footer:\n{screen}");
+        for label in ["Developer tips", "Generation speed"] {
+            assert!(screen.lines().any(|line| line.contains(label) && line.contains("Disabled")),
+                "the uncommitted {label} edit was lost:\n{screen}");
+        }
+    };
+    check_view("Dark");
+
+    term.send(RIGHT);
+    wait_settings_row(&term, "Color theme", "Midnight");
+    wait_theme_foreground(&term, marker, vt100::Color::Rgb(180, 199, 255));
+    assert_eq!(theme_config(&home), original, "Right saved a settings preview");
+    term.send(LEFT);
+    check_view("Dark");
+    wait_theme_foreground(&term, marker, THEME_TEXT);
+    term.send(LEFT);
+    check_view("ember");
+    wait_theme_foreground(&term, marker, EMBER_TEXT);
+    assert_eq!(theme_config(&home), original, "Left saved a custom settings preview");
+    term.send(RIGHT);
+    check_view("Dark");
+    wait_theme_foreground(&term, marker, THEME_TEXT);
+    assert_eq!(theme_config(&home), original, "Left/Right committed the settings view");
+
+    for mouse_close in [false, true] {
+        term.send(ENTER);
+        term.wait_for("Esc cancel", WAIT);
+        term.wait_for(THEME_PREVIEW, WAIT);
+        term.type_text("ember");
+        term.wait_for("› ember", WAIT);
+        wait_theme_foreground(&term, marker, EMBER_TEXT);
+        assert_eq!(theme_config(&home), original);
+        if mouse_close {
+            let (row, col) = term.find_on_screen("✕").expect("the picker has a close button");
+            term.click(row, col);
+        } else {
+            term.send(ESC);
+        }
+        term.wait_gone(THEME_PREVIEW, WAIT);
+        check_view("Dark");
+        wait_theme_foreground(&term, marker, THEME_TEXT);
+        assert_eq!(theme_config(&home), original, "cancelling the nested picker saved settings");
+    }
+
+    term.send(ENTER);
+    term.wait_for("Esc cancel", WAIT);
+    term.wait_for(THEME_PREVIEW, WAIT);
+    term.type_text("aurora");
+    term.wait_for("› aurora", WAIT);
+    wait_theme_foreground(&term, marker, AURORA_TEXT);
+    term.send(ENTER);
+    term.wait_gone(THEME_PREVIEW, WAIT);
+    check_view("aurora");
+    let saved = theme_config(&home);
+    assert_eq!(saved["color_theme"], "midnight", "{saved}");
+    assert_eq!(saved["active_theme_palette"], "aurora", "{saved}");
+    assert_eq!(saved["theme_palettes"], original["theme_palettes"]);
+    assert_eq!(saved["show_tips"], true, "confirming a theme also saved the uncommitted tips edit: {saved}");
+    assert_eq!(saved["show_tokens"], true, "confirming a theme also saved the uncommitted speed edit: {saved}");
+    // Esc would commit the rest of Settings; stop while the preserved view is still uncommitted.
+    drop(term);
+
+    let mut term = theme_start(&home, &["-y", "--continue"], (COLS, ROWS));
+    term.wait_for(marker, WAIT);
+    term.wait_for("Resumed session", WAIT);
+    wait_theme_foreground(&term, marker, AURORA_TEXT);
+    assert_eq!(theme_config(&home)["show_tips"], true);
+    assert_eq!(theme_config(&home)["show_tokens"], true);
+    quit(&mut term);
+}
+
+#[test]
+fn theme_tiny_picker_wheel_edges_and_more_rows_only_page() {
+    let server = MockServer::start(Vec::new());
+    let home = Home::new();
+    let mut config = theme_palettes_config();
+    config["animations"] = serde_json::json!(false);
+    let palettes = config["theme_palettes"].as_object_mut().unwrap();
+    for index in 0..12 {
+        palettes.insert(format!("z{index:02}"), serde_json::json!({
+            "base": "midnight", "colors": { "text": "#abcdef", "accent": "#fedcba" }
+        }));
+    }
+    home.set_up_with(&server.url, config);
+    let mut term = theme_start(&home, &["-y"], TINY);
+    term.wait_for(PROMPT, WAIT);
+    let original = theme_config(&home);
+    theme_picker(&term);
+    term.wait_for("› Dark", WAIT);
+    let (row, col) = term.find_on_screen(THEME_PREVIEW).expect("the tiny picker has a title");
+    term.click(row, col);
+    term.send(DOWN);
+    term.wait_for("› Midnight", WAIT);
+    term.send("\x1b[A");
+    term.wait_for("› Dark", WAIT);
+    assert_eq!(theme_config(&home), original, "clicking a non-item row committed a theme");
+    let wheel = |down: bool| {
+        let (row, col) = term.find_on_screen(THEME_PREVIEW).expect("the picker stays open");
+        term.send(&format!("\x1b[<{};{col};{row}M", if down { 65 } else { 64 }));
+    };
+
+    for _ in 0..3 {
+        wheel(false);
+    }
+    term.send(DOWN);
+    term.wait_for("› Midnight", WAIT);
+    term.send("\x1b[A");
+    term.wait_for("› Dark", WAIT);
+    assert_eq!(theme_config(&home), original, "the wheel saved a preview at the first edge");
+
+    let (row, col) = term.find_on_screen("more below").expect("a tiny picker has a next page");
+    term.click(row, col);
+    term.wait_for("more above", WAIT);
+    let screen = term.wait_for("Esc cancel", WAIT);
+    assert!(screen.contains(THEME_PREVIEW) && !screen.contains("› Dark"), "more below confirmed instead of paging:\n{screen}");
+    assert_eq!(theme_config(&home), original, "more below committed the revealed choice");
+    let (row, col) = term.find_on_screen("more above").expect("the previous page is clickable");
+    term.click(row, col);
+    term.wait_for("› Dark", WAIT);
+    term.wait_for("Esc cancel", WAIT);
+    assert_eq!(theme_config(&home), original, "more above committed the revealed choice");
+
+    for _ in 0..24 {
+        wheel(true);
+    }
+    term.wait_for("› z11", WAIT);
+    wait_theme_foreground(&term, THEME_PREVIEW, vt100::Color::Rgb(254, 220, 186));
+    term.send("\x1b[A");
+    term.wait_for("› z10", WAIT);
+    term.send(DOWN);
+    term.wait_for("› z11", WAIT);
+    assert_eq!(theme_config(&home), original, "the wheel committed at the last edge");
+    for _ in 0..24 {
+        wheel(false);
+    }
+    term.wait_for("› Dark", WAIT);
+    wait_theme_foreground(&term, THEME_PREVIEW, vt100::Color::Rgb(225, 175, 95));
+    term.send(DOWN);
+    term.wait_for("› Midnight", WAIT);
+    let screen = term.wait_for("Esc cancel", WAIT);
+    assert!(screen.contains(THEME_PREVIEW) && screen.contains("Enter select"), "the picker closed while paging:\n{screen}");
+    assert_eq!(theme_config(&home), original, "browsing a tiny palette list changed the config");
+    term.send(ESC);
+    term.wait_gone(THEME_PREVIEW, WAIT);
+    term.wait_for(PROMPT, WAIT);
+    assert_eq!(theme_config(&home), original);
+    quit(&mut term);
+}
+
+#[test]
+fn theme_pending_approval_blocks_hidden_picker_wheel_and_paste() {
+    let server = MockServer::start(vec![
+        shell_call("echo safety> safety.txt"), Reply::Text("The safety turn ended.".into()),
+    ]);
+    server.delay_turns(Duration::from_secs(2));
+    let home = Home::new();
+    let mut config = theme_palettes_config();
+    config["active_theme_palette"] = serde_json::json!("aurora");
+    let mut term = theme_ready(&home, &server, config);
+    let original = theme_config(&home);
+    term.type_text("request a safety marker");
+    term.send(ENTER);
+    theme_picker(&term);
+    term.wait_for("› aurora", WAIT);
+    term.wait_for(APPROVAL, WAIT);
+    let (row, col) = term.find_on_screen(APPROVAL).unwrap();
+    for _ in 0..3 {
+        term.send(&format!("\x1b[<65;{col};{row}M"));
+    }
+    paste(&term, "ember");
+    assert_eq!(theme_config(&home), original);
+    assert!(!home.work().join("safety.txt").exists(), "the pending tool ran without approval");
+    term.send(ESC);
+    term.wait_for("The safety turn ended.", WAIT);
+    let screen = term.wait_for("Esc cancel", WAIT);
+    assert!(screen.contains(THEME_PREVIEW) && screen.contains("› aurora"),
+        "input changed the hidden picker instead of the safety card:\n{screen}");
+    assert!(!screen.contains("\"ember\""), "paste reached the hidden filter:\n{screen}");
+    assert_eq!(theme_config(&home), original);
+    assert!(!home.work().join("safety.txt").exists(), "Esc did not deny the safety prompt");
+    term.send(ESC);
+    term.wait_gone(THEME_PREVIEW, WAIT);
+    quit(&mut term);
+}
+
+#[test]
+fn theme_commands_and_picker_during_a_held_reply_never_send_steering() {
+    let marker = "Settled marker before a held theme turn.";
+    let server = MockServer::start(vec![
+        Reply::Text(marker.into()),
+        Reply::Held { before: "Theme turn is held here. ".into(), after: "Theme turn was released intact.".into() },
+    ]);
+    let home = Home::new();
+    let mut term = theme_ready(&home, &server, theme_palettes_config());
+    ask(&term, "leave a row before starting the held turn", marker);
+    wait_theme_foreground(&term, marker, THEME_TEXT);
+    term.type_text("start the held turn");
+    term.send(ENTER);
+    term.wait_for("Theme turn is held here.", WAIT);
+    term.wait_for(RUNNING_HINT, WAIT);
+
+    term.type_text("/theme aurora");
+    term.send(ENTER);
+    wait_theme_foreground(&term, marker, AURORA_TEXT);
+    assert_eq!(theme_config(&home)["active_theme_palette"], "aurora");
+    let original = theme_config(&home);
+    theme_picker(&term);
+    term.type_text("ember");
+    term.wait_for("› ember", WAIT);
+    wait_theme_foreground(&term, marker, EMBER_TEXT);
+    assert_eq!(theme_config(&home), original);
+    term.send(ENTER);
+    term.wait_gone(THEME_PREVIEW, WAIT);
+    wait_theme_foreground(&term, marker, EMBER_TEXT);
+    assert_eq!(theme_config(&home)["active_theme_palette"], "ember");
+    assert!(!term.screen().contains("steer queued"), "a local theme command queued steering:\n{}", term.screen());
+    server.release();
+    term.wait_for("Theme turn was released intact.", WAIT);
+    term.wait_gone(RUNNING_HINT, WAIT);
+    let turns = server.turns();
+    assert_eq!(turns.len(), 2, "a theme command became another model turn");
+    for turn in &turns {
+        assert!(!last_user_message(turn).contains("/theme"), "a theme command reached the model: {}", sent(turn));
+    }
+    quit(&mut term);
+}
+
+#[test]
+fn theme_russian_title_help_and_autocomplete_use_the_interface_language() {
+    let server = MockServer::start(Vec::new());
+    let home = Home::new();
+    let mut config = theme_palettes_config();
+    config["animations"] = serde_json::json!(false);
+    config["interface_language"] = serde_json::json!("ru");
+    home.set_up_with(&server.url, config);
+    let mut term = theme_start(&home, &["-y"], (COLS, ROWS));
+    term.wait_for("Спросите FlashAgent", WAIT);
+    let original = theme_config(&home);
+
+    term.type_text("/the");
+    term.wait_for("Предпросмотр темы или переключение через /theme <имя>", WAIT);
+    term.send(ENTER);
+    let screen = term.wait_for("Esc отмена", WAIT);
+    assert!(screen.contains("Цветовая тема · предпросмотр") && screen.contains("Enter выбрать"), "{screen}");
+    assert!(screen.contains("Тёмная") && screen.contains("Полночь"), "builtin labels were not translated:\n{screen}");
+    assert!(screen.contains("aurora") && screen.contains("ember"), "custom names disappeared in Russian:\n{screen}");
+    term.send(ESC);
+    term.wait_gone("Цветовая тема · предпросмотр", WAIT);
+    term.wait_for("Спросите FlashAgent", WAIT);
+
+    term.type_text("/theme mi");
+    let screen = term.wait_for("/theme midnight", WAIT);
+    assert!(screen.contains("Полночь"), "the builtin completion label is not Russian:\n{screen}");
+    term.send("\x15");
+    term.wait_for("Спросите FlashAgent", WAIT);
+    term.type_text("/theme au");
+    term.wait_for("/theme aurora", WAIT);
+    term.send("\x15");
+    term.wait_for("Спросите FlashAgent", WAIT);
+    term.type_text("/help");
+    term.send(ENTER);
+    term.wait_for("Клавиши", WAIT);
+    term.send("\x1b[5~");
+    term.send(HOME);
+    let screen = term.wait_for("предпросмотр темы; Enter сохраняет, Esc отменяет", WAIT);
+    assert!(screen.contains("/theme [name]"), "the translated help omitted /theme:\n{screen}");
+    assert_eq!(theme_config(&home), original, "opening the translated picker saved a choice");
+    assert!(server.turns().is_empty(), "theme/help completion sent a model request");
+    quit(&mut term);
+}
+
 /// 98x21 is a quarter-screen terminal, 60x14 an editor panel.
 const SMALL: (u16, u16) = (98, 21);
 const TINY: (u16, u16) = (60, 14);
@@ -949,6 +1543,7 @@ const TINY: (u16, u16) = (60, 14);
 /// the last line waits for the whole card to unfold.
 const SCREENS: &[(&str, &str, &str)] = &[
     ("/settings", "Settings", "Esc save and close"),
+    ("/theme", THEME_PREVIEW, "Esc cancel"),
     ("/memory", "remembers", "Esc close"),
     ("/mcp", "MCP", "Esc close"),
     ("/tasks", "Background tasks", "Esc close"),

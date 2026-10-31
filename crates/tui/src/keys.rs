@@ -16,6 +16,7 @@ impl App {
     /// only on the next launch.
     pub(crate) fn save_config(&mut self) {
         flashagent_tui::autocomplete::set_provider_names(flashagent_tui::providers::completion_entries(&self.config));
+        flashagent_tui::autocomplete::set_theme_names(&self.config);
         if let Err(e) = self.config.save() {
             self.notice(flashagent_tui::i18n::tr_fill("Settings not saved: {e}", &[("e", &e.to_string())]));
         }

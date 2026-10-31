@@ -152,6 +152,13 @@ impl Noun {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MenuClick {
+    None,
+    Select,
+    Page,
+}
+
 /// Up / Down / Enter / Esc, a 10-item scrolling window, paging and live search.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SelectMenu<T> {
@@ -285,18 +292,15 @@ impl<T> SelectMenu<T> {
         true
     }
 
-    /// The card row a click landed on, counted from the card's first row as
-    /// `render_in` lays it out. A click on an item selects it — the caller
-    /// confirms, the way Enter does; the "more" rows page. True when the
-    /// click moved anything.
-    pub fn click(&mut self, line: usize) -> bool {
+    /// Paging moves the list but must never confirm the item it reveals.
+    pub fn click(&mut self, line: usize) -> MenuClick {
         // Line 0 is the title; below the items the border and hints sit.
         if line == 0 {
-            return false;
+            return MenuClick::None;
         }
         let matches = self.filtered_indices();
         if matches.is_empty() {
-            return false;
+            return MenuClick::None;
         }
         let cur_pos = matches.iter().position(|&idx| idx == self.selected).unwrap_or(0);
         let page_size = self.page();
@@ -308,7 +312,7 @@ impl<T> SelectMenu<T> {
         if start > 0 {
             if line == row {
                 self.page_up();
-                return true;
+                return MenuClick::Page;
             }
             row += 1;
         }
@@ -319,15 +323,15 @@ impl<T> SelectMenu<T> {
                 // The row under the pointer is the pick — the already-selected
                 // one included, so the second click confirms as Enter would.
                 self.selected = idx;
-                return true;
+                return MenuClick::Select;
             }
             row += rows;
         }
         if end < matches.len() && line == row {
             self.page_down();
-            return true;
+            return MenuClick::Page;
         }
-        false
+        MenuClick::None
     }
 
     pub fn push_filter_char(&mut self, c: char) {
@@ -400,7 +404,7 @@ impl<T> SelectMenu<T> {
         };
         let title_styled = crate::tool_views::clip_ellipsis(
             &format!(" \x1b[1;38;2;225;175;95m{}\x1b[0m \x1b[38;2;160;155;145m{count_str}\x1b[0m ", self.title),
-            inner_w.saturating_sub(1),
+            inner_w.saturating_sub(3),
         );
         let title_vis = visible_width(&title_styled);
         let border_dashes = inner_w.saturating_sub(title_vis);
@@ -432,7 +436,11 @@ impl<T> SelectMenu<T> {
         } else {
             let cur_pos = matches.iter().position(|&idx| idx == self.selected).unwrap_or(0);
             // Title, bottom border, key hints and the two "more" rows.
-            let rows_per_item = if matches.iter().any(|&i| self.items[i].description.is_some()) { 2 } else { 1 };
+            let filter = self.filter.to_lowercase();
+            let rows_per_item = matches.iter().map(|&i| {
+                1 + usize::from(self.items[i].description.is_some())
+                    + usize::from(self.items[i].hidden_match(&filter).is_some())
+            }).max().unwrap_or(1);
             let fit = (max_rows.saturating_sub(5) / rows_per_item).max(1);
             let page_size = self.page_size.min(fit);
             self.shown.set(page_size);
@@ -444,10 +452,11 @@ impl<T> SelectMenu<T> {
             let end = (start + page_size).min(total_matches);
 
             if start > 0 {
+                let ink = paging_ink(lines.len(), hover, flash);
                 lines.push((
                     LineKind::System,
                     pad_row(&format!(
-                        "  \x1b[38;2;135;130;125m{}\x1b[0m",
+                        "  {ink}{}\x1b[0m",
                         crate::i18n::tr_fill("▲ {n} more above", &[("n", &start.to_string())])
                     )),
                 ));
@@ -488,10 +497,11 @@ impl<T> SelectMenu<T> {
             }
 
             if end < total_matches {
+                let ink = paging_ink(lines.len(), hover, flash);
                 lines.push((
                     LineKind::System,
                     pad_row(&format!(
-                        "  \x1b[38;2;135;130;125m{}\x1b[0m",
+                        "  {ink}{}\x1b[0m",
                         crate::i18n::tr_fill("▼ {n} more below", &[("n", &(total_matches - end).to_string())])
                     )),
                 ));
@@ -514,6 +524,16 @@ impl<T> SelectMenu<T> {
         lines.push((LineKind::System, format!("  {}", crate::key_hints(&hints, width.saturating_sub(2)))));
 
         lines
+    }
+}
+
+fn paging_ink(row: usize, hover: Option<usize>, flash: Option<usize>) -> &'static str {
+    if flash == Some(row) {
+        "\x1b[1;38;2;225;175;95m"
+    } else if hover == Some(row) {
+        "\x1b[1;38;2;235;230;220m"
+    } else {
+        "\x1b[38;2;135;130;125m"
     }
 }
 
@@ -569,6 +589,21 @@ mod tests {
         assert!(rows.iter().any(|(_, r)| crate::strip_ansi(r).contains("› /cmd7")), "{:?}", rows.iter().map(|r| crate::strip_ansi(&r.1)).collect::<Vec<_>>());
         // With room, the page stays ten items.
         assert!(menu.render_in(80, 100, None, None).len() > 20);
+    }
+
+    #[test]
+    fn hidden_identifier_matches_fit_the_menu_height_and_page_by_visible_items() {
+        let items = (0..12).map(|i| {
+            SelectItem::new(format!("Тема {i}"), i).with_search_text(format!("palette_{i}"))
+        }).collect();
+        let mut menu = SelectMenu::new("Color theme", items);
+        "palette".chars().for_each(|c| menu.push_filter_char(c));
+        let rows = menu.render_in(60, 8, None, None);
+        assert!(rows.len() <= 8, "hidden match rows count towards the limit: {}", rows.len());
+        assert_eq!(menu.page(), 1);
+        menu.page_down();
+        assert_eq!(menu.selected_value(), Some(&1));
+        assert!(menu.render_in(60, 8, None, None).len() <= 8);
     }
 
     #[test]
@@ -715,16 +750,16 @@ mod tests {
 
         let mut menu = menu;
         // The second row of the card is the second item's line.
-        assert!(menu.click(2), "a click on a drawn row lands");
+        assert_eq!(menu.click(2), MenuClick::Select, "a click on a drawn row lands");
         assert_eq!(menu.items[menu.selected].label, "second");
         // The title row belongs to the card, not to an item.
-        assert!(!menu.click(0));
+        assert_eq!(menu.click(0), MenuClick::None);
         // Below the items (border, hints) nothing answers either.
-        assert!(!menu.click(lines.len() + 3));
+        assert_eq!(menu.click(lines.len() + 3), MenuClick::None);
 
         // A click on the selected row still reports a hit: confirming is the
         // caller's half of the same gesture.
-        assert!(menu.click(2));
+        assert_eq!(menu.click(2), MenuClick::Select);
         assert_eq!(menu.items[menu.selected].label, "second");
     }
 
@@ -777,7 +812,13 @@ mod tests {
         // more-above row while the top is shown) + the page of items.
         let page = menu.page();
         let more_row = 1 + page;
-        assert!(menu.click(more_row), "the more-below row answers a click");
+        let plain = menu.render_in(80, 100, None, None);
+        let hovered = menu.render_in(80, 100, Some(more_row), None);
+        let pressed = menu.render_in(80, 100, Some(more_row), Some(more_row));
+        assert_ne!(plain[more_row].1, hovered[more_row].1);
+        assert_ne!(hovered[more_row].1, pressed[more_row].1);
+        assert_eq!(crate::strip_ansi(&plain[more_row].1), crate::strip_ansi(&pressed[more_row].1));
+        assert_eq!(menu.click(more_row), MenuClick::Page, "paging must not be mistaken for confirmation");
         assert_eq!(menu.items[menu.selected].label, format!("item {}", page.min(29)));
     }
 }

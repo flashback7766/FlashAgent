@@ -2005,9 +2005,11 @@ impl ChatView {
     /// something left to show.
     pub fn show_full(&mut self, i: usize) -> bool {
         let Some(line) = self.lines.get_mut(i) else { return false };
-        if line.full || !line.is_expanded.unwrap_or(false) {
+        if line.full || line.is_expanded == Some(false) {
             return false;
         }
+        // Keyboard expansion has no per-line override until the preview is clicked.
+        line.is_expanded = Some(true);
         line.full = true;
         *self.settled_cache.lock() = SettledRenderCache::default();
         true
@@ -3664,6 +3666,23 @@ hm".into()));
         assert!(v.toggle_line(i, ReasoningExpansion::none()));
         assert!(v.toggle_line(i, ReasoningExpansion::none()));
         assert!(rows(&v).iter().any(|t| t.contains("more lines")), "a fresh open is a preview again");
+    }
+
+    #[test]
+    fn a_keyboard_expanded_thought_can_show_the_rest_of_its_preview() {
+        let mut chat = ChatView::default();
+        chat.push_user("hi");
+        chat.push_line(LineKind::Reasoning, vec!["a long thought"; 40].join("\n"));
+        chat.push_line(LineKind::Assistant, "the answer");
+        let (settled, live) = chat.render_split(100, ReasoningExpansion { all: true, last: false });
+        let cut = settled.iter().chain(live.iter()).position(|(_, row)| strip_ansi(row).contains("more lines")).unwrap();
+        let Some(Click::Expand(index)) = chat.owner_at(cut) else { panic!("the preview has a click target") };
+        assert_eq!(chat.lines[index].is_expanded, None, "keyboard expansion has no per-line override");
+        assert!(chat.show_full(index));
+        let (settled, live) = chat.render_split(100, ReasoningExpansion::none());
+        assert!(!settled.iter().chain(live.iter()).any(|(_, row)| strip_ansi(row).contains("more lines")));
+        assert!(chat.toggle_line(index, ReasoningExpansion::none()));
+        assert!(!chat.show_full(index), "an explicitly folded block stays folded");
     }
 
     #[test]
