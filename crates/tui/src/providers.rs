@@ -183,11 +183,13 @@ enum Field {
     Model,
     /// Only where the client picks the window (Ollama's `num_ctx`).
     Context,
+    /// Some gateways serve only the clients they know; this says who knocks.
+    UserAgent,
     Save,
 }
 
-const FIELDS: [Field; 6] = [Field::Name, Field::Protocol, Field::Address, Field::Key, Field::Model, Field::Save];
-const FIELDS_WITH_CONTEXT: [Field; 7] = [Field::Name, Field::Protocol, Field::Address, Field::Key, Field::Model, Field::Context, Field::Save];
+const FIELDS: [Field; 7] = [Field::Name, Field::Protocol, Field::Address, Field::Key, Field::Model, Field::UserAgent, Field::Save];
+const FIELDS_WITH_CONTEXT: [Field; 8] = [Field::Name, Field::Protocol, Field::Address, Field::Key, Field::Model, Field::Context, Field::UserAgent, Field::Save];
 
 fn fields(profile: &ProviderProfile) -> &'static [Field] {
     if profile.protocol == ApiProtocol::Ollama { &FIELDS_WITH_CONTEXT } else { &FIELDS }
@@ -202,6 +204,7 @@ fn field_label(field: Field) -> &'static str {
         Field::Key => "API key",
         Field::Model => "Model",
         Field::Context => "Context",
+        Field::UserAgent => "User-Agent",
         Field::Save => "",
     })
 }
@@ -385,6 +388,7 @@ impl ProvidersView {
                         Field::Key => form.draft.api_key = (!text.is_empty()).then_some(text),
                         Field::Model => form.draft.model = text,
                         Field::Context => form.draft.context_window = parse_context(&text),
+                        Field::UserAgent => form.draft.user_agent = (!text.is_empty()).then_some(text),
                         _ => {}
                     }
                     form.typing = None;
@@ -423,6 +427,9 @@ impl ProvidersView {
                 Field::Address => form.typing = Some(crate::Composer::from(form.draft.url.as_str())),
                 Field::Model => form.typing = Some(crate::Composer::from(form.draft.model.as_str())),
                 Field::Context => form.typing = Some(crate::Composer::from(form.draft.context_window.map(|n| n.to_string()).unwrap_or_default())),
+                Field::UserAgent => {
+                    form.typing = Some(crate::Composer::from(form.draft.user_agent.as_deref().unwrap_or_default()))
+                }
                 Field::Key => form.typing = Some(crate::Composer::new()),
             },
             _ => {}
@@ -495,6 +502,10 @@ impl ProvidersView {
                             Some(n) => crate::i18n::tr_fill("{n} tokens", &[("n", &n.to_string())]),
                             None => format!("{DIM}{}{OFF}", crate::i18n::tr("chosen for the model (32k unless loaded larger)")),
                         },
+                        (Field::UserAgent, None) => match &form.draft.user_agent {
+                            Some(ua) => ua.clone(),
+                            None => format!("{DIM}{}{OFF}", crate::i18n::tr("the agent's own name")),
+                        },
                         (Field::Save, _) => String::new(),
                     };
                     let row = match field {
@@ -516,6 +527,7 @@ impl ProvidersView {
                 match (fields(&form.draft)[form.row], &form.typing) {
                     (Field::Key, Some(_)) => vec![("Enter", "keep it"), ("empty", "use the environment"), ("Esc", "cancel")],
                     (Field::Context, Some(_)) => vec![("Enter", "keep it, e.g. 65536 or 64k"), ("empty", "automatic"), ("Esc", "cancel")],
+                    (Field::UserAgent, Some(_)) => vec![("Enter", "keep it"), ("empty", "the agent's own name"), ("Esc", "cancel")],
                     (_, Some(_)) => vec![("Enter", "keep it"), ("Esc", "cancel")],
                     _ => vec![("\u{2191}/\u{2193}", "move"), ("Enter", "change"), ("Esc", "back without saving")],
                 }
@@ -783,6 +795,8 @@ mod tests {
         let typing = text(&view.render(100));
         assert!(!typing.contains("sk-newkey") && typing.contains("(9 characters)"), "{typing}");
         view.handle_key(KeyCode::Enter, KeyModifiers::NONE);
+        // Past the model and the user-agent, to Save.
+        view.handle_key(KeyCode::Down, KeyModifiers::NONE);
         view.handle_key(KeyCode::Down, KeyModifiers::NONE);
         view.handle_key(KeyCode::Down, KeyModifiers::NONE);
         let ProvidersAction::Save { original, profile } = view.handle_key(KeyCode::Enter, KeyModifiers::NONE) else {
@@ -822,6 +836,7 @@ mod tests {
         }
         view.handle_key(KeyCode::Enter, KeyModifiers::NONE);
         view.handle_key(KeyCode::Enter, KeyModifiers::NONE);
+        view.handle_key(KeyCode::Down, KeyModifiers::NONE);
         view.handle_key(KeyCode::Down, KeyModifiers::NONE);
         view.handle_key(KeyCode::Down, KeyModifiers::NONE);
         let ProvidersAction::Save { profile, .. } = view.handle_key(KeyCode::Enter, KeyModifiers::NONE) else { panic!() };

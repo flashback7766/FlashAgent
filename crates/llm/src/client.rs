@@ -174,6 +174,12 @@ impl Client {
         *self.session.write() = id.as_ref().trim().to_string();
     }
 
+    /// The provider's own User-Agent, when it named one: the header goes on
+    /// every request and outranks the client's default.
+    pub(crate) fn provider_user_agent(&self) -> Option<reqwest::header::HeaderValue> {
+        self.endpoint.read().user_agent.as_deref().and_then(|ua| reqwest::header::HeaderValue::from_str(ua).ok())
+    }
+
     /// The session header, but only for the host that asked for it: an
     /// OpenCode-shaped id says nothing to any other server and says it in
     /// every request. None where the endpoint is elsewhere.
@@ -523,7 +529,13 @@ impl Client {
 /// sends no User-Agent of its own. The version is the release's when the
 /// release build pins one (`FLASHAGENT_VERSION`), the crate's otherwise.
 fn user_agent() -> String {
-    format!("flashagent/{}", option_env!("FLASHAGENT_VERSION").unwrap_or(env!("CARGO_PKG_VERSION")))
+    // A gateway that serves only the clients it knows can be met with
+    // FLASHAGENT_USER_AGENT -- the owner's call to make, not the agent's.
+    std::env::var("FLASHAGENT_USER_AGENT")
+        .ok()
+        .map(|ua| ua.trim().to_string())
+        .filter(|ua| !ua.is_empty())
+        .unwrap_or_else(|| format!("flashagent/{}", option_env!("FLASHAGENT_VERSION").unwrap_or(env!("CARGO_PKG_VERSION"))))
 }
 
 /// `opencode.ai` itself or a subdomain — the host whose Go routes refuse a
@@ -729,6 +741,39 @@ mod tests {
         // A lookalike path on another host is not.
         let lookalike = Client::new(Endpoint::new(ApiProtocol::OpenAi, "https://example.com/opencode.ai/v1", None), "m");
         assert!(crate::openai::headers(&lookalike).get("x-opencode-session").is_none());
+    }
+
+    #[test]
+    fn a_provider_s_own_user_agent_rides_every_request() {
+        let llm = Client::new(
+            Endpoint::new(ApiProtocol::OpenAi, "https://gateway.example/v1", Some("k".into())).with_user_agent(Some("opencode/1.0.0".into())),
+            "m",
+        );
+        assert_eq!(
+            crate::openai::headers(&llm).get(reqwest::header::USER_AGENT).unwrap(),
+            "opencode/1.0.0",
+            "some gateways serve only the clients they know"
+        );
+        assert_eq!(crate::anthropic::headers(&llm).get(reqwest::header::USER_AGENT).unwrap(), "opencode/1.0.0");
+        // Without one, the header says nothing and reqwest's default stands.
+        let plain = client("m");
+        assert!(crate::openai::headers(&plain).get(reqwest::header::USER_AGENT).is_none());
+        // A blank or whitespace one is no name at all.
+        let blank = Client::new(
+            Endpoint::new(ApiProtocol::OpenAi, "https://gateway.example/v1", None).with_user_agent(Some("   ".into())),
+            "m",
+        );
+        assert!(crate::openai::headers(&blank).get(reqwest::header::USER_AGENT).is_none());
+    }
+
+    #[test]
+    fn the_environment_can_name_the_agent_for_gateways_that_whitelist_clients() {
+        std::env::set_var("FLASHAGENT_USER_AGENT", "opencode/1.0.0");
+        assert_eq!(user_agent(), "opencode/1.0.0");
+        std::env::set_var("FLASHAGENT_USER_AGENT", "   ");
+        assert!(user_agent().starts_with("flashagent/"), "a blank override is no name");
+        std::env::remove_var("FLASHAGENT_USER_AGENT");
+        assert!(user_agent().starts_with("flashagent/"));
     }
 
     #[test]
