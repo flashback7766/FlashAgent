@@ -858,6 +858,18 @@ impl ChatView {
         self.lines.extend(remaining_notices);
     }
 
+    /// The cells a welcome-card button occupies under the pointer, for the
+    /// hover to light exactly them.
+    pub fn welcome_zone_at(&self, row: usize, col: usize) -> Option<(usize, usize)> {
+        if row >= self.card_len {
+            return None;
+        }
+        self.welcome_zones
+            .iter()
+            .find(|(r, from, to, _)| *r == row && *from <= col && col < *to)
+            .map(|(_, from, to, _)| (*from, *to))
+    }
+
     /// A welcome-card button under the pointer: `row` is the chat line the
     /// press landed on, `col` its visible column. Only the card's own rows
     /// carry buttons, and only where one was drawn.
@@ -2286,6 +2298,40 @@ mod tests {
             let l = cells(*r).into_iter().collect::<String>();
             l.chars().skip(*f).take(t - f).collect::<String>() == "Ctrl+D"
         }));
+    }
+
+    #[test]
+    fn a_welcome_button_s_zone_is_what_the_hover_lights() {
+        let make = || {
+            welcome_card(&WelcomeCard {
+                model: "mock-model",
+                cwd: "~/work",
+                width: 100,
+                height: 40,
+                ..Default::default()
+            })
+        };
+        let (row, from, to) = {
+            let card = make();
+            let &(row, from, to, _) = card
+                .zones
+                .iter()
+                .find(|(_, _, _, b)| *b == crate::welcome::WelcomeButton::Model)
+                .expect("the model value is a button");
+            (row, from, to)
+        };
+        let mut v = ChatView::default();
+        v.update_welcome_card(make());
+        // The zone is where the hover lights and the click presses.
+        assert_eq!(v.welcome_zone_at(row, from), Some((from, to)));
+        assert_eq!(v.welcome_zone_at(row, to - 1), Some((from, to)), "the zone reaches its last cell");
+        assert_eq!(v.welcome_zone_at(row, to), None, "the cell past the zone is not the button");
+        assert!(matches!(
+            v.welcome_button_at(row, from),
+            Some(crate::welcome::WelcomeButton::Model)
+        ));
+        // Past the card there is nothing to light.
+        assert_eq!(v.welcome_zone_at(v.lines.len() + 3, from), None);
     }
 
     #[test]
