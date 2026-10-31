@@ -194,7 +194,7 @@ impl ToolsView {
                 .replace("{total}", &self.rows.len().to_string())
         );
         let dashes = box_w.saturating_sub(visible_width(&title) + 1);
-        lines.push((LineKind::System, format!("  {BORDER_GOLD}╭─{title}{}╮{RESET}", "─".repeat(dashes))));
+        lines.push((LineKind::System, format!("  {BORDER_GOLD}╭─{title}{BORDER_GOLD}{}╮{RESET}", "─".repeat(dashes))));
         lines.push((LineKind::System, format!("  {BORDER_GOLD}├{}┤{RESET}", "─".repeat(box_w))));
 
         let height = self.height.max(1);
