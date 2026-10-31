@@ -277,7 +277,6 @@ pub(crate) fn start_turn(&mut self, cx: &LoopCtx<'_>, budgets: GoalBudgets) {
             cx.tx.clone(),
             steer_rx,
             self.turn_counter,
-            self.config.personality.voice_prelude(),
             compactor,
         ));
     }
