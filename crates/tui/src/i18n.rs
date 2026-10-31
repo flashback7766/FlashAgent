@@ -556,6 +556,8 @@ static RU: &[(&str, &str)] = &[
     ("{m}. Add credit, or pick a free model with F3.", "{m}. Пополните счёт или выберите бесплатную модель по F3."),
     ("{base} rejected the API key", "{base} отверг ключ API"),
     ("Set its key in /provider \u{2192} Edit providers, or in the provider's environment variable.", "Задайте ключ в /provider \u{2192} Edit providers или в переменной окружения провайдера."),
+    ("The provider does not serve this model here", "Провайдер не обслуживает эту модель здесь"),
+    ("The provider's message says what to change; Ctrl+R retries once it is done.", "Что поменять, сказано в сообщении провайдера; после этого Ctrl+R."),
     ("{base} is overloaded right now", "{base} сейчас перегружен"),
     ("Wait a moment and press Ctrl+R, or switch provider with /provider.", "Подождите и нажмите Ctrl+R или смените провайдера через /provider."),
     ("{base} is rate-limiting this key", "{base} ограничивает этот ключ по частоте"),

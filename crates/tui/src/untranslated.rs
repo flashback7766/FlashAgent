@@ -99,7 +99,8 @@ const ENGLISH_ON_PURPOSE: &[(&str, &str)] = &[
     ("# Memory (automatically loaded", "a marker in the session file"),
     ("[AUTONOMOUS GOAL DIRECTIVE]", "a marker in the session file"),
     ("### Stage:", "the model writes it, the interface reads it back"),
-    (". To increase", "the mark the server's own message is cut at"),
+    ("To increase", "the mark the server's own message is cut at"),
+    ("Upstream request failed:", "the gateway's wrapper around a provider's message, stripped, not shown"),
     (". This is", "the mark an automatic notice is cut at"),
     ("## FlashAgent\n\n", "the name of the assistant in the exported document"),
     (
