@@ -3381,6 +3381,44 @@ fn a_paste_that_arrives_as_keystrokes_is_still_one_prompt() {
 }
 
 #[test]
+fn the_command_palette_answers_a_click_on_its_rows() {
+    let server = MockServer::start(vec![Reply::Text("Sure.".into())]);
+    let home = Home::new();
+    let mut term = ready(&home, &server);
+    term.send("\x0b");
+    term.wait_for("Command palette", WAIT);
+    // Typed, the palette narrows to one row; a click on it runs the command
+    // the way Enter would run the row the selection sat on: the status line
+    // says the mode changed.
+    term.send("/verb");
+    term.wait_for("/verbose", WAIT);
+    let (row, col) = term.find_on_screen("/verbose").expect("the filter leaves /verbose");
+    term.click(row, col);
+    term.wait_for("[verbose: last]", WAIT);
+    quit(&mut term);
+}
+
+#[test]
+fn the_welcome_card_s_own_buttons_do_what_they_say() {
+    let server = MockServer::start(vec![Reply::Text("Sure.".into())]);
+    let home = Home::new();
+    let mut term = ready(&home, &server);
+    // Swift opens Settings. The reveal draws the card a row at a time, so the
+    // greeting is waited for before its place on screen means anything.
+    term.wait_for("Welcome", WAIT);
+    let (row, col) = term.find_on_screen("Welcome").expect("the greeting names its owner");
+    term.click(row + 2, col);
+    term.wait_for("[1 General]", WAIT);
+    term.send("\x1b");
+    term.wait_for("Ask FlashAgent", WAIT);
+    // A command with an argument lands in the composer, ready to finish.
+    let (row, col) = term.find_on_screen("/goal").expect("the card offers /goal");
+    term.click(row, col);
+    term.wait_for("/goal ", WAIT);
+    quit(&mut term);
+}
+
+#[test]
 fn a_chosen_voice_reaches_the_model_as_an_example_and_nowhere_else() {
     let server = MockServer::start(vec![Reply::Text("Sure.".into())]);
     let home = Home::new();

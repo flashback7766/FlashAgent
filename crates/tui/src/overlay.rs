@@ -57,7 +57,9 @@ impl Overlay {
             Overlay::Notices(view) => view.wheel(dir),
             Overlay::Rules(view) => view.wheel(dir),
             Overlay::Context(_) | Overlay::Rewind(_) => false,
-            Overlay::Effort(_) | Overlay::Model(_) | Overlay::Provider(_) | Overlay::Sessions(_) | Overlay::Palette(_) => false,
+            Overlay::Effort(_) | Overlay::Model(_) | Overlay::Provider(_) | Overlay::Sessions(_) | Overlay::Palette(_) => {
+                self.select_menu_mut().is_some_and(|menu| menu.wheel(dir))
+            }
         }
     }
 
@@ -131,7 +133,18 @@ impl App {
                 self.overlay = Some(Overlay::Notices(view));
                 took
             }
-            Some(other) => {
+            Some(mut other) => {
+                // A select menu answers its own rows now: a click on an item
+                // selects it, and the pick goes through the same Enter path
+                // the keys use — the palette runs its command, the model menu
+                // switches. A pending question outranks the menu, so the
+                // click only moves the selection and waits for the keys.
+                let confirms = other.select_menu_mut().is_some_and(|menu| menu.click(line));
+                if confirms && cx.gate.pending().is_none() && cx.question_gate.pending().is_none() {
+                    self.overlay = Some(other);
+                    self.handle_overlay_key(cx, KeyCode::Enter, KeyModifiers::NONE).await;
+                    return true;
+                }
                 self.overlay = Some(other);
                 false
             }

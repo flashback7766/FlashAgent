@@ -1,5 +1,37 @@
 # Changelog
 
+## b625 — the mouse reaches everything on the screen
+
+The mouse had the transcript and the settings screen; everything else —
+menus, the welcome card, the status line — kept answering keys only. Seen
+live: Ctrl+K's command palette ignored clicks entirely.
+
+- **Every menu answers the mouse now.** The command palette and the model,
+  effort, provider and session menus — one widget under all of them — move
+  their selection with the wheel (stopping at the ends, not wrapping), and a
+  click on a row selects it and runs it, the way Enter does; a click on the
+  row the selection already sits on confirms it, so the second click is the
+  yes. A pending question outranks the menu: the click only moves the
+  selection.
+- **The welcome card's buttons are buttons.** Clicking Swift opens
+  Settings; the model value opens the model menu, the effort value the
+  effort menu; the keys under Quick Commands act as pressed (Ctrl+K opens
+  the palette, F1 the context, F2 cycles verbose, Ctrl+R regenerates,
+  Ctrl+V pastes), and the commands with an argument (`/goal`, `/help`) put
+  themselves into the composer, ready to be finished. Ctrl+D quit is
+  deliberately not a button.
+- **The context gauge at the end of the status line opens what F1 opens.**
+- **The scrollbar shows itself only to a hand near the right edge of the
+  transcript** — or one already holding the thumb. Bolted over the last
+  column, always on, it was furniture nobody asked for.
+- **The "↓ N more lines below" marker is clickable**: it returns to the
+  bottom, as End does.
+- **The tip no longer reserves an empty second row.** The row is there only
+  while the tip on screen actually wraps to it; before, a short tip sat
+  over a permanent blank line between it and the status line.
+- **Two voices join the roster**: Cybersecurity (threat-first and exact)
+  and Tsundere (sharp outside, warm underneath).
+
 ## b620 — errors speak the provider's language, not JSON
 
 Seen live: a Go model refused with a note about regions, wrapped in two

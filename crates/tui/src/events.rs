@@ -689,6 +689,97 @@ impl App {
         }
     }
 
+    /// What the welcome card's buttons do. The keys among them act exactly as
+    /// pressed keys would; the commands land in the composer for the user to
+    /// finish and send.
+    pub(crate) fn welcome_button(&mut self, cx: &LoopCtx<'_>, button: flashagent_tui::WelcomeButton) {
+        use flashagent_tui::WelcomeButton;
+        match button {
+            // Swift is the door to Settings, same as Tab on an empty prompt.
+            WelcomeButton::Mascot | WelcomeButton::Settings => self.open_settings(cx),
+            WelcomeButton::Model | WelcomeButton::ModelKey => self.open_model_menu(cx.source),
+            WelcomeButton::Effort => self.open_effort_menu(cx.source),
+            WelcomeButton::Palette => self.open_palette(),
+            WelcomeButton::Context => {
+                self.open_overlay(Overlay::Context(ContextModal::new(self.context_usage.clone())));
+            }
+            WelcomeButton::Verbose => self.cycle_verbose(),
+            WelcomeButton::PasteImage => self.paste_clipboard(cx),
+            WelcomeButton::Regen => {
+                if !self.regenerate(cx) {
+                    self.copy_toast = Some((tr("No previous turn to regenerate").to_string(), std::time::Instant::now()));
+                }
+            }
+            WelcomeButton::Goal => self.type_command("/goal "),
+            WelcomeButton::Help => self.type_command("/help"),
+        }
+        self.renderer.request_reprint();
+    }
+
+    /// Tab on an empty prompt opens Settings; the mascot and the Tab button
+    /// open the same screen.
+    pub(crate) fn open_settings(&mut self, cx: &LoopCtx<'_>) {
+        let view = self.runtime_settings(cx.perm.state().mode(), cx.source);
+        self.open_overlay(Overlay::Settings(Box::new(view)));
+    }
+
+    /// What F2 does, and what a click on "F2 verbose" does: none -> last -> all.
+    pub(crate) fn cycle_verbose(&mut self) {
+        if !self.last_expanded && !self.all_expanded {
+            self.last_expanded = true;
+            self.all_expanded = false;
+        } else if self.last_expanded && !self.all_expanded {
+            self.last_expanded = false;
+            self.all_expanded = true;
+        } else {
+            self.last_expanded = false;
+            self.all_expanded = false;
+        }
+        self.renderer.request_reprint();
+    }
+
+    /// What Ctrl+V does, and what a click on "Ctrl+V paste image" does: a
+    /// screenshot on the clipboard first, then text.
+    pub(crate) fn paste_clipboard(&mut self, cx: &LoopCtx<'_>) {
+        // A screenshot on the clipboard is meant far more often than a path, so it
+        // is looked for first.
+        if let Some(image) = flashagent_tui::clipboard::get_clipboard_image() {
+            maybe_measure_image_cost(&self.image_costs, &mut self.image_cost_probe, &self.current_model, cx.source, cx.tx);
+            let att = Attachment::from_clipboard(image);
+            let label = att.label();
+            self.attachments.push(att);
+            self.suggested_prompt = None;
+            if !model_sees_images(cx.source, &self.current_model) {
+                self.say(
+                    BackgroundNotice::sticky(flashagent_tui::i18n::tr_fill(
+                        "{label} attached · {model} cannot see images — press F3 for one that can",
+                        &[("label", &label), ("model", &self.current_model)],
+                    ))
+                    .warning(),
+                );
+            } else {
+                self.say(BackgroundNotice::fading(
+                    flashagent_tui::i18n::tr_fill("{label} attached · Ctrl+Z removes it", &[("label", &label)]),
+                    8,
+                ));
+            }
+        } else if let Some(text) = flashagent_tui::clipboard::get_clipboard_text() {
+            if !text.is_empty() {
+                self.input.insert_str(&text);
+                self.history_index = None;
+                self.autocomplete_idx = 0;
+            }
+        }
+        self.renderer.request_reprint();
+    }
+
+    /// Puts a command in the composer, ready to be finished and sent.
+    fn type_command(&mut self, command: &str) {
+        self.input.set(command.to_string());
+        self.history_index = None;
+        self.autocomplete_idx = 0;
+    }
+
     async fn on_mouse(&mut self, cx: &mut LoopCtx<'_>, m: crossterm::event::MouseEvent) {
         // Shift belongs to the terminal: with the app holding the mouse, the
         // one modifier every terminal keeps for itself is the way to select
@@ -697,6 +788,10 @@ impl App {
             return;
         }
         self.mouse_at = Some((m.row, m.column));
+        // The scrollbar reads the pointer's place too; it appears and leaves
+        // with the hand, so crossing its edge is worth a frame.
+        let scrollbar_was = self.renderer.scrollbar_visible();
+        self.renderer.mouse_at = Some((m.row, m.column));
         match m.kind {
             // The pointer crossing anything a press could reach — a card's
             // row, or a thought or tool call in the transcript — marks it. A
@@ -704,7 +799,7 @@ impl App {
             // a motion inside one row changed nothing worth a repaint.
             MouseEventKind::Moved => {
                 let want = self.hover_target(&m);
-                if want != self.hovered {
+                if want != self.hovered || self.renderer.scrollbar_visible() != scrollbar_was {
                     self.hovered = want;
                     self.renderer.request_reprint();
                 }
@@ -806,6 +901,29 @@ impl App {
         if self.renderer.scrollbar_press(m.row, m.column) {
             self.renderer.request_reprint();
             return;
+        }
+        // The context gauge at the end of the status line is a widget of its
+        // own the same way: a press there opens what F1 opens.
+        if self.renderer.gauge_press(m.row, m.column) {
+            self.open_overlay(Overlay::Context(ContextModal::new(self.context_usage.clone())));
+            self.renderer.request_reprint();
+            return;
+        }
+        // The "more lines below" marker returns to the bottom, as End does.
+        if self.renderer.scroll_marker_press(m.row) {
+            self.renderer.scroll_offset = 0;
+            self.renderer.request_reprint();
+            return;
+        }
+        // The welcome card's own buttons: Swift opens Settings, the model
+        // opens the model menu, and the Quick Commands keys act as pressed.
+        if self.overlay.is_none() {
+            if let Some(row) = self.renderer.chat_row_at(m.row) {
+                if let Some(button) = self.chat.welcome_button_at(row, m.column as usize) {
+                    self.welcome_button(cx, button);
+                    return;
+                }
+            }
         }
         // A click on a thought or a tool call opens or folds that one alone.
         // A subagent row opens its own detail too, and only the mouse does:

@@ -148,6 +148,31 @@ impl Term {
         self.parser.lock().unwrap().screen().contents()
     }
 
+    /// The 1-based (row, column) of `needle` on screen, for a synthetic mouse
+    /// click on it.
+    pub fn find_on_screen(&self, needle: &str) -> Option<(u16, u16)> {
+        let parser = self.parser.lock().unwrap();
+        let screen = parser.screen();
+        let (rows, cols) = screen.size();
+        for row in 0..rows {
+            let mut line = String::new();
+            for col in 0..cols {
+                line.push_str(screen.cell(row, col).map(|c| c.contents()).unwrap_or(" "));
+            }
+            if let Some(col) = line.find(needle) {
+                return Some((row + 1, col as u16 + 1));
+            }
+        }
+        None
+    }
+
+    /// A left-button press and release at a cell, as SGR mouse reporting
+    /// carries it.
+    pub fn click(&self, row: u16, col: u16) {
+        self.write(&format!("\x1b[<0;{col};{row}M\x1b[<0;{col};{row}m"));
+        std::thread::sleep(Duration::from_millis(60));
+    }
+
     /// A short pause follows each call: keys arriving together with a newline are
     /// read as a paste, as a Windows console delivers one.
     pub fn send(&self, keys: &str) {

@@ -327,6 +327,9 @@ pub struct ChatView {
     open_tool: Option<usize>,
     /// Lines in the welcome card.
     card_len: usize,
+    /// The card's own buttons: (card row, from column, to column, what a click
+    /// there does). Columns count visible cells of the row as painted.
+    welcome_zones: Vec<(usize, usize, usize, crate::welcome::WelcomeButton)>,
     needs_reprint: bool,
     /// Settled lines rendered once, not re-parsed every frame.
     settled_cache: Mutex<SettledRenderCache>,
@@ -673,6 +676,7 @@ impl ChatView {
         self.reasoning_start = None;
         self.open_tool = None;
         self.card_len = 0;
+        self.welcome_zones.clear();
         self.needs_reprint = false;
         self.context_baseline_line = 0;
         *self.settled_cache.lock() = SettledRenderCache::default();
@@ -819,7 +823,7 @@ impl ChatView {
     }
 
     /// Keeps any notices after it.
-    pub fn update_welcome_card(&mut self, new_card: Vec<RenderLine>) {
+    pub fn update_welcome_card(&mut self, new_card: crate::welcome::WelcomeRender) {
         if self.has_user_message() {
             return;
         }
@@ -829,12 +833,12 @@ impl ChatView {
     /// The card at the top of a conversation that has already started: the
     /// model, the provider or the level changed, and the card says what runs
     /// now instead of what ran when the session started.
-    pub fn update_welcome_card_state(&mut self, new_card: Vec<RenderLine>) {
+    pub fn update_welcome_card_state(&mut self, new_card: crate::welcome::WelcomeRender) {
         self.replace_welcome_card(new_card);
     }
 
     /// The card's lines become the new ones; everything after it stays.
-    fn replace_welcome_card(&mut self, new_card: Vec<RenderLine>) {
+    fn replace_welcome_card(&mut self, new_card: crate::welcome::WelcomeRender) {
         *self.settled_cache.lock() = SettledRenderCache::default();
         let end_idx = if self.card_len > 0 {
             self.card_len.min(self.lines.len())
@@ -846,11 +850,25 @@ impl ChatView {
         };
         let remaining_notices: Vec<ChatLine> = self.lines.drain(end_idx..).collect();
         self.lines.clear();
-        self.card_len = new_card.len();
-        for (kind, text) in new_card {
+        self.card_len = new_card.lines.len();
+        self.welcome_zones = new_card.zones;
+        for (kind, text) in new_card.lines {
             self.lines.push(ChatLine::new(kind, text));
         }
         self.lines.extend(remaining_notices);
+    }
+
+    /// A welcome-card button under the pointer: `row` is the chat line the
+    /// press landed on, `col` its visible column. Only the card's own rows
+    /// carry buttons, and only where one was drawn.
+    pub fn welcome_button_at(&self, row: usize, col: usize) -> Option<crate::welcome::WelcomeButton> {
+        if row >= self.card_len {
+            return None;
+        }
+        self.welcome_zones
+            .iter()
+            .find(|(r, from, to, _)| *r == row && *from <= col && col < *to)
+            .map(|(_, _, _, button)| *button)
     }
 
     /// The streamed answer and thought are over; what follows starts blocks of its own.
@@ -2162,7 +2180,7 @@ mod tests {
         // The header shows the bare version: a stable tag's build metadata
         // (v1.0.0+b610) is dropped so the line fits its column.
         let shown = cur_ver.split('+').next().unwrap_or(cur_ver);
-        assert!(card.iter().any(|(_, t)| t.contains(">_ FlashAgent") && (t.contains(shown) || t.contains("v0.1.0"))));
+        assert!(card.lines.iter().any(|(_, t)| t.contains(">_ FlashAgent") && (t.contains(shown) || t.contains("v0.1.0"))));
 
         let card80 = welcome_card(&WelcomeCard {
             model: "qwen3.6-35b-a3b-mtp",
@@ -2191,9 +2209,9 @@ mod tests {
             width: 120,
             ..Default::default()
         });
-        let w80 = visible_width(&card80[0].1);
-        let w100 = visible_width(&card100[0].1);
-        let w120 = visible_width(&card120[0].1);
+        let w80 = visible_width(&card80.lines[0].1);
+        let w100 = visible_width(&card100.lines[0].1);
+        let w120 = visible_width(&card120.lines[0].1);
         assert!(w120 > w80);
         assert_eq!(w80, 80);
         assert_eq!(w100, 100);
@@ -2207,6 +2225,67 @@ mod tests {
         let colored_line = "\x1b[38;2;95;90;85m│\x1b[0m \x1b[38;2;160;155;145mmodel:\x1b[0m \x1b[38;2;225;175;95mcustom-model-v1\x1b[0m";
         let wrapped = wrap(colored_line, 80);
         assert_eq!(wrapped.len(), 1, "Line with visible_width <= 80 must not be split by ANSI codes");
+    }
+
+    #[test]
+    fn the_welcome_card_s_click_zones_lay_on_their_own_words() {
+        let card = welcome_card(&WelcomeCard {
+            model: "deepseek-v4.1-flash",
+            provider: Some("OpenCode Go"),
+            cwd: "~/work",
+            thinking: Some("max (F4)"),
+            context_window: Some("1M ctx"),
+            width: 100,
+            height: 40,
+            ..Default::default()
+        });
+        assert!(card.zones.len() >= 8, "the card offers its buttons: {:?}", card.zones.len());
+        let cells = |row: usize| strip_ansi(&card.lines[row].1).chars().collect::<Vec<_>>();
+        for (row, from, to, _) in &card.zones {
+            let line = cells(*row);
+            assert!(*to > *from && *to <= 100, "a zone runs off its row: {row} {from}..{to}");
+            assert!(!line[*from..*to].iter().collect::<String>().trim().is_empty(), "an empty zone at row {row} {from}..{to}");
+        }
+        // Each key zone lands on the key it is named for.
+        for (row, from, to, button) in &card.zones {
+            let line = cells(*row).into_iter().collect::<String>();
+            let word = match button {
+                crate::welcome::WelcomeButton::Context => "F1",
+                crate::welcome::WelcomeButton::Verbose => "F2",
+                crate::welcome::WelcomeButton::ModelKey => "F3",
+                crate::welcome::WelcomeButton::Effort => "F4",
+                crate::welcome::WelcomeButton::Settings => "Tab",
+                crate::welcome::WelcomeButton::Palette => "Ctrl+K",
+                crate::welcome::WelcomeButton::Regen => "Ctrl+R",
+                crate::welcome::WelcomeButton::PasteImage => "Ctrl+V",
+                crate::welcome::WelcomeButton::Help => "/help",
+                crate::welcome::WelcomeButton::Goal => "/goal",
+                crate::welcome::WelcomeButton::Model => "deepseek-v4.1-flash",
+                crate::welcome::WelcomeButton::Mascot => continue,
+            };
+            let zone: String = line.chars().skip(*from).take(to - from).collect();
+            // The effort zone covers the value and its (F4) hint together.
+            let ok = match button {
+                crate::welcome::WelcomeButton::Effort => zone.contains("F4"),
+                crate::welcome::WelcomeButton::Goal => zone.starts_with("/goal"),
+                _ => zone.starts_with(word),
+            };
+            assert!(ok, "{word}: zone holds {zone:?} at row {row}");
+        }
+        // The model zone is where the model's name is on screen.
+        let model_zone = card.zones.iter().find(|(_, _, _, b)| *b == crate::welcome::WelcomeButton::Model).unwrap();
+        let line = cells(model_zone.0).into_iter().collect::<String>();
+        let zone: String = line.chars().skip(model_zone.1).take(model_zone.2 - model_zone.1).collect();
+        assert_eq!(zone, "deepseek-v4.1-flash");
+        // Swift's rows sit in the left column, and the left column of a
+        // two-column card ends at the divider.
+        let mascot = card.zones.iter().filter(|(_, _, _, b)| *b == crate::welcome::WelcomeButton::Mascot).count();
+        assert!(mascot >= 6, "the whole sprite answers a click: {mascot}");
+        // Quitting is never a button: Ctrl+D stays key-only.
+        assert!(!card.zones.iter().any(|(r, f, t, _)| {
+            let l = cells(*r).into_iter().collect::<String>();
+            l.chars().skip(*f).take(t - f).collect::<String>() == "Ctrl+D"
+        }));
     }
 
     #[test]
@@ -3022,7 +3101,10 @@ hm".into()));
         v.push_line(LineKind::System, "[Verbose mode: last]");
         assert!(!v.has_user_message());
 
-        let new_card = vec![(LineKind::System, "banner-v2".to_string())];
+        let new_card = crate::welcome::WelcomeRender {
+            lines: vec![(LineKind::System, "banner-v2".to_string())],
+            zones: Vec::new(),
+        };
         v.update_welcome_card(new_card);
 
         assert!(v.lines.iter().any(|l| l.text.contains("banner-v2")));
@@ -3033,7 +3115,10 @@ hm".into()));
         // After a user message the card is left alone.
         v.push_user("hello");
         assert!(v.has_user_message());
-        let new_card_c = vec![(LineKind::System, "banner-v3".to_string())];
+        let new_card_c = crate::welcome::WelcomeRender {
+            lines: vec![(LineKind::System, "banner-v3".to_string())],
+            zones: Vec::new(),
+        };
         v.update_welcome_card(new_card_c);
         assert!(!v.lines.iter().any(|l| l.text.contains("banner-v3")));
     }
@@ -3041,11 +3126,17 @@ hm".into()));
     #[test]
     fn the_welcome_card_says_what_runs_now_after_the_conversation_started() {
         let mut v = ChatView::default();
-        v.update_welcome_card(vec![(LineKind::System, "model-a".to_string())]);
+        v.update_welcome_card(crate::welcome::WelcomeRender {
+            lines: vec![(LineKind::System, "model-a".to_string())],
+            zones: Vec::new(),
+        });
         v.push_user("hello");
         // The model changed: the card at the top says so, and the
         // conversation stays where it was.
-        v.update_welcome_card_state(vec![(LineKind::System, "model-b".to_string())]);
+        v.update_welcome_card_state(crate::welcome::WelcomeRender {
+            lines: vec![(LineKind::System, "model-b".to_string())],
+            zones: Vec::new(),
+        });
         assert!(v.lines.iter().any(|l| l.text.contains("model-b")), "the card must show what runs now");
         assert!(!v.lines.iter().any(|l| l.text.contains("model-a")), "the old model is gone from the card");
         assert!(v.lines.iter().any(|l| l.text.contains("hello")), "the conversation is still there");
@@ -3062,7 +3153,7 @@ hm".into()));
             width: 80,
             ..Default::default()
         });
-        let joined = card.iter().map(|(_, t)| t.as_str()).collect::<Vec<_>>().join("\n");
+        let joined = card.lines.iter().map(|(_, t)| t.as_str()).collect::<Vec<_>>().join("\n");
         assert!(joined.contains("~/FlashAgent"), "welcome card must contain '~/FlashAgent', got: {joined}");
     }
 
@@ -3230,11 +3321,11 @@ hm".into()));
                 });
                 let room = height.saturating_sub(7);
                 assert!(
-                    card.len() <= room,
+                    card.lines.len() <= room,
                     "at {width}x{height} the card took {} of the {room} rows it had",
-                    card.len()
+                    card.lines.len()
                 );
-                for (_, line) in &card {
+                for (_, line) in &card.lines {
                     assert!(
                         visible_width(line) <= width,
                         "at {width}x{height} a card line came out {} wide",
@@ -3256,6 +3347,7 @@ hm".into()));
                 height,
                 ..Default::default()
             })
+            .lines
             .len()
         };
         for height in 9..40 {
@@ -3278,7 +3370,7 @@ hm".into()));
                 mood: MascotMood::Happy,
                 ..Default::default()
             });
-            for (_, line) in &card {
+            for (_, line) in &card.lines {
                 assert!(
                     visible_width(line) <= width,
                     "{width} cols: row is {} wide: {:?}",
@@ -3665,8 +3757,8 @@ hm".into()));
             height: 24,
             ..Default::default()
         });
-        assert!(card_80x24.len() <= 14, "Standard card must be at most 14 lines, got {}", card_80x24.len());
-        for line in &card_80x24 {
+        assert!(card_80x24.lines.len() <= 14, "Standard card must be at most 14 lines, got {}", card_80x24.lines.len());
+        for line in &card_80x24.lines {
             let width = visible_width(&line.1);
             assert!(width <= 80, "Line width {} exceeds terminal width 80", width);
         }
@@ -3682,8 +3774,8 @@ hm".into()));
             height: 16,
             ..Default::default()
         });
-        assert!(card_50x16.len() <= 14, "Compact card must be at most 14 lines, got {}", card_50x16.len());
-        for line in &card_50x16 {
+        assert!(card_50x16.lines.len() <= 14, "Compact card must be at most 14 lines, got {}", card_50x16.lines.len());
+        for line in &card_50x16.lines {
             let width = visible_width(&line.1);
             assert!(width <= 50, "Line width {} exceeds terminal width 50", width);
         }
@@ -3699,8 +3791,8 @@ hm".into()));
             height: 12,
             ..Default::default()
         });
-        assert!(card_36x12.len() <= 12, "Ultra compact card must be at most 12 lines, got {}", card_36x12.len());
-        for line in &card_36x12 {
+        assert!(card_36x12.lines.len() <= 12, "Ultra compact card must be at most 12 lines, got {}", card_36x12.lines.len());
+        for line in &card_36x12.lines {
             let width = visible_width(&line.1);
             assert!(width <= 36, "Line width {} exceeds terminal width 36", width);
         }
