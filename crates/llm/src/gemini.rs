@@ -45,11 +45,14 @@ fn refused(client: &Client, model: &str, what: Refused) -> bool {
     REFUSED.lock().contains(&(client.base_url(), model.to_string(), what))
 }
 
-fn headers(client: &Client) -> reqwest::header::HeaderMap {
+pub(crate) fn headers(client: &Client) -> reqwest::header::HeaderMap {
     let mut headers = reqwest::header::HeaderMap::new();
     // A header, never `?key=`: addresses end up in logs and error messages.
     if let Some(value) = client.api_key().and_then(|k| reqwest::header::HeaderValue::from_str(&k).ok()) {
         headers.insert("x-goog-api-key", value);
+    }
+    if let Some(session) = client.opencode_session_header() {
+        headers.insert("x-opencode-session", session);
     }
     headers
 }

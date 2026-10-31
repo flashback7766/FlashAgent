@@ -1569,7 +1569,10 @@ mod tests {
         assert_eq!(SetupWizard::new(saved).preset_idx, last);
         let rendered = SetupWizard::new(AppConfig::default()).render(100).join("\n");
         assert_eq!(rendered.matches("c. Custom").count(), 1, "{rendered}");
-        assert!(rendered.contains("0. OpenAI"), "{rendered}");
+        // The tenth row answers to the 0 key, and OpenCode Go, the first
+        // cloud preset, answers to 9.
+        assert!(rendered.contains("9. OpenCode Go"), "{rendered}");
+        assert!(rendered.contains("0. Anthropic"), "{rendered}");
         assert!(rendered.contains("more below"), "{rendered}");
     }
 

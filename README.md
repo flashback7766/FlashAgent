@@ -15,7 +15,7 @@
 
 </div>
 
-> **Status:** Stable v1.0.0 · Beta b617 — small changes roll out on the beta first and ride into the next stable release.
+> **Status:** Stable v1.0.0 · Beta b618 — small changes roll out on the beta first and ride into the next stable release.
 
 ## Quick start
 
@@ -31,7 +31,7 @@
    irm https://raw.githubusercontent.com/flashback7766/FlashAgent/main/install.ps1 | iex
    ```
 
-2. **Start a model server**: [LM Studio](https://lmstudio.ai), [Ollama](https://ollama.com) or [llama.cpp](https://github.com/ggml-org/llama.cpp) (`llama-server --jinja`), with a model that calls tools. Qwen3.6 and Gemma 4 models scored 6/8 to 8/8 on the tool-calling test that ships with the app (`flashagent --tool-test`); the method and the raw results are in [docs/tool-calling.md](docs/tool-calling.md). No machine for it? A cloud API works too: Anthropic, OpenAI, Gemini, OpenRouter and [more](#connecting-a-model).
+2. **Start a model server**: [LM Studio](https://lmstudio.ai), [Ollama](https://ollama.com) or [llama.cpp](https://github.com/ggml-org/llama.cpp) (`llama-server --jinja`), with a model that calls tools. Qwen3.6 and Gemma 4 models scored 6/8 to 8/8 on the tool-calling test that ships with the app (`flashagent --tool-test`); the method and the raw results are in [docs/tool-calling.md](docs/tool-calling.md). No machine for it? A cloud API works too: OpenCode Go, Anthropic, OpenAI, Gemini, OpenRouter and [more](#connecting-a-model).
 
 3. **Run it in your project:**
 
@@ -229,6 +229,14 @@ Or install straight from the repository: `cargo install --git https://github.com
 
 Start your server, then run `flashagent` in your project directory. The first launch opens a setup wizard: pick a server from the list, or type any address as Custom. `flashagent --setup` runs it again, and whatever you pick there is saved as another provider beside the ones you have, or updates the one for that server.
 
+No server on the machine at all? **OpenCode Go** is a $10/month subscription ([opencode.ai/go](https://opencode.ai/go)) for a curated set of coding models — Kimi, GLM, DeepSeek, MiniMax, Claude Haiku and more — behind one API key.
+
+1. Subscribe at [opencode.ai/go](https://opencode.ai/go) and copy an API key from the [console](https://opencode.ai/console).
+2. Run `flashagent`, pick **OpenCode Go** in the wizard, paste the key (or `export OPENCODE_API_KEY=...` first — the wizard notices it).
+3. Pick a model; `kimi-k3.1-pro`, `glm-5.3-flash` and `deepseek-v4.1-flash` are the plan's strong coders.
+
+FlashAgent follows the Go API's rules for outside agents: it names itself `flashagent/<version>` and marks every request with an `x-opencode-session` header — one id per conversation, kept when a session is resumed, which is what their routing and prompt caching key on. The same key also serves pay-as-you-go console credit at `https://opencode.ai/inference/v1`; add that address as Custom for the full console model list.
+
 | Provider | Address | Protocol | Key |
 | :--- | :--- | :--- | :--- |
 | **LM Studio** | `http://localhost:1234/v1` | OpenAI-compatible | none; loaded model, context size and reasoning presets are read from it |
@@ -239,6 +247,7 @@ Start your server, then run `flashagent` in your project directory. The first la
 | **KoboldCpp** | `http://localhost:5001/v1` | OpenAI-compatible | none |
 | **text-generation-webui** | `http://localhost:5000/v1` | OpenAI-compatible | none; start it with `--api` |
 | **LocalAI** | `http://localhost:8080/v1` | OpenAI-compatible | none |
+| **OpenCode Go** | `https://opencode.ai/inference/go/v1` | OpenAI-compatible | `OPENCODE_API_KEY`; [subscription](https://opencode.ai/go), key from the [console](https://opencode.ai/console) — set-up steps above |
 | **Anthropic** | `https://api.anthropic.com` | Anthropic | `ANTHROPIC_API_KEY` |
 | **OpenAI** | `https://api.openai.com/v1` | OpenAI-compatible | `OPENAI_API_KEY` |
 | **Gemini** | `https://generativelanguage.googleapis.com/v1beta` | Gemini | `GEMINI_API_KEY` or `GOOGLE_API_KEY` |
@@ -280,7 +289,7 @@ Settings live in `~/.flashagent/config.json` (`%USERPROFILE%\.flashagent\config.
 
 | Variable | Effect |
 | :--- | :--- |
-| `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GEMINI_API_KEY`, `GOOGLE_API_KEY`, `OPENROUTER_API_KEY`, ... | Key for the provider they belong to (see [Connecting a model](#connecting-a-model)), used when it has none saved |
+| `ANTHROPIC_API_KEY`, `OPENCODE_API_KEY`, `OPENAI_API_KEY`, `GEMINI_API_KEY`, `GOOGLE_API_KEY`, `OPENROUTER_API_KEY`, ... | Key for the provider they belong to (see [Connecting a model](#connecting-a-model)), used when it has none saved |
 | `FLASHAGENT_API_KEY` | Key for any provider that has none saved and none in its own variable |
 | `FLASHAGENT_CONFIG_PATH` | Use this config file instead of `~/.flashagent/config.json` |
 | `FLASHAGENT_TRUST_DIR` | Set to anything: skip the folder trust question, like `--yes` |

@@ -18,7 +18,8 @@ pub struct BackendPreset {
 }
 
 /// Local servers first: FlashAgent is built for them. Two local servers can
-/// share a default port (llama.cpp and LocalAI both take 8080).
+/// share a default port (llama.cpp and LocalAI both take 8080). OpenCode Go
+/// leads the cloud ones.
 const PRESETS: &[BackendPreset] = &[
     BackendPreset { name: "LM Studio", protocol: ApiProtocol::OpenAi, url: "http://localhost:1234/v1", description: "LM Studio's server; it reports the loaded model, its context and reasoning settings", key_env: &[] },
     BackendPreset { name: "Ollama", protocol: ApiProtocol::Ollama, url: "http://localhost:11434", description: "Local Ollama (native API: sets the context window)", key_env: &[] },
@@ -28,6 +29,7 @@ const PRESETS: &[BackendPreset] = &[
     BackendPreset { name: "KoboldCpp", protocol: ApiProtocol::OpenAi, url: "http://localhost:5001/v1", description: "KoboldCpp's OpenAI-compatible API", key_env: &[] },
     BackendPreset { name: "text-generation-webui", protocol: ApiProtocol::OpenAi, url: "http://localhost:5000/v1", description: "The oobabooga web UI, started with --api", key_env: &[] },
     BackendPreset { name: "LocalAI", protocol: ApiProtocol::OpenAi, url: "http://localhost:8080/v1", description: "LocalAI's OpenAI-compatible API", key_env: &[] },
+    BackendPreset { name: "OpenCode Go", protocol: ApiProtocol::OpenAi, url: "https://opencode.ai/inference/go/v1", description: "OpenCode's coding-model subscription: Kimi, GLM, DeepSeek, MiniMax and Claude Haiku behind one key; the session header it routes by is sent on its own", key_env: &["OPENCODE_API_KEY"] },
     BackendPreset { name: "Anthropic", protocol: ApiProtocol::Anthropic, url: "https://api.anthropic.com", description: "Claude models through Anthropic's own API", key_env: &["ANTHROPIC_API_KEY"] },
     BackendPreset { name: "OpenAI", protocol: ApiProtocol::OpenAi, url: "https://api.openai.com/v1", description: "OpenAI's API", key_env: &["OPENAI_API_KEY"] },
     BackendPreset { name: "Gemini", protocol: ApiProtocol::Gemini, url: "https://generativelanguage.googleapis.com/v1beta", description: "Google Gemini through Google's own API", key_env: &["GEMINI_API_KEY", "GOOGLE_API_KEY"] },
