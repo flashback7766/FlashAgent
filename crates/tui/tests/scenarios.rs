@@ -3415,6 +3415,8 @@ fn the_welcome_card_s_own_buttons_do_what_they_say() {
     let (row, col) = term.find_on_screen("/goal").expect("the card offers /goal");
     term.click(row, col);
     term.wait_for("/goal ", WAIT);
+    // Ctrl+D only quits an empty prompt; the typed command is cleared first.
+    term.send("\x1b");
     quit(&mut term);
 }
 
