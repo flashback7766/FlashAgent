@@ -774,7 +774,7 @@ impl SettingsView {
         let dashes = box_w.saturating_sub(title_vis + 1);
         lines.push((
             LineKind::System,
-            format!("  {border_color}╭─{title_styled}{}╮{reset}", "─".repeat(dashes)),
+            format!("  {border_color}╭─{title_styled}{border_color}{}╮{reset}", "─".repeat(dashes)),
         ));
 
         // Tighter as the window narrows; at the narrowest the other tabs are their numbers.

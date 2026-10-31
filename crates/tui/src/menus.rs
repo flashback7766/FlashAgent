@@ -233,7 +233,7 @@ impl RewindConfirm {
         let border_dashes = inner_w.saturating_sub(title_vis);
         lines.push((
             LineKind::System,
-            format!("{border_color}╭─{title_styled}{}╮{reset}", "─".repeat(border_dashes.saturating_sub(1))),
+            format!("{border_color}╭─{title_styled}{border_color}{}╮{reset}", "─".repeat(border_dashes.saturating_sub(1))),
         ));
 
         lines.push((
