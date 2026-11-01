@@ -26,6 +26,10 @@ pub(crate) struct Learned {
     /// Learned only from an explicit refusal of Chat Completions, per model.
     pub(crate) responses: bool,
     pub(crate) responses_dropped: Vec<&'static str>,
+    /// Resource-bound reasoning was refused, but its visible text was accepted.
+    pub(crate) responses_visible_only: bool,
+    /// A reset invalidates in-flight learning, even after switching away and back.
+    generation: u64,
     fields: Option<Fields>,
     dropped: Vec<&'static str>,
     /// Newer OpenAI models take `max_completion_tokens` and refuse `max_tokens`.
@@ -38,6 +42,20 @@ pub(crate) struct Learned {
 }
 
 impl Learned {
+    pub(crate) fn reset(&mut self) {
+        *self = Self { generation: self.generation.wrapping_add(1), ..Default::default() };
+    }
+
+    /// Only this adapter's fields: another request may have learned different
+    /// Chat restrictions since the snapshot was taken.
+    pub(crate) fn merge_responses(self, into: &mut Self) {
+        if self.generation != into.generation { return; }
+        into.responses_visible_only |= self.responses_visible_only;
+        for field in self.responses_dropped {
+            if !into.responses_dropped.contains(&field) { into.responses_dropped.push(field); }
+        }
+    }
+
     /// From the server's error text about the request it refused; false when
     /// it named nothing that request carried and we can drop.
     fn learn(&mut self, error: &str, sent: &serde_json::Value) -> bool {
@@ -91,6 +109,7 @@ impl Learned {
     /// Merged, not replaced: a request running alongside (a subagent) may
     /// have learned something else meanwhile.
     fn merge_into(self, into: &mut Learned) {
+        if self.generation != into.generation { return; }
         for field in self.dropped {
             if !into.dropped.contains(&field) {
                 into.dropped.push(field);
@@ -875,6 +894,43 @@ mod tests {
         let body = body(&c, &[ChatMessage::user("hi")], &[], &TurnOptions::default());
         assert!(body.get("max_tokens").is_none(), "{body}");
         assert!(body.get("seed").is_none(), "{body}");
+    }
+
+    #[test]
+    fn responses_learning_is_monotonic_and_preserves_concurrent_chat_fields() {
+        let mut current = Learned { fields: Some(Fields::All), token_cap: Some(1024), ..Default::default() };
+        let full = current.clone();
+        let mut recovered = current.clone();
+        recovered.responses_visible_only = true;
+        recovered.responses_dropped.push("temperature");
+        current.responses = true;
+        current.responses_dropped.push("top_p");
+        current.fields = Some(Fields::Standard);
+        current.dropped.push("top_k");
+        current.completion_tokens = true;
+        current.no_reasoning_replay = true;
+        current.token_cap = Some(512);
+        let mut expected = current.clone();
+        expected.responses_visible_only = true;
+        expected.responses_dropped.push("temperature");
+        recovered.clone().merge_responses(&mut current);
+        recovered.merge_responses(&mut current);
+        full.merge_responses(&mut current);
+        assert_eq!(current, expected, "a stale success may add knowledge, never erase it");
+    }
+
+    #[test]
+    fn a_learned_state_reset_rejects_in_flight_updates_from_either_adapter() {
+        let mut current = Learned {
+            responses_visible_only: true, responses_dropped: vec!["temperature"],
+            dropped: vec!["top_k"], token_cap: Some(512), ..Default::default()
+        };
+        let stale = current.clone();
+        current.reset();
+        let expected = current.clone();
+        stale.clone().merge_responses(&mut current);
+        stale.merge_into(&mut current);
+        assert_eq!(current, expected);
     }
 
     #[test]

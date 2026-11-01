@@ -2080,6 +2080,114 @@ fn a_misspelled_model_is_offered_the_closest_one() {
     quit(&mut term);
 }
 
+const COMPACTION_SUMMARY: &str = "## Objective\nanswer the user's questions.\n\n## Requirements\n- none\n\n## Decisions\n- none\n\n## Work State\n### Completed\n- answered the earlier questions\n### Active\n- none\n### Blocked\n- none\n\n## Next Move\n1. continue with the next question\n\n## Relevant Files\n- none\n\n## Important Context\n- none";
+
+#[test]
+fn compaction_refreshes_the_gauge_before_another_prompt() {
+    let server = MockServer::start(vec![Reply::Text("First answer.".into()), Reply::Text("Second answer.".into())]);
+    server.report_prompt_tokens(26_000);
+    server.answer_side_requests("Summarize the conversation above", COMPACTION_SUMMARY);
+    let home = Home::new();
+    let term = ready_with(&home, &server, serde_json::json!({ "auto_compact_context": false, "context_warn_threshold": 95 }));
+    paste(&term, &format!("the earlier question {}", "details ".repeat(1500)));
+    term.send(ENTER);
+    term.wait_for("First answer.", WAIT);
+    term.wait_gone(RUNNING_HINT, WAIT);
+    ask(&term, "the current question", "Second answer.");
+    term.wait_for("26.0K/32K", WAIT);
+
+    term.type_text("/compact");
+    term.send(ENTER);
+    term.wait_for("Session compacted", WAIT);
+    // The footer and gauge can arrive in separate PTY reads of the same frame.
+    term.wait_gone("26.0K/32K", Duration::from_secs(2));
+    let screen = term.wait_for("Session compacted", WAIT);
+    assert!(!screen.contains("26.0K/32K"), "the old request still owns the gauge after compaction, before any new input:\n{screen}");
+    assert!(!screen.contains("Context compacted:"), "the summary card has a second, yellow success message:\n{screen}");
+    assert!(screen.contains("/32K"), "the context gauge disappeared:\n{screen}");
+    assert_eq!(server.turns().len(), 2, "the gauge must refresh without another model turn");
+}
+
+#[test]
+fn automatic_compaction_refreshes_the_gauge_and_keeps_the_archive() {
+    let server = MockServer::start(vec![Reply::Text("First answer.".into()), Reply::Text("Second answer.".into())]);
+    server.answer_side_requests("Summarize the conversation above", COMPACTION_SUMMARY);
+    let home = Home::new();
+    let term = ready_with(&home, &server, serde_json::json!({
+        "auto_compact_context": true, "context_compact_threshold": 75, "context_warn_threshold": 95,
+        "animations": false,
+    }));
+    paste(&term, &format!("the earlier question {}", "details ".repeat(1500)));
+    term.send(ENTER);
+    term.wait_for("First answer.", WAIT);
+    term.wait_gone(RUNNING_HINT, WAIT);
+    server.report_prompt_tokens(26_000);
+    server.delay_side_answers(Duration::from_secs(3));
+    paste(&term, "the current question");
+    term.send(ENTER);
+    term.wait_for("Writing a summary", WAIT);
+    term.wait_for("26.0K/32K", WAIT);
+    term.wait_for("conversation… 1.", WAIT);
+    term.wait_for("Session compacted", WAIT);
+    term.wait_gone("26.0K/32K", Duration::from_secs(2));
+    let screen = term.wait_for("Session compacted", WAIT);
+    assert!(!screen.contains("26.0K/32K"), "automatic compaction kept the old server count:\n{screen}");
+    assert!(!screen.contains("Context compacted:"), "automatic compaction has a duplicate status:\n{screen}");
+    let sessions = home.sessions();
+    let saved: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(sessions.first().expect("the session was saved")).unwrap()).unwrap();
+    let archive = saved["archive"].as_array().expect("compaction keeps its archive in the session");
+    assert!(archive.iter().any(|message| message["content"].as_str().is_some_and(|text| text.starts_with("the earlier question"))), "the replaced prompt was lost: {archive:?}");
+    assert!(archive.iter().any(|message| message["content"] == "First answer."), "the replaced answer was lost: {archive:?}");
+}
+
+#[test]
+fn failed_compaction_keeps_the_previous_gauge() {
+    let server = MockServer::start(vec![Reply::Text("Only answer.".into())]);
+    server.report_prompt_tokens(26_000);
+    server.answer_side_requests("Summarize the conversation above", "");
+    let home = Home::new();
+    let term = ready_with(&home, &server, serde_json::json!({ "auto_compact_context": false, "context_warn_threshold": 95 }));
+    ask(&term, "the question", "Only answer.");
+    term.wait_for("26.0K/32K", WAIT);
+    let session = home.sessions().into_iter().next().expect("the session was saved");
+    let before: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&session).unwrap()).unwrap();
+    term.type_text("/compact");
+    term.send(ENTER);
+    let screen = term.wait_for("Session compaction failed", WAIT);
+    assert!(screen.contains("26.0K/32K"), "a failed summary must not lower the unchanged window:\n{screen}");
+    let after: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&session).unwrap()).unwrap();
+    assert_eq!(after["messages"], before["messages"], "an empty summary must not replace the conversation");
+    assert_eq!(after.get("archive"), before.get("archive"));
+}
+
+#[test]
+fn a_compaction_spinner_moves_before_the_first_summary_word() {
+    let server = MockServer::start(vec![Reply::Text("Only answer.".into())]);
+    server.answer_side_requests("Summarize the conversation above", COMPACTION_SUMMARY);
+    let home = Home::new();
+    let term = ready_with(&home, &server, serde_json::json!({ "animations": false }));
+    ask(&term, "the question", "Only answer.");
+    server.delay_side_answers(Duration::from_secs(3));
+    term.type_text("/compact");
+    term.send(ENTER);
+    let first = term.wait_for("Writing a summary", WAIT);
+    let spinner = |screen: &str| screen.lines().find_map(|line| {
+        line.split_once("Writing a summary").and_then(|(before, _)| before.trim().chars().last())
+    });
+    let mark = spinner(&first).expect("the open card has a spinner");
+    let started = Instant::now();
+    loop {
+        let screen = term.screen();
+        if spinner(&screen).is_some_and(|next| next != mark) {
+            break;
+        }
+        assert!(started.elapsed() < Duration::from_secs(2), "the spinner froze before any summary words arrived:\n{screen}");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    term.wait_for("conversation… 1.", WAIT);
+    term.wait_for("Session compacted", WAIT);
+}
+
 #[test]
 fn a_single_exchange_can_be_compacted_too() {
     let server = MockServer::start(vec![

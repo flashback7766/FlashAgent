@@ -14,7 +14,7 @@ pub struct ContextUsage {
     /// tools and memory, the chat template around them. `total_used` takes it
     /// as a floor: the window holds what the model read, not what the app can
     /// count. It describes the request it was reported for, so it is cleared
-    /// when a turn starts and when another session takes the screen.
+    /// when a turn starts, compaction succeeds or another session takes the screen.
     pub server_seen: Option<usize>,
 }
 

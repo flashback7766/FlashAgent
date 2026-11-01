@@ -3540,8 +3540,49 @@ mod tests {
         assert!(!shown.starts_with(' '));
     }
 
+    #[test]
+    fn a_compaction_result_retires_the_old_count_and_keeps_one_card_and_the_archive() {
+        for saved in [0, 9000] {
+            let mut app = test_app();
+            app.context_usage.system_tokens = 321;
+            app.context_usage.server_seen = Some(26_000);
+            app.chat.push_user("the earlier question");
+            app.chat.on_event(&LoopEvent::TurnDelta("the earlier answer".into()));
+            app.chat.start_compaction_card();
+            app.record_compaction(CompactionResult {
+                saved,
+                summary: SHAPED_SUMMARY.into(),
+                input_tokens: 26_000,
+                output_tokens: 300,
+                archive: vec![ChatMessage::user("the earlier question"), ChatMessage::assistant("the earlier answer")],
+            });
+            assert_eq!(app.context_usage.server_seen, None, "even a manual summary with no saving replaces the old request");
+            assert_eq!(app.context_usage.total_used(), 321);
+            assert_eq!(app.chat.raw_content_tokens(&|text| text.len()), (0, 0, 0, 0));
+            assert_eq!(app.archive.len(), 2);
+            let rows = app.chat.render(120);
+            assert_eq!(rows.iter().filter(|(_, row)| row.contains("Session compacted")).count(), 1);
+            assert!(!rows.iter().any(|(_, row)| row.contains("Context compacted:")));
+        }
+    }
+
+    #[test]
+    fn a_mid_turn_compaction_uses_the_published_history_immediately() {
+        let mut app = test_app();
+        app.history.push(ChatMessage::user("old context"));
+        app.turn_history = Some(flashagent_core::loop_::SharedHistory::new(vec![
+            ChatMessage::system("the compacted context"), ChatMessage::user("the current task"),
+        ]));
+        app.record_compaction(CompactionResult {
+            saved: 9000, summary: SHAPED_SUMMARY.into(), input_tokens: 26_000, output_tokens: 300, archive: Vec::new(),
+        });
+        assert_eq!(app.history.len(), 2);
+        assert_eq!(app.history[0].content, "the compacted context");
+        assert_eq!(app.history[1].content, "the current task");
+    }
+
     /// The app a test can poke at: the parts of it the goal handback touches.
-    fn test_app() -> App {
+    pub(super) fn test_app() -> App {
         initial_app(InitialApp {
             app_config: AppConfig::default(),
             model: "test-model".into(),

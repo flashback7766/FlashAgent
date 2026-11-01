@@ -207,7 +207,7 @@ impl Client {
         *self.discovery.write() = None;
         *self.working_models_url.write() = None;
         *self.profile.write() = None;
-        *self.learned.write() = Default::default();
+        self.learned.write().reset();
     }
 
     /// Read before anything about the server, and handed back with what it
@@ -289,7 +289,7 @@ impl Client {
             .as_ref()
             .and_then(|disc| disc.model(&model).map(|m| m.thinking.clone()));
         *self.profile.write() = derived;
-        *self.learned.write() = Default::default();
+        self.learned.write().reset();
     }
 
     pub fn discovery(&self) -> Option<ServerDiscovery> {

@@ -548,7 +548,6 @@ impl AgentLoop {
                 };
                 match done {
                     Compaction::Saved(saved) => {
-                        events(LoopEvent::Compacted { saved });
                         // The answer a nudge held out goes back before the two
                         // copies are reconciled: it is conversation, and the
                         // summary that just ran could not have included it.
@@ -556,6 +555,8 @@ impl AgentLoop {
                         // The shortened history is the conversation now, so the
                         // shared copy must lose the messages that are gone.
                         history.sync();
+                        // The UI reads this handle when it resets the context gauge.
+                        events(LoopEvent::Compacted { saved });
                         // The old figure describes a history that is gone.
                         last_prompt_tokens = None;
                         // A reminder that was waiting for the next request died
@@ -2856,6 +2857,9 @@ mod tests {
         let rt = tokio::runtime::Runtime::new().unwrap();
         let (returned, _) = rt
             .block_on(l.run(&llm, &tools, shared.clone(), |e| {
+                if matches!(&e, LoopEvent::Compacted { .. }) {
+                    assert_eq!(shared.len(), 1, "the completion event must expose the shortened history immediately");
+                }
                 // Read between two steps, after compaction has happened.
                 if let LoopEvent::ToolStarted { name, .. } = &e {
                     if name == "write_file" {

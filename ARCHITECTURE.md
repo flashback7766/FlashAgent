@@ -195,6 +195,14 @@ Hermes markup, and the loop's text-call parser reads its calls out of the
 reply. Gemma also refuses a system instruction; it then opens the first
 user message.
 
+**Responses replay.** An exact pre-stream HTTP 400 about another Azure resource
+permits one retry with visible reasoning in place of opaque replay items. The
+request's endpoint, model, tools, call ids, images, limits and `store: false`
+stay unchanged. Accepted streams are never retried. Successful compatibility
+learning is merged for the current endpoint/model generation, so a late answer
+cannot teach a configuration the user has since switched to. Supported reasoning
+models request `summary: auto` even when the effort is left to the provider.
+
 **Providers.** `config.json` keeps a list of providers (`ProviderProfile`
 in `core::config`: name, protocol, address, key, model) and the name of the
 one in use; `AppConfig::endpoint()` is that one's. The presets
@@ -277,6 +285,10 @@ graph LR
   falls in, and a new question no longer throws the cache away: its cost
   barely grows with the length of the session (see
   [docs/numbers.md](docs/numbers.md)).
+- A compaction card stays in the live tail with a spinner and elapsed time
+  until its summary lands. Successful compaction retires the old server prompt
+  count immediately; the gauge counts the rewritten history, not the archived
+  transcript. A failed or empty summary leaves the history and count intact.
 - Every row is measured in display cells and clipped or wrapped to the
   width. A row wider than the terminal would wrap and push every row under
   it down. The bottom row stays one column short, because a character in
