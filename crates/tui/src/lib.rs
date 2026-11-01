@@ -2495,12 +2495,14 @@ mod tests {
         v.start_compaction_card();
         assert_eq!(v.settled_boundary(), before_card, "a spinning card must not be printed and frozen");
         let (settled, live) = v.render_split(80, false);
+        // The status line shimmers, so the colour codes land between letters and
+        // a raw contains() would depend on the clock. Read the text without them.
         assert!(
-            live.iter().any(|(k, t)| *k == LineKind::Compaction && t.contains("Writing a summary")),
+            live.iter().any(|(k, t)| *k == LineKind::Compaction && strip_ansi(t).contains("Writing a summary")),
             "the card is not in the live tail: {live:?}"
         );
         assert!(
-            !settled.iter().any(|(_, t)| t.contains("Writing a summary")),
+            !settled.iter().any(|(_, t)| strip_ansi(t).contains("Writing a summary")),
             "the card was also printed: {settled:?}"
         );
         v.finish_compaction_card(&CompactionResult {
@@ -2528,7 +2530,7 @@ mod tests {
             "the streamed text is not in the card: {live:?}"
         );
         assert!(
-            live.iter().any(|(_, t)| t.contains("Writing a summary")),
+            live.iter().any(|(_, t)| strip_ansi(t).contains("Writing a summary")),
             "the spinner left the open card: {live:?}"
         );
         assert!(settled.is_empty(), "an open card must not be printed and frozen: {settled:?}");
@@ -2549,7 +2551,7 @@ mod tests {
             "the refused summary was not cleared: {live:?}"
         );
         assert!(
-            live.iter().any(|(_, t)| t.contains("Writing a summary")),
+            live.iter().any(|(_, t)| strip_ansi(t).contains("Writing a summary")),
             "the card lost its spinner after the reset: {live:?}"
         );
 
@@ -4026,6 +4028,28 @@ hm".into()));
                 assert!(visible_width(&row) <= width, "the waiting card overflowed {width} columns: {row:?}");
             }
         }
+    }
+
+    #[test]
+    fn the_waiting_status_reads_the_same_at_every_shimmer_phase() {
+        // The band lights a few letters and puts a colour code between them, so a
+        // raw contains() depends on the clock: it failed on the first letter.
+        // Whatever the phase, the words are there once the codes are removed.
+        let card = CompactionCard {
+            state: CompactionState::Started,
+            started_at_ms: Some(0),
+            summary: String::new(),
+            input_tokens: None,
+            output_tokens: None,
+        };
+        let mut lit_first_letter = false;
+        for now_ms in (0..2200).step_by(37) {
+            let rows = render_compaction_card(&card, 80, now_ms);
+            lit_first_letter |= rows.iter().any(|(_, row)| row.contains("W\x1b"));
+            let text = rows.into_iter().map(|(_, row)| strip_ansi(&row)).collect::<Vec<_>>().join("\n");
+            assert!(text.contains("Writing a summary"), "at {now_ms}ms: {text:?}");
+        }
+        assert!(lit_first_letter, "the band never lit the first letter; the phase sweep proves less than it claims");
     }
 
     #[test]
