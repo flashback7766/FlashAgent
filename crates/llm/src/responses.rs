@@ -1,6 +1,6 @@
 //! OpenAI Responses for models whose gateway refuses Chat Completions. The
-//! conversation stays local: every request carries its own input and signed
-//! reasoning, never a server-side conversation id.
+//! conversation stays local: every request carries its own input, never a
+//! server-side conversation id.
 
 use std::collections::BTreeMap;
 
@@ -8,7 +8,7 @@ use serde_json::{json, Value};
 
 use crate::client::{pump, Client, EventStream, Malformed, WireDecoder};
 use crate::parse::SseDecoder;
-use crate::types::{ChatMessage, CompletionMeasurement, CostDetails, FinishReason, LlmError, LlmEvent, Role, ToolSpec, TurnOptions, Usage};
+use crate::types::{ChatMessage, CompletionMeasurement, CostDetails, FinishReason, LlmError, LlmEvent, Role, ThinkingEffort, ToolSpec, TurnOptions, Usage};
 
 pub(crate) fn required_by(error: &str) -> bool {
     let lower = error.to_lowercase();
@@ -21,44 +21,99 @@ pub(crate) fn required_by(error: &str) -> bool {
             .iter().any(|s| message.contains(s))
 }
 
+const RESOURCE_MISMATCH: &str = "The requested item was created under a different Azure OpenAI resource. Use the same resource that created the item to access it.";
+
+fn resource_mismatch(error: &str) -> bool {
+    let parsed = serde_json::from_str::<Value>(error).ok();
+    let message = parsed.as_ref().and_then(|v| v.pointer("/error/message")).and_then(Value::as_str).unwrap_or(error).trim();
+    let message = message.strip_prefix("OpenAI Responses bad request: ").unwrap_or(message);
+    let Some(suffix) = message.strip_prefix(RESOURCE_MISMATCH) else { return false; };
+    let suffix = suffix.trim();
+    if suffix.is_empty() { return true; }
+    // Gateways append a trace id to the provider's otherwise exact refusal.
+    suffix.strip_prefix("[trace_id=").and_then(|s| s.strip_suffix(']')).is_some_and(|id| {
+        !id.is_empty() && id.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_'))
+    })
+}
+
+fn has_bound_reasoning(request: &Value) -> bool {
+    request["input"].as_array().is_some_and(|items| items.iter().any(|item| {
+        item["type"] == "reasoning" && ["id", "encrypted_content"].iter().any(|key| {
+            item[*key].as_str().is_some_and(|s| !s.is_empty())
+        })
+    }))
+}
+
 pub(crate) async fn stream(client: &Client, messages: &[ChatMessage], tools: &[ToolSpec], options: &TurnOptions) -> Result<EventStream, LlmError> {
     let busy = client.busy();
+    // Snapshot the reset generation before reading the endpoint/model: a switch
+    // while this request is being built must not teach the new configuration.
+    let mut learned = client.learned.read().clone();
     let url = format!("{}/responses", crate::openai::api_base(client));
     let headers = crate::openai::headers(client);
-    let mut dropped = client.learned.read().responses_dropped.clone();
     let mut request = body(client, messages, tools, options);
+    if learned.responses_visible_only { request["input"] = input(messages, true); }
+    let mut retried_replay = false;
     loop {
-        for key in &dropped {
+        for key in &learned.responses_dropped {
             if let Some(map) = request.as_object_mut() { map.remove(*key); }
         }
         let response = client.post(&url, &headers, &request).await?;
         if response.status().is_success() {
-            let mut learned = client.learned.write();
-            for key in dropped {
-                if !learned.responses_dropped.contains(&key) { learned.responses_dropped.push(key); }
-            }
-            drop(learned);
+            learned.merge_responses(&mut client.learned.write());
             let model = request["model"].as_str().unwrap_or_default().to_string();
             return Ok(pump(response, busy, Decoder { model, ..Default::default() }));
         }
         let status = response.status().as_u16();
         let text = response.text().await.unwrap_or_default();
+        if retried_replay { return Err(LlmError::Status { status, body: text }); }
+        if status == 400 && !learned.responses_visible_only && resource_mismatch(&text) && has_bound_reasoning(&request) {
+            // The entire reasoning item can be resource-bound, not just its id.
+            // Rebuild only input: routing, effort and prior sampling repairs stay put.
+            request["input"] = input(messages, true);
+            learned.responses_visible_only = true;
+            retried_replay = true;
+            continue;
+        }
         let lower = text.to_lowercase();
-        // Only named sampling fields can give way. Tool schemas, replay and
-        // privacy settings are not optional fallbacks to silently throw out.
+        // Outside that specific replay refusal, only named sampling fields can
+        // give way. Tools, reasoning controls and privacy settings stay intact.
         let refused = ["temperature", "top_p"].into_iter().find(|key| {
-            request.get(*key).is_some() && !dropped.contains(key) && lower.contains(key)
+            request.get(*key).is_some() && !learned.responses_dropped.contains(key) && lower.contains(key)
                 && ["unsupported", "not supported", "not allowed", "unknown"].iter().any(|s| lower.contains(s))
         });
         if let Some(key) = refused.filter(|_| matches!(status, 400 | 422)) {
-            dropped.push(key);
+            learned.responses_dropped.push(key);
             continue;
         }
         return Err(LlmError::Status { status, body: text });
     }
 }
 
-fn body(client: &Client, messages: &[ChatMessage], tools: &[ToolSpec], options: &TurnOptions) -> Value {
+fn visible_reasoning(message: &ChatMessage, items: &[Value]) -> String {
+    if let Some(text) = message.reasoning.as_deref().filter(|s| !s.trim().is_empty()) { return text.to_string(); }
+    let mut parts = Vec::new();
+    for item in items.iter().filter(|item| item["type"] == "reasoning") {
+        let summary = item["summary"].as_array().into_iter().flatten();
+        let content = item["content"].as_array().into_iter().flatten().filter(|part| part["type"] == "reasoning_text");
+        for part in summary.chain(content) {
+            if let Some(text) = part["text"].as_str().filter(|s| !s.trim().is_empty()) {
+                if !parts.contains(&text) { parts.push(text); }
+            }
+        }
+    }
+    parts.join("\n")
+}
+
+fn message_content(message: &ChatMessage) -> Value {
+    if message.images.is_empty() { return json!(message.content); }
+    let mut parts = Vec::new();
+    if !message.content.is_empty() { parts.push(json!({"type": "input_text", "text": message.content})); }
+    parts.extend(message.images.iter().map(|image| json!({"type": "input_image", "image_url": image})));
+    Value::Array(parts)
+}
+
+fn input(messages: &[ChatMessage], visible_only: bool) -> Value {
     let mut input = Vec::new();
     for message in messages {
         match message.role {
@@ -66,29 +121,33 @@ fn body(client: &Client, messages: &[ChatMessage], tools: &[ToolSpec], options: 
                 "type": "function_call_output", "call_id": message.tool_call_id, "output": message.content,
             })),
             Role::Assistant => {
-                if let Some(replay) = message.replay.as_ref().filter(|r| r["protocol"] == "responses") {
-                    if let Some(items) = replay["reasoning"].as_array() { input.extend(items.iter().cloned()); }
+                let items = message.replay.as_ref().filter(|r| r["protocol"] == "responses")
+                    .and_then(|r| r["reasoning"].as_array()).map(Vec::as_slice).unwrap_or_default();
+                input.extend(items.iter().filter(|item| !visible_only || item["type"] != "reasoning").cloned());
+                if visible_only {
+                    let reasoning = visible_reasoning(message, items);
+                    if !reasoning.is_empty() {
+                        input.push(json!({"role": "assistant", "content": format!("Earlier assistant reasoning (visible text):\n{reasoning}")}));
+                    }
                 }
-                if !message.content.is_empty() {
-                    input.push(json!({"role": "assistant", "content": message.content}));
+                if !message.content.is_empty() || !message.images.is_empty() {
+                    input.push(json!({"role": "assistant", "content": message_content(message)}));
                 }
                 for call in &message.tool_calls {
                     input.push(json!({"type": "function_call", "call_id": call.id, "name": call.name, "arguments": call.args_json}));
                 }
             }
             Role::System | Role::User => {
-                let content = if message.images.is_empty() { json!(message.content) } else {
-                    let mut parts = Vec::new();
-                    if !message.content.is_empty() { parts.push(json!({"type": "input_text", "text": message.content})); }
-                    parts.extend(message.images.iter().map(|image| json!({"type": "input_image", "image_url": image})));
-                    Value::Array(parts)
-                };
-                input.push(json!({"role": message.role.as_str(), "content": content}));
+                input.push(json!({"role": message.role.as_str(), "content": message_content(message)}));
             }
         }
     }
+    Value::Array(input)
+}
+
+fn body(client: &Client, messages: &[ChatMessage], tools: &[ToolSpec], options: &TurnOptions) -> Value {
     let mut body = json!({
-        "model": client.model(), "input": input, "stream": true, "store": false,
+        "model": client.model(), "input": input(messages, false), "stream": true, "store": false,
         "include": ["reasoning.encrypted_content"],
     });
     if !tools.is_empty() {
@@ -99,8 +158,19 @@ fn body(client: &Client, messages: &[ChatMessage], tools: &[ToolSpec], options: 
         })).collect());
     }
     if let Some(max) = options.max_tokens { body["max_output_tokens"] = json!(max); }
-    if let Some(effort) = client.resolve_effort(messages, options) {
-        body["reasoning"] = json!({"effort": if effort == "off" { "none" } else { &effort }, "summary": "auto"});
+    // A profile without an off rung must not promote an explicit disable.
+    let disabled = match options.custom_effort.as_deref() {
+        Some(effort) => effort.eq_ignore_ascii_case("off") || effort.eq_ignore_ascii_case("none"),
+        None => options.thinking == ThinkingEffort::Off,
+    };
+    let effort = if disabled { Some("none".to_string()) } else { client.resolve_effort(messages, options) };
+    if effort.is_some() || client.profile().is_some_and(|p| p.supported) {
+        // A provider-chosen effort still needs a readable summary; requesting
+        // one must not select an effort or turn an explicit `none` back on.
+        body["reasoning"] = json!({"summary": "auto"});
+        if let Some(effort) = effort {
+            body["reasoning"]["effort"] = json!(if effort == "off" { "none" } else { &effort });
+        }
     }
     // Local-model sampling presets are not GPT's tuned defaults. A Custom
     // preset is an explicit choice and may be adapted only on a named refusal.
@@ -432,6 +502,16 @@ mod tests {
 
     fn thought(events: &[LlmEvent]) -> String {
         events.iter().filter_map(|event| if let LlmEvent::ReasoningDelta(text) = event { Some(text.as_str()) } else { None }).collect()
+    }
+
+    fn replay_message(items: Value) -> ChatMessage {
+        let mut message = ChatMessage::assistant("previous answer");
+        message.replay = Some(json!({"protocol": "responses", "reasoning": items}));
+        message
+    }
+
+    fn resource_error() -> String {
+        json!({"error": {"message": format!("OpenAI Responses bad request: {RESOURCE_MISMATCH} [trace_id=00112233445566778899aabbccddeeff]")}}).to_string()
     }
 
     #[test]
@@ -815,6 +895,85 @@ mod tests {
     }
 
     #[test]
+    fn only_the_exact_azure_resource_mismatch_is_recoverable() {
+        let actual = "OpenAI Responses bad request: The requested item was created under a different Azure OpenAI resource. Use the same resource that created the item to access it.";
+        assert!(resource_mismatch(actual));
+        assert!(resource_mismatch(RESOURCE_MISMATCH));
+        assert!(resource_mismatch(&json!({"error":{"message":actual}}).to_string()));
+        assert!(resource_mismatch(&format!("{actual} [trace_id=abc123]")));
+        assert!(resource_mismatch(&format!("{RESOURCE_MISMATCH}\n[trace_id=abc-123]")));
+        assert!(resource_mismatch(&resource_error()));
+        for error in [
+            "The requested item was created under a different resource.",
+            "Invalid encrypted_content", "Unknown reasoning id", "context length exceeded",
+            &format!("Tool error: {actual}"), &format!("{actual} Another error occurred."),
+            &format!("{actual} [trace_id=]"), &format!("{actual} [trace_id=abc123] Another error occurred."),
+        ] { assert!(!resource_mismatch(error), "{error}"); }
+    }
+
+    #[test]
+    fn visible_replay_prefers_saved_reasoning_and_extracts_only_plaintext_once() {
+        let mut message = replay_message(json!([{
+            "type":"reasoning", "id":"rs_1", "encrypted_content":"sealed, not readable",
+            "summary":[{"type":"summary_text","text":"a summary"},{"text":"a summary"}],
+            "content":[
+                {"type":"reasoning_text","text":"a summary"},
+                {"type":"reasoning_text","text":"more detail"},
+                {"type":"encrypted","text":"not reasoning text"},
+                {"type":"reasoning_text","text":17}
+            ]
+        }]));
+        message.reasoning = Some("the saved visible reasoning".into());
+        let sent = input(&[message.clone()], true);
+        assert_eq!(sent, json!([
+            {"role":"assistant","content":"Earlier assistant reasoning (visible text):\nthe saved visible reasoning"},
+            {"role":"assistant","content":"previous answer"}
+        ]));
+        for empty in [None, Some(String::new()), Some(" \n".into())] {
+            message.reasoning = empty;
+            assert_eq!(input(&[message.clone()], true), json!([
+                {"role":"assistant","content":"Earlier assistant reasoning (visible text):\na summary\nmore detail"},
+                {"role":"assistant","content":"previous answer"}
+            ]));
+        }
+        message.replay.as_mut().unwrap()["protocol"] = json!("anthropic");
+        assert_eq!(input(&[message], true), json!([{"role":"assistant","content":"previous answer"}]));
+    }
+
+    #[test]
+    fn a_supported_default_without_a_preset_still_requests_a_summary() {
+        let c = client("http://localhost:1234/v1/responses").with_profile(crate::thinking::ThinkingProfile {
+            presets: vec!["low".into(), "high".into(), "max".into()],
+            protocol: crate::thinking::ThinkingProtocol::ReasoningEffort,
+            supported: true, default_preset: None,
+        });
+        let options = TurnOptions { thinking: ThinkingEffort::Default, ..Default::default() };
+        let sent = body(&c, &[ChatMessage::user("hello")], &[], &options);
+        assert_eq!(sent["reasoning"], json!({"summary":"auto"}));
+        for profile in [crate::thinking::ThinkingProfile::unsupported(), crate::thinking::ThinkingProfile::unreported()] {
+            c.set_profile(profile);
+            assert!(body(&c, &[], &[], &options).get("reasoning").is_none());
+        }
+        assert!(body(&client("http://localhost:1234/v1"), &[], &[], &options).get("reasoning").is_none());
+    }
+
+    #[test]
+    fn requesting_a_summary_never_promotes_an_explicit_disabled_effort() {
+        let c = client("http://localhost:1234/v1/responses").with_profile(crate::thinking::ThinkingProfile {
+            presets: vec!["low".into(), "high".into()],
+            protocol: crate::thinking::ThinkingProtocol::ReasoningEffort,
+            supported: true, default_preset: Some("high".into()),
+        });
+        for options in [
+            TurnOptions { thinking: ThinkingEffort::Off, ..Default::default() },
+            TurnOptions { custom_effort: Some("none".into()), ..Default::default() },
+            TurnOptions { custom_effort: Some("off".into()), ..Default::default() },
+        ] {
+            assert_eq!(body(&c, &[], &[], &options)["reasoning"], json!({"effort":"none", "summary":"auto"}));
+        }
+    }
+
+    #[test]
     fn stateless_input_preserves_messages_tools_images_and_encrypted_reasoning() {
         let c = client("http://localhost:1234/v1");
         let mut user = ChatMessage::user("read it");
@@ -964,6 +1123,166 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn default_summaries_reach_the_server_and_rejection_does_not_drop_reasoning() {
+        for accepted in [true, false] {
+            let (url, log) = crate::openai::test_server::serve(move |req| {
+                assert_eq!(req.json()["reasoning"], json!({"summary":"auto"}));
+                if accepted {
+                    ("200 OK", "text/event-stream", sse(&[text_reply("ok")]))
+                } else {
+                    ("400 Bad Request", "application/json", "reasoning.summary is not supported".into())
+                }
+            }).await;
+            let c = client(&format!("{url}/v1/responses")).with_profile(crate::thinking::ThinkingProfile {
+                presets: vec!["low".into(), "high".into()],
+                protocol: crate::thinking::ThinkingProtocol::ReasoningEffort,
+                supported: true, default_preset: None,
+            });
+            let options = TurnOptions { thinking: ThinkingEffort::Default, ..Default::default() };
+            let result = c.stream_with_options(&[ChatMessage::user("hi")], &[], &options).await;
+            if accepted {
+                let events: Vec<_> = result.unwrap().collect().await;
+                assert!(events.iter().all(Result::is_ok));
+            } else {
+                assert!(matches!(result, Err(LlmError::Status { status: 400, .. })));
+            }
+            assert_eq!(log.lock().unwrap().len(), 1);
+            assert!(c.learned.read().responses_dropped.is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn a_resource_mismatch_retries_once_preserving_context_and_learns_visible_replay() {
+        let (url, log) = crate::openai::test_server::serve(|req| {
+            assert_eq!(req.method, "POST");
+            assert_eq!(req.path, "/v1/responses");
+            if has_bound_reasoning(&req.json()) {
+                ("400 Bad Request", "application/json", resource_error())
+            } else {
+                ("200 OK", "text/event-stream", sse(&[
+                    json!({"type":"response.reasoning_summary_text.delta", "output_index":0, "summary_index":0, "delta":"Recovered reasoning."}),
+                    json!({"type":"response.reasoning_summary_text.done", "output_index":0, "summary_index":0, "text":"Recovered reasoning."}),
+                    completed(json!([
+                        {"type":"reasoning", "id":"rs_recovered", "summary":[{"type":"summary_text", "text":"Recovered reasoning."}], "encrypted_content":"sealed"},
+                        {"type":"message", "content":[{"type":"output_text", "text":"recovered"}]}
+                    ]))
+                ]))
+            }
+        }).await;
+        let c = client(&format!("{url}/v1/responses"));
+        c.set_user_sampling(true);
+        let mut system = ChatMessage::system("rules with id: system-id");
+        system.images.push("data:image/png;base64,SYSTEM".into());
+        let mut user = ChatMessage::user("read this id: user-id");
+        user.images.push("data:image/png;base64,USER".into());
+        let reasoning = json!({"type":"reasoning", "id":"rs_1", "encrypted_content":"sealed reasoning", "summary":[{"text":"read the file first"}]});
+        let mut assistant = replay_message(json!([reasoning]));
+        assistant.content = "opening file, id: assistant-id".into();
+        assistant.images.push("data:image/png;base64,ASSISTANT".into());
+        assistant.reasoning = Some("read the file first".into());
+        let arguments = r#"{"path":"a.rs","id":"argument-id","nested":{"id":"nested-id","encrypted_content":"tool data"}}"#;
+        assistant.tool_calls.push(ToolCall { id: "call_1".into(), name: "read_file".into(), args_json: arguments.into() });
+        let result = r#"{"id":"result-id","content":"file contents"}"#;
+        let history = vec![system, user, assistant, ChatMessage::tool_result("call_1", result)];
+        let schema = json!({"$id":"schema-id", "type":"object", "properties":{"id":{"type":"string"}, "path":{"type":"string"}}});
+        let tools = vec![ToolSpec { name: "read_file".into(), description: "Read a file".into(), parameters_json: schema.to_string() }];
+        let options = TurnOptions { custom_effort: Some("max".into()), max_tokens: Some(1234), temperature: Some(0.4), top_p: Some(0.8), ..Default::default() };
+        let full = body(&c, &history, &tools, &options);
+        let events: Vec<_> = c.stream_with_options(&history, &tools, &options).await.unwrap().collect().await;
+        assert!(events.iter().any(|e| matches!(e, Ok(LlmEvent::TextDelta(s)) if s == "recovered")));
+        let thoughts: String = events.iter().filter_map(|e| match e {
+            Ok(LlmEvent::ReasoningDelta(text)) => Some(text.as_str()), _ => None,
+        }).collect();
+        assert_eq!(thoughts, "Recovered reasoning.", "the fallback must not hide or duplicate readable thoughts");
+        assert!(events.iter().any(|e| matches!(e, Ok(LlmEvent::Usage(u)) if u.prompt == Some(50) && u.completion == Some(9) && u.cached == Some(40))));
+        assert!(events.iter().all(Result::is_ok));
+        let sent: Vec<_> = log.lock().unwrap().iter().map(|r| r.json()).collect();
+        assert_eq!(sent.len(), 2);
+        assert_eq!(sent[0], full);
+        let mut visible = full.clone();
+        visible["input"] = json!([
+            {"role":"system", "content":[{"type":"input_text", "text":"rules with id: system-id"}, {"type":"input_image", "image_url":"data:image/png;base64,SYSTEM"}]},
+            {"role":"user", "content":[{"type":"input_text", "text":"read this id: user-id"}, {"type":"input_image", "image_url":"data:image/png;base64,USER"}]},
+            {"role":"assistant", "content":"Earlier assistant reasoning (visible text):\nread the file first"},
+            {"role":"assistant", "content":[{"type":"input_text", "text":"opening file, id: assistant-id"}, {"type":"input_image", "image_url":"data:image/png;base64,ASSISTANT"}]},
+            {"type":"function_call", "call_id":"call_1", "name":"read_file", "arguments":arguments},
+            {"type":"function_call_output", "call_id":"call_1", "output":result}
+        ]);
+        assert_eq!(sent[1], visible, "only opaque replay may give way");
+        assert_eq!(sent[1].to_string().matches("read the file first").count(), 1);
+        assert_eq!(sent[1]["store"], false);
+        assert_eq!(sent[1]["include"], json!(["reasoning.encrypted_content"]));
+        assert_eq!(sent[1]["reasoning"], json!({"effort":"max", "summary":"auto"}));
+        assert_eq!(sent[1]["max_output_tokens"], 1234);
+        assert_eq!(sent[1]["tools"][0]["parameters"], schema);
+        assert_eq!(history[2].replay.as_ref().unwrap()["reasoning"][0], reasoning);
+        assert_eq!(history[2].reasoning.as_deref(), Some("read the file first"));
+        assert!(c.learned.read().responses_visible_only);
+
+        let events: Vec<_> = c.stream_with_options(&history, &tools, &options).await.unwrap().collect().await;
+        assert!(events.iter().all(Result::is_ok));
+        assert_eq!(log.lock().unwrap().len(), 3, "the next turn starts in the accepted mode");
+        assert_eq!(log.lock().unwrap()[2].json(), visible);
+        c.set_model(c.model());
+        c.set_endpoint(c.endpoint());
+        assert!(c.learned.read().responses_visible_only, "no-op setters keep learned behavior");
+        c.set_model("another-model");
+        assert!(!c.learned.read().responses_visible_only);
+        let events: Vec<_> = c.stream_with_options(&history, &tools, &options).await.unwrap().collect().await;
+        assert!(events.iter().all(Result::is_ok));
+        assert_eq!(log.lock().unwrap().len(), 5);
+        assert_eq!(log.lock().unwrap()[3].json()["input"], full["input"]);
+        c.set_endpoint(Endpoint::new(ApiProtocol::OpenAi, format!("{url}/v1/responses"), Some("new-key".into())));
+        assert!(!c.learned.read().responses_visible_only);
+        let events: Vec<_> = c.stream_with_options(&history, &tools, &options).await.unwrap().collect().await;
+        assert!(events.iter().all(Result::is_ok));
+        assert_eq!(log.lock().unwrap().len(), 7);
+        assert_eq!(log.lock().unwrap()[5].json()["input"], full["input"]);
+    }
+
+    #[tokio::test]
+    async fn visible_replay_keeps_sampling_fields_already_dropped_on_this_request() {
+        let (url, log) = crate::openai::test_server::serve(|req| {
+            let sent = req.json();
+            if sent.get("temperature").is_some() {
+                ("400 Bad Request", "application/json", "temperature is unsupported".into())
+            } else if sent.get("top_p").is_some() {
+                ("422 Unprocessable Entity", "application/json", "top_p is not supported".into())
+            } else if has_bound_reasoning(&sent) {
+                ("400 Bad Request", "application/json", resource_error())
+            } else {
+                ("200 OK", "text/event-stream", sse(&[text_reply("ok")]))
+            }
+        }).await;
+        let c = client(&format!("{url}/v1/responses"));
+        c.set_user_sampling(true);
+        let history = vec![replay_message(json!([{"type":"reasoning", "id":"rs_1", "summary":[{"text":"saved summary"}]}]))];
+        let options = TurnOptions { temperature: Some(0.4), top_p: Some(0.8), max_tokens: Some(100), custom_effort: Some("high".into()), ..Default::default() };
+        let events: Vec<_> = c.stream_with_options(&history, &[], &options).await.unwrap().collect().await;
+        assert!(events.iter().all(Result::is_ok));
+        let sent: Vec<_> = log.lock().unwrap().iter().map(|r| r.json()).collect();
+        assert_eq!(sent.len(), 4);
+        assert!(sent[0].get("temperature").is_some());
+        assert!(sent[1].get("temperature").is_none() && sent[1].get("top_p").is_some());
+        assert!(has_bound_reasoning(&sent[2]));
+        let mut expected = sent[2].clone();
+        expected["input"] = json!([
+            {"role":"assistant", "content":"Earlier assistant reasoning (visible text):\nsaved summary"},
+            {"role":"assistant", "content":"previous answer"}
+        ]);
+        assert_eq!(sent[3], expected);
+        assert!(sent[3].get("temperature").is_none() && sent[3].get("top_p").is_none());
+        assert_eq!(c.learned.read().responses_dropped, ["temperature", "top_p"]);
+        let events: Vec<_> = c.stream_with_options(&history, &[], &options).await.unwrap().collect().await;
+        assert!(events.iter().all(Result::is_ok));
+        assert_eq!(log.lock().unwrap().len(), 5);
+        assert_eq!(log.lock().unwrap()[4].json(), expected);
+        c.set_model("other-model");
+        assert!(c.learned.read().responses_dropped.is_empty());
+        assert!(!c.learned.read().responses_visible_only);
+    }
+
+    #[tokio::test]
     async fn responses_tool_calls_round_trip_with_stateless_replay() {
         let reasoning = json!({"type":"reasoning","id":"rs_1","summary":[],"encrypted_content":"sealed"});
         let expected = reasoning.clone();
@@ -1001,6 +1320,172 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn replay_recovery_keeps_its_request_and_cannot_teach_a_switched_scope() {
+        use std::sync::{Arc, Mutex};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        for (switch_endpoint, switch_back) in [(false, false), (true, false), (false, true), (true, true)] {
+            let shared = Arc::new(Mutex::new(None::<Arc<Client>>));
+            let active = shared.clone();
+            let count = AtomicUsize::new(0);
+            let (url, log) = crate::openai::test_server::serve(move |req| {
+                assert_eq!(req.path, "/v1/responses", "a retry changed its endpoint");
+                assert_eq!(req.json()["model"], "gpt-6.1-sol", "a retry changed its model");
+                match count.fetch_add(1, Ordering::Relaxed) {
+                    0 => ("400 Bad Request", "application/json", "temperature is unsupported".into()),
+                    1 => {
+                        let c = active.lock().unwrap().as_ref().unwrap().clone();
+                        if switch_endpoint {
+                            let old = c.endpoint();
+                            c.set_endpoint(Endpoint::new(ApiProtocol::OpenAi, format!("{}/other/responses", c.base_url()), None));
+                            if switch_back { c.set_endpoint(old); }
+                        } else {
+                            c.set_model("other-model");
+                            if switch_back { c.set_model("gpt-6.1-sol"); }
+                        }
+                        c.set_user_sampling(false);
+                        let mut learned = c.learned.write();
+                        learned.responses = true;
+                        learned.responses_dropped.push("top_p");
+                        ("400 Bad Request", "application/json", resource_error())
+                    }
+                    2 => ("200 OK", "text/event-stream", sse(&[text_reply("ok")])),
+                    _ => panic!("too many attempts"),
+                }
+            }).await;
+            let c = Arc::new(client(&format!("{url}/v1/responses")));
+            *shared.lock().unwrap() = Some(c.clone());
+            c.set_user_sampling(true);
+            let history = vec![replay_message(json!([{"type":"reasoning", "id":"rs_1", "encrypted_content":"sealed"}]))];
+            let options = TurnOptions { temperature: Some(0.4), top_p: Some(0.8), custom_effort: Some("max".into()), max_tokens: Some(100), ..Default::default() };
+            let events: Vec<_> = c.stream_with_options(&history, &[], &options).await.unwrap().collect().await;
+            assert!(events.iter().all(Result::is_ok));
+            let sent: Vec<_> = log.lock().unwrap().iter().map(|r| r.json()).collect();
+            assert_eq!(sent.len(), 3);
+            assert!(has_bound_reasoning(&sent[1]));
+            let mut expected = sent[1].clone();
+            expected["input"] = json!([{"role":"assistant", "content":"previous answer"}]);
+            assert_eq!(sent[2], expected, "sampling and effort must not be re-resolved");
+            assert!(sent[2].get("temperature").is_none());
+            assert!(sent[2].get("top_p").is_some());
+            let learned = c.learned.read();
+            assert!(!learned.responses_visible_only, "the stale response taught a different scope");
+            assert_eq!(learned.responses_dropped, ["top_p"], "old sampling knowledge leaked through the reset");
+            assert!(learned.responses, "new scope knowledge was overwritten");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_refused_visible_fallback_is_returned_without_another_repair() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        for refusal in [resource_error(), "reasoning.summary is unsupported".into(), "temperature is unsupported".into()] {
+            let count = AtomicUsize::new(0);
+            let reply = refusal.clone();
+            let (url, log) = crate::openai::test_server::serve(move |_| {
+                let error = if count.fetch_add(1, Ordering::Relaxed) == 0 { resource_error() } else { reply.clone() };
+                ("400 Bad Request", "application/json", error)
+            }).await;
+            let c = client(&format!("{url}/v1/responses"));
+            c.set_max_retries(3);
+            c.set_user_sampling(true);
+            let history = vec![replay_message(json!([{"type":"reasoning", "id":"rs_1", "encrypted_content":"sealed"}]))];
+            let options = TurnOptions { temperature: Some(0.4), ..Default::default() };
+            let result = c.stream_with_options(&history, &[], &options).await;
+            assert!(matches!(result, Err(LlmError::Status { status: 400, body }) if body == refusal));
+            let sent: Vec<_> = log.lock().unwrap().iter().map(|r| r.json()).collect();
+            assert_eq!(sent.len(), 2);
+            assert!(has_bound_reasoning(&sent[0]));
+            assert!(!has_bound_reasoning(&sent[1]));
+            assert!(!c.learned.read().responses_visible_only, "a refusal teaches no successful replay mode");
+            assert!(c.learned.read().responses_dropped.is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn no_bound_replay_or_an_unrelated_error_never_retries() {
+        let bound = json!([{"type":"reasoning", "id":"rs_1", "encrypted_content":"sealed"}]);
+        let mut other_protocol = replay_message(bound.clone());
+        other_protocol.replay.as_mut().unwrap()["protocol"] = json!("anthropic");
+        for (status, error, message) in [
+            ("400 Bad Request", RESOURCE_MISMATCH, ChatMessage::user("id: ordinary text")),
+            ("400 Bad Request", RESOURCE_MISMATCH, replay_message(json!([{"type":"reasoning", "summary":[{"text":"plain"}]}]))),
+            ("400 Bad Request", RESOURCE_MISMATCH, replay_message(json!([{"type":"reasoning", "id":null, "encrypted_content":""}]))),
+            ("400 Bad Request", RESOURCE_MISMATCH, other_protocol),
+            ("400 Bad Request", "bad request", replay_message(bound.clone())),
+            ("400 Bad Request", "context length exceeded", replay_message(bound.clone())),
+            ("400 Bad Request", "invalid tool schema: id is required", replay_message(bound.clone())),
+            ("400 Bad Request", "reasoning.summary is not supported", replay_message(bound.clone())),
+            ("401 Unauthorized", RESOURCE_MISMATCH, replay_message(bound.clone())),
+            ("403 Forbidden", "invalid API key", replay_message(bound.clone())),
+            ("422 Unprocessable Entity", RESOURCE_MISMATCH, replay_message(bound)),
+        ] {
+            let (url, log) = crate::openai::test_server::serve(move |_| (
+                status, "application/json", json!({"error":{"message":error}}).to_string(),
+            )).await;
+            let c = client(&format!("{url}/v1/responses"));
+            c.set_max_retries(3);
+            let result = c.stream(&[message], &[]).await;
+            assert!(matches!(result, Err(LlmError::Status { .. })), "{status}: {error}");
+            assert_eq!(log.lock().unwrap().len(), 1, "{status}: {error}");
+            assert!(!c.learned.read().responses_visible_only);
+        }
+    }
+
+    #[tokio::test]
+    async fn encrypted_only_recovery_never_invents_readable_thoughts() {
+        for item in [
+            json!({"type":"reasoning", "encrypted_content":"sealed", "summary":[]}),
+            json!({"type":"reasoning", "id":"rs_1", "summary":[]}),
+        ] {
+            let output = item.clone();
+            let (url, log) = crate::openai::test_server::serve(move |req| {
+                if has_bound_reasoning(&req.json()) {
+                    ("400 Bad Request", "application/json", resource_error())
+                } else {
+                    ("200 OK", "text/event-stream", sse(&[completed(json!([
+                        output, {"type":"message", "content":[{"type":"output_text", "text":"ok"}]}
+                    ]))]))
+                }
+            }).await;
+            let c = client(&format!("{url}/v1/responses"));
+            let history = vec![replay_message(json!([item]))];
+            let events: Vec<_> = c.stream(&history, &[]).await.unwrap().collect().await;
+            assert!(events.iter().all(Result::is_ok));
+            assert!(!events.iter().any(|e| matches!(e, Ok(LlmEvent::ReasoningDelta(_)))));
+            assert!(events.iter().any(|e| matches!(e, Ok(LlmEvent::Replay(_)))));
+            assert_eq!(log.lock().unwrap().len(), 2);
+            assert_eq!(log.lock().unwrap()[1].json()["input"], json!([{"role":"assistant", "content":"previous answer"}]));
+        }
+    }
+
+    #[tokio::test]
+    async fn an_azure_error_inside_an_accepted_stream_is_never_resubmitted() {
+        for prefix in [
+            vec![],
+            vec![json!({"type":"response.output_text.delta", "output_index":0, "content_index":0, "delta":"partial"})],
+            vec![
+                json!({"type":"response.output_item.added", "output_index":0, "item":{"type":"function_call", "call_id":"c", "name":"read_file", "arguments":""}}),
+                json!({"type":"response.function_call_arguments.delta", "output_index":0, "delta":"{\"path\""}),
+            ],
+        ] {
+            let has_tool = prefix.iter().any(|v| v["type"] == "response.function_call_arguments.delta");
+            let mut frames = prefix;
+            frames.push(json!({"type":"response.failed", "response":{"error":{"message":RESOURCE_MISMATCH}}}));
+            let (url, log) = crate::openai::test_server::serve(move |_| (
+                "200 OK", "text/event-stream", sse(&frames),
+            )).await;
+            let c = client(&format!("{url}/v1/responses"));
+            c.set_max_retries(3);
+            let history = vec![replay_message(json!([{"type":"reasoning", "id":"rs_1", "encrypted_content":"sealed"}]))];
+            let events: Vec<_> = c.stream(&history, &[]).await.unwrap().collect().await;
+            assert!(events.iter().any(Result::is_err));
+            assert_eq!(events.iter().any(|e| matches!(e, Ok(LlmEvent::ToolCallDelta { .. }))), has_tool);
+            assert!(!events.iter().any(|e| matches!(e, Ok(LlmEvent::Done(_)))));
+            assert_eq!(log.lock().unwrap().len(), 1);
+            assert!(!c.learned.read().responses_visible_only);
+        }
+    }
+
+    #[tokio::test]
     async fn a_stream_cut_after_a_tool_delta_is_never_retried() {
         let (url, log)=crate::openai::test_server::serve(|_| (
             "200 OK", "text/event-stream", sse(&[
@@ -1010,7 +1495,8 @@ mod tests {
         )).await;
         let c=client(&format!("{url}/v1/responses"));
         c.set_max_retries(3);
-        let events:Vec<_>=c.stream(&[ChatMessage::user("read")],&[]).await.unwrap().collect().await;
+        let history = vec![ChatMessage::user("read"), replay_message(json!([{"type":"reasoning", "id":"rs_1", "encrypted_content":"sealed"}]))];
+        let events:Vec<_>=c.stream(&history,&[]).await.unwrap().collect().await;
         assert!(matches!(events.last(),Some(Err(LlmError::Stream(s))) if s==crate::client::CLOSED_EARLY));
         assert!(!events.iter().any(|e|matches!(e,Ok(LlmEvent::Done(_)))));
         assert_eq!(log.lock().unwrap().len(),1);

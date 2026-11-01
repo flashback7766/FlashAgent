@@ -200,6 +200,7 @@ pub struct ToolCallRecord {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CompactionCard {
     pub state: CompactionState,
+    pub started_at_ms: Option<u64>,
     pub summary: String,
     /// `None` for a card restored from a session file, which stores the
     /// summary but not the summarising call's bill.
@@ -406,7 +407,7 @@ fn restyle_compaction_heading(row: &str) -> String {
 
 /// The card that takes the place of the turns a summary replaced: a rule, the
 /// summary rendered as markdown, and a rule saying what the call cost.
-fn render_compaction_card(card: &CompactionCard, width: usize) -> Vec<RenderLine> {
+fn render_compaction_card(card: &CompactionCard, width: usize, now_ms: u64) -> Vec<RenderLine> {
     let mut out = Vec::new();
     out.push((LineKind::Compaction, compaction_rule(crate::i18n::tr("Session compaction started"), width)));
     out.push((LineKind::Compaction, String::new()));
@@ -423,14 +424,18 @@ fn render_compaction_card(card: &CompactionCard, width: usize) -> Vec<RenderLine
             }
             // Drawn from the clock, not from event count: the open card is live
             // while the model writes, so the spinner shows the wait is moving.
-            let t = anim::now_ms();
-            out.push((
-                LineKind::Compaction,
-                format!(
-                    "  \x1b[38;2;145;140;134m{}\x1b[0m \x1b[38;2;190;185;178mWriting a summary of the conversation…\x1b[0m",
-                    anim::spinner(t)
-                ),
+            let elapsed = crate::goal::human_duration(std::time::Duration::from_millis(
+                now_ms.saturating_sub(card.started_at_ms.unwrap_or(now_ms)),
             ));
+            let status = crate::i18n::tr_fill("Writing a summary of the conversation… {elapsed}", &[("elapsed", &elapsed)]);
+            let status = format!(
+                "\x1b[38;2;145;140;134m{}\x1b[0m {}",
+                anim::spinner(now_ms),
+                anim::shimmer(&status, now_ms, 2200, anim::Rgb(190, 185, 178), anim::Rgb(245, 240, 230))
+            );
+            for row in wrap(&status, width.saturating_sub(2)) {
+                out.push((LineKind::Compaction, format!("  {row}")));
+            }
         }
         CompactionState::Failed => {
             let body = format!("  \x1b[38;2;230;145;135m{}\x1b[0m", card.summary);
@@ -993,6 +998,7 @@ impl ChatView {
         let mut line = ChatLine::new(LineKind::Compaction, "");
         line.compaction = Some(CompactionCard {
             state: CompactionState::Started,
+            started_at_ms: Some(anim::now_ms()),
             summary: String::new(),
             input_tokens: None,
             output_tokens: None,
@@ -1030,6 +1036,7 @@ impl ChatView {
     pub fn finish_compaction_card(&mut self, result: &CompactionResult) {
         let card = CompactionCard {
             state: CompactionState::Done,
+            started_at_ms: None,
             summary: result.summary.clone(),
             input_tokens: Some(result.input_tokens),
             output_tokens: Some(result.output_tokens),
@@ -1043,6 +1050,7 @@ impl ChatView {
     pub fn push_restored_compaction_card(&mut self, summary: &str, input_tokens: Option<usize>, output_tokens: Option<usize>) {
         let card = CompactionCard {
             state: CompactionState::Done,
+            started_at_ms: None,
             summary: summary.to_string(),
             input_tokens,
             output_tokens,
@@ -1075,6 +1083,7 @@ impl ChatView {
     pub fn fail_compaction_card(&mut self, reason: &str) {
         let card = CompactionCard {
             state: CompactionState::Failed,
+            started_at_ms: None,
             summary: reason.to_string(),
             input_tokens: None,
             output_tokens: None,
@@ -1147,7 +1156,11 @@ impl ChatView {
             }
             LoopEvent::Usage(_) => {}
             // The summary is not something the gauge counts up again.
-            LoopEvent::Compacted { .. } => self.forget_counted_context(), // Its own line was drawn when the task ended.
+            LoopEvent::Compacted { saved } => {
+                if *saved > 0 {
+                    self.forget_counted_context();
+                }
+            }
             LoopEvent::SteeringInjected(directive) if flashagent_core::is_task_notice(directive) => {}
             LoopEvent::SteeringInjected(directive) => {
                 self.streaming = None;
@@ -1767,7 +1780,7 @@ impl ChatView {
 
             if line.kind == LineKind::Compaction {
                 if let Some(card) = &line.compaction {
-                    target.extend(render_compaction_card(card, width));
+                    target.extend(render_compaction_card(card, width, anim::now_ms()));
                 }
                 continue;
             }
@@ -3959,11 +3972,12 @@ hm".into()));
     fn a_compaction_card_draws_rules_around_the_summary() {
         let card = CompactionCard {
             state: CompactionState::Done,
+            started_at_ms: None,
             summary: summary_with_card_shape().into(),
             input_tokens: Some(90_000),
             output_tokens: Some(5_100),
         };
-        let rows: Vec<String> = render_compaction_card(&card, 80).into_iter().map(|(_, row)| row).collect();
+        let rows: Vec<String> = render_compaction_card(&card, 80, 0).into_iter().map(|(_, row)| row).collect();
         let text = rows.iter().map(|row| strip_ansi(row)).collect::<Vec<_>>().join("\n");
         assert!(text.contains(crate::i18n::tr("Session compaction started")), "{text}");
         let footer = format!(
@@ -3981,11 +3995,12 @@ hm".into()));
     fn a_started_compaction_card_opens_with_the_header_only() {
         let card = CompactionCard {
             state: CompactionState::Started,
+            started_at_ms: Some(0),
             summary: String::new(),
             input_tokens: None,
             output_tokens: None,
         };
-        let rows: Vec<String> = render_compaction_card(&card, 80).into_iter().map(|(_, row)| row).collect();
+        let rows: Vec<String> = render_compaction_card(&card, 80, 0).into_iter().map(|(_, row)| row).collect();
         let text = rows.iter().map(|row| strip_ansi(row)).collect::<Vec<_>>().join("\n");
         assert!(text.contains(crate::i18n::tr("Session compaction started")), "{text}");
         assert!(text.contains("Writing a summary"), "{text}");
@@ -3993,14 +4008,48 @@ hm".into()));
     }
 
     #[test]
+    fn a_compaction_wait_has_a_clock_before_any_summary_arrives() {
+        let card = CompactionCard {
+            state: CompactionState::Started,
+            started_at_ms: Some(1000),
+            summary: String::new(),
+            input_tokens: None,
+            output_tokens: None,
+        };
+        let status = |now| render_compaction_card(&card, 80, now).into_iter()
+            .map(|(_, row)| strip_ansi(&row)).find(|row| row.contains("Writing a summary")).unwrap();
+        assert!(status(1000).contains("0.0s"));
+        assert!(status(2200).contains("1.2s"));
+        assert!(status(94000).contains("1m33s"));
+        for width in [24, 40, 80] {
+            for (_, row) in render_compaction_card(&card, width, 94000) {
+                assert!(visible_width(&row) <= width, "the waiting card overflowed {width} columns: {row:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_failed_compaction_keeps_the_transcript_in_the_context_count() {
+        let mut chat = ChatView::default();
+        chat.push_user("keep the original question");
+        chat.on_event(&LoopEvent::TurnDelta("and the answer".into()));
+        let count = |text: &str| text.len();
+        let before = chat.raw_content_tokens(&count);
+        chat.start_compaction_card();
+        chat.on_event(&LoopEvent::Compacted { saved: 0 });
+        assert_eq!(chat.raw_content_tokens(&count), before);
+    }
+
+    #[test]
     fn a_restored_compaction_card_says_compacted_without_a_bill() {
         let card = CompactionCard {
             state: CompactionState::Done,
+            started_at_ms: None,
             summary: summary_with_card_shape().into(),
             input_tokens: None,
             output_tokens: None,
         };
-        let rows: Vec<String> = render_compaction_card(&card, 80).into_iter().map(|(_, row)| row).collect();
+        let rows: Vec<String> = render_compaction_card(&card, 80, 0).into_iter().map(|(_, row)| row).collect();
         let text = rows.iter().map(|row| strip_ansi(row)).collect::<Vec<_>>().join("\n");
         assert!(text.contains(crate::i18n::tr("Session compacted")), "{text}");
         assert!(!text.contains(" in · ") && !text.contains(" out"), "no bill was kept: {text}");
@@ -4010,11 +4059,12 @@ hm".into()));
     fn a_failed_compaction_card_says_the_conversation_is_unchanged() {
         let card = CompactionCard {
             state: CompactionState::Failed,
+            started_at_ms: None,
             summary: "the conversation is unchanged".into(),
             input_tokens: None,
             output_tokens: None,
         };
-        let rows: Vec<String> = render_compaction_card(&card, 80).into_iter().map(|(_, row)| row).collect();
+        let rows: Vec<String> = render_compaction_card(&card, 80, 0).into_iter().map(|(_, row)| row).collect();
         let text = rows.iter().map(|row| strip_ansi(row)).collect::<Vec<_>>().join("\n");
         assert!(text.contains(crate::i18n::tr("Session compaction failed")), "{text}");
         assert!(text.contains("unchanged"), "{text}");

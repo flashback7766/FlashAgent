@@ -565,8 +565,7 @@ pub(crate) fn start_turn(&mut self, cx: &LoopCtx<'_>, budgets: GoalBudgets) {
                         };
                         match compacted {
                             Some(result) => {
-                                self.chat.finish_compaction_card(&result);
-                                self.chat.forget_counted_context();
+                                self.record_compaction(result);
                                 update_context_usage(&self.current_model, &mut self.context_usage, &self.history, cx.memory_block, &self.chat, cx.perm);
                             }
                             None => self.chat.fail_compaction_card(tr("the conversation is unchanged")),

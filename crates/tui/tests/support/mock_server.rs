@@ -70,6 +70,7 @@ struct SideRequests {
     answers: Mutex<Vec<(String, String)>>,
     /// Lets a scenario act while the model is still thinking.
     turn_delay: Mutex<Option<Duration>>,
+    prompt_tokens: Mutex<Option<usize>>,
     /// Holds back side answers before the first token, so the card that says a
     /// summary is being written can be seen while it is open.
     answer_delay: Mutex<Option<Duration>>,
@@ -120,6 +121,11 @@ impl MockServer {
     /// Lets the scenario press a key that must land before the answer.
     pub fn delay_turns(&self, delay: Duration) {
         *self.side.turn_delay.lock().unwrap() = Some(delay);
+    }
+
+    /// A server count larger than the visible prompt, as a proxy can report.
+    pub fn report_prompt_tokens(&self, tokens: usize) {
+        *self.side.prompt_tokens.lock().unwrap() = Some(tokens);
     }
 
     /// A listing that takes its time before it answers, the way a cloud API does
@@ -320,7 +326,8 @@ fn serve(
             }
             chunk(&mut out, serde_json::json!({ "choices": [ { "delta": {}, "finish_reason": "stop" } ] }))?;
             // Usage without cache info, as LM Studio reports it.
-            chunk(&mut out, serde_json::json!({ "choices": [], "usage": { "prompt_tokens": 1200, "completion_tokens": 4 } }))?;
+            let prompt_tokens = if request.is_turn() { side.prompt_tokens.lock().unwrap().unwrap_or(1200) } else { 1200 };
+            chunk(&mut out, serde_json::json!({ "choices": [], "usage": { "prompt_tokens": prompt_tokens, "completion_tokens": 4 } }))?;
         }
         Reply::Slow { text, per_word } => {
             for word in words(&text) {

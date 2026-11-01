@@ -16,22 +16,6 @@ pub(crate) fn server_mood(switching: bool, answered: bool, silent: bool, since_s
     }
 }
 
-/// Below this, a compaction's standing line says nothing worth a line: the
-/// summary card is the result, and "about 0 tokens freed" read as a bug
-/// report.
-const MIN_SAVED_WORTH_A_LINE: usize = 256;
-
-/// The standing line a finished compaction earns, if any: what went, what it
-/// freed and where the exact words are kept.
-fn compaction_standing_line(replaced: usize, saved: usize) -> Option<String> {
-    (saved >= MIN_SAVED_WORTH_A_LINE).then(|| {
-        flashagent_tui::i18n::tr_fill(
-            "Context compacted: {replaced} messages became a summary, about {saved} tokens freed. The full transcript is in the session file.",
-            &[("replaced", &replaced.to_string()), ("saved", &saved.to_string())],
-        )
-    })
-}
-
 impl App {
     /// One event from the terminal, the agent loop or a background task.
     pub(crate) async fn on_ui_event(&mut self, cx: &mut LoopCtx<'_>, ev: UiEvent) -> Flow {
@@ -349,24 +333,9 @@ impl App {
         self.history = history;
         self.compacting = false;
         match card {
-            Some(result) => {
-                // The turns the summary replaced go with the session: one file
-                // holds the conversation and the archive of what it left out.
-                let replaced = result.archive.len();
-                self.archive.extend(result.archive.iter().cloned());
-                self.chat.finish_compaction_card(&result);
-                // A standing line about the compaction itself: what went, what
-                // it freed and where the exact words are kept. The card holds
-                // the summary; this holds the facts about it. A compaction
-                // that freed next to nothing has the card and needs no line
-                // saying so -- "about 0 tokens freed" read as a bug report.
-                if let Some(line) = compaction_standing_line(replaced, result.saved) {
-                    self.chat.push_system(&line);
-                }
-            }
+            Some(result) => self.record_compaction(result),
             None => self.chat.fail_compaction_card(flashagent_tui::i18n::tr("the conversation is unchanged")),
         }
-        self.chat.forget_counted_context();
         // On disk now, not at the next turn or at the exit: a machine that
         // loses power here used to lose the compaction with it, and the
         // conversation came back as it was before the summary.
@@ -376,6 +345,20 @@ impl App {
         // summary was saved or not — as steering if a turn is under way, or a
         // fresh turn otherwise.
         self.send_queued_after_compaction(cx);
+    }
+
+    /// Every successful compaction retires the old request's count and keeps
+    /// the replaced turns, whether it ran by command, between turns or mid-turn.
+    pub(crate) fn record_compaction(&mut self, result: CompactionResult) {
+        // Mid-turn the core publishes the shortened handle before its event.
+        if let Some(history) = &self.turn_history {
+            self.history = history.snapshot();
+        }
+        self.chat.finish_compaction_card(&result);
+        self.archive.extend(result.archive);
+        self.chat.forget_counted_context();
+        self.context_usage.server_seen = None;
+        self.renderer.request_reprint();
     }
 
     /// The model a discovery answers for. A cloud listing names no active model
@@ -638,30 +621,16 @@ impl App {
                 self.chat.start_compaction_card();
                 self.renderer.request_reprint();
             }
-            // Nothing was saved: the summarizing failed. The card withdraws the
-            // promise `CompactionStarted` made, because the window is still full
-            // and the next steps go on filling it.
-            LoopEvent::Compacted { saved } if *saved == 0 => {
-                self.chat.fail_compaction_card(flashagent_tui::i18n::tr("the conversation is unchanged and the window is still full"));
-                self.renderer.request_reprint();
-            }
-            // The window was nearly full; the work goes on. The compactor handed
-            // the summary and the call's token counts over before the event was
-            // queued, so the card can be filled in where it was started.
-            LoopEvent::Compacted { .. } => {
+            // A kept summary can save zero after its retained prompt and wrapper
+            // are counted. The report distinguishes that success from a failure.
+            LoopEvent::Compacted { saved } => {
                 let report = self
                     .mid_turn_report
                     .as_ref()
                     .and_then(|slot| slot.lock().ok().and_then(|mut slot| slot.take()));
                 match report {
-                    Some(result) => {
-                        // The words the summary replaced: the session file is
-                        // the one place they are kept, and the summary points
-                        // the model back at them. Only the card was filled in;
-                        // the archive itself was dropped.
-                        self.archive.extend(result.archive.iter().cloned());
-                        self.chat.finish_compaction_card(&result);
-                    }
+                    Some(result) => self.record_compaction(result),
+                    None if *saved == 0 => self.chat.fail_compaction_card(flashagent_tui::i18n::tr("the conversation is unchanged and the window is still full")),
                     None => self.chat.fail_compaction_card(flashagent_tui::i18n::tr("the summary was not kept")),
                 }
                 self.renderer.request_reprint();
@@ -1109,13 +1078,37 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_compaction_that_freed_nothing_earns_no_standing_line() {
-        // The card carries the summary; the line is for the facts, and
-        // "about 0 tokens freed" read as a bug report.
-        assert_eq!(compaction_standing_line(2, 3), None);
-        assert_eq!(compaction_standing_line(2, 255), None);
-        let line = compaction_standing_line(9, 5000).expect("a real compaction says what it freed");
-        assert!(line.contains("9 messages") && line.contains("5000 tokens"), "{line}");
+    fn a_zero_saved_event_distinguishes_kept_and_failed_compaction() {
+        for kept in [true, false] {
+            let mut app = crate::tests::test_app();
+            let original = vec![ChatMessage::system("original context"), ChatMessage::user("question"), ChatMessage::assistant("answer")];
+            app.history = original.clone();
+            app.context_usage.server_seen = Some(26_000);
+            app.chat.push_user("question");
+            app.chat.on_event(&LoopEvent::TurnDelta("answer".into()));
+            let before = app.chat.raw_content_tokens(&|text| text.len());
+            app.chat.start_compaction_card();
+            app.turn_history = Some(flashagent_core::loop_::SharedHistory::new(if kept {
+                vec![ChatMessage::system("compacted context"), ChatMessage::user("question")]
+            } else {
+                original
+            }));
+            app.mid_turn_report = Some(Arc::new(std::sync::Mutex::new(kept.then(|| CompactionResult {
+                saved: 0, summary: "kept summary".into(), input_tokens: 26_000, output_tokens: 300,
+                archive: vec![ChatMessage::assistant("answer")],
+            }))));
+
+            let event = LoopEvent::Compacted { saved: 0 };
+            app.track_turn(&event);
+            app.chat.on_event(&event);
+            assert_eq!(app.context_usage.server_seen, if kept { None } else { Some(26_000) });
+            assert_eq!(app.chat.raw_content_tokens(&|text| text.len()), if kept { (0, 0, 0, 0) } else { before });
+            assert_eq!(app.archive.len(), usize::from(kept));
+            assert_eq!(app.history[0].content, if kept { "compacted context" } else { "original context" });
+            assert!(app.mid_turn_report.as_ref().unwrap().lock().unwrap().is_none());
+            let label = if kept { "Session compacted" } else { "Session compaction failed" };
+            assert!(app.chat.render(120).iter().any(|(_, row)| row.contains(label)));
+        }
     }
 
     #[test]

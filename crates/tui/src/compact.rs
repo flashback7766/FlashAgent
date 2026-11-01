@@ -916,7 +916,8 @@ async fn ask_for_summary(
         }
     }
     let usable = ended_cleanly || cut_off;
-    usable.then_some(Summarized { text, cut_off, usage })
+    // A shape warning cannot stand in for an empty summary.
+    (usable && !text.trim().is_empty()).then_some(Summarized { text, cut_off, usage })
 }
 
 pub(crate) fn compaction_request(

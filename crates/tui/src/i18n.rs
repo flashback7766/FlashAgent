@@ -488,6 +488,7 @@ static RU: &[(&str, &str)] = &[
     ("Session compaction started", "Компакция началась"),
     ("Session compaction failed", "Компакция не удалась"),
     ("Session compacted", "Сессия сжата"),
+    ("Writing a summary of the conversation… {elapsed}", "Составляю сводку разговора… {elapsed}"),
     ("stopped early", "остановлено раньше"),
     ("stopped: the step limit was reached", "остановлено: предел шагов исчерпан"),
     ("stopped: the token budget was spent", "остановлено: бюджет токенов исчерпан"),
@@ -667,7 +668,6 @@ static RU: &[(&str, &str)] = &[
     ("Yes", "Да"),
     ("No", "Нет"),
     ("Close FlashAgent and remove it? The uninstaller then shows what it will remove and asks, part by part, which of your data to delete. Your session is saved first.", "Закрыть FlashAgent и убрать его? Удалялка покажет, что именно убирает, и спросит по частям, какие ваши данные удалить. Сессия сохранится первой."),
-    ("Context compacted: {replaced} messages became a summary, about {saved} tokens freed. The full transcript is in the session file.", "Контекст сжат: {replaced} сообщений заменились сводкой, освобождено примерно {saved} токенов. Полный архив — в файле сессии."),
     // --- What the app says ---
     ("Settings not saved: {e}", "Настройки не сохранены: {e}"),
     ("Failed to launch external editor: {err}", "Не удалось открыть внешний редактор: {err}"),
