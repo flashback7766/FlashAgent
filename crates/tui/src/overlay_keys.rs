@@ -61,7 +61,7 @@ impl App {
         if let Some(overlay) = self.overlay.take() {
             match overlay {
                 Overlay::Settings(view) => self.settings_key(cx, view, code, mods).await,
-                Overlay::Sampling(view) => self.sampling_key(view, code, mods),
+                Overlay::Sampling(view) => self.sampling_key(cx, view, code, mods),
                 Overlay::Memory(modal) => self.memory_key(cx, modal, code, mods),
                 Overlay::Context(modal) => {
                     if !matches!(code, KeyCode::F(1) | KeyCode::Enter | KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('Q')) {
@@ -75,7 +75,7 @@ impl App {
                 Overlay::Provider(menu) => self.provider_menu_key(cx, menu, code, mods).await,
                 Overlay::Providers(view) => self.providers_key(cx, view, code, mods).await,
                 Overlay::Rewind(card) => self.rewind_key(cx, card, code),
-                Overlay::Effort(menu) => self.effort_menu_key(cx, menu, code),
+                Overlay::Effort(menu) => self.effort_menu_key(cx, menu, code, mods),
                 Overlay::Theme(picker) => self.theme_menu_key(picker, code, mods),
                 Overlay::Tools(view) => self.tools_key(cx, view, code, mods),
                 Overlay::Notices(mut view) => {
@@ -524,12 +524,18 @@ impl App {
         self.renderer.request_reprint();
     }
 
-    fn sampling_key(&mut self, mut view: SamplingView, code: KeyCode, mods: KeyModifiers) {
+    fn sampling_key(&mut self, cx: &LoopCtx<'_>, mut view: SamplingView, code: KeyCode, mods: KeyModifiers) {
         match view.handle_key(code, mods) {
             SamplingAction::Close => {}
             SamplingAction::SaveAndClose => {
                 view.apply_to_config(&mut self.config);
                 self.save_config();
+                // The presets are tuned for local models, and the client drops
+                // them for Anthropic and Gemini unless they were set by hand.
+                // Without this the choice was saved and never sent.
+                cx.source.0.set_user_sampling(
+                    self.config.sampling_preset == flashagent_core::config::SamplingPreset::Custom,
+                );
                 self.notice(tr("Sampling parameters updated"));
             }
             SamplingAction::None => self.overlay = Some(Overlay::Sampling(view)),
@@ -722,6 +728,10 @@ impl App {
                             let mgr = cx.tools_arc.mcp_manager();
                             let server_id = item.id.to_string();
                             tokio::spawn(async move {
+                                // Installing it from this panel is the yes: without
+                                // it the new server waits for a trust screen that
+                                // belongs to the next launch, and stayed stopped.
+                                mgr.allow(&server_id);
                                 let _ = mgr.reload().await;
                                 let _ = mgr.start_server(&server_id).await;
                             });
@@ -808,6 +818,17 @@ impl App {
                 self.config.thinking_effort = self.current_effort.clone();
                 self.save_config();
             }
+            // A listed model that names no window keeps the fallback, not the
+            // window of the model just left: 1M on an 8k model overflows.
+            if m.context_length.or(m.max_context_length).is_none() {
+                self.context_usage.total_capacity = crate::provider_switch::UNKNOWN_CONTEXT;
+                cx.tools_arc.set_context_window(Some(crate::provider_switch::UNKNOWN_CONTEXT));
+            }
+        } else {
+            // The listing does not name it: its window is unknown, and the
+            // previous model's is not this one's.
+            self.context_usage.total_capacity = crate::provider_switch::UNKNOWN_CONTEXT;
+            cx.tools_arc.set_context_window(Some(crate::provider_switch::UNKNOWN_CONTEXT));
         }
         if !self.running {
             self.sync_system_prompt(OfferedTools::from_specs(&cx.perm.specs()));
@@ -866,7 +887,7 @@ impl App {
         }
     }
 
-    fn effort_menu_key(&mut self, cx: &LoopCtx<'_>, mut menu: SelectMenu<String>, code: KeyCode) {
+    fn effort_menu_key(&mut self, cx: &LoopCtx<'_>, mut menu: SelectMenu<String>, code: KeyCode, mods: KeyModifiers) {
         match code {
             KeyCode::Up => menu.up(),
             KeyCode::Down => menu.down(),
@@ -885,7 +906,9 @@ impl App {
                 return;
             }
             KeyCode::Esc => return,
-            _ => {}
+            // The hint under this menu says "type to filter": the menu is the
+            // same one the other pickers use, and it did nothing here.
+            _ => navigate_menu(&mut menu, code, mods),
         }
         self.overlay = Some(Overlay::Effort(menu));
     }

@@ -392,8 +392,18 @@ pub async fn run_mcp_trust_screen(servers: Vec<McpServerToAsk>) -> anyhow::Resul
         let (term_w, _) = crossterm::terminal::size().unwrap_or((80, 24));
         crate::screen::paint_page(&mut painter, &screen.render(term_w as usize), false);
 
-        if crossterm::event::poll(std::time::Duration::from_millis(50))? {
-            if let Event::Key(key) = crossterm::event::read()? {
+        // A terminal that stops answering the poll must still be left as we
+        // found it: `?` here returned before the restore below.
+        let ready = match crossterm::event::poll(std::time::Duration::from_millis(50)) {
+            Ok(ready) => ready,
+            Err(_) => break,
+        };
+        if ready {
+            let event = match crossterm::event::read() {
+                Ok(event) => event,
+                Err(_) => break,
+            };
+            if let Event::Key(key) = event {
                 if key.kind != KeyEventKind::Release {
                     if let Some(quit) = screen.handle_key(key.code, key.modifiers) {
                         // Esc means "do not start the rest": the ones already
@@ -431,8 +441,16 @@ pub async fn run_trust_screen(cwd: &mut PathBuf) -> anyhow::Result<StartupAction
         let (term_w, _) = crossterm::terminal::size().unwrap_or((80, 24));
         crate::screen::paint_page(&mut painter, &screen.render(term_w as usize), false);
 
-        if crossterm::event::poll(std::time::Duration::from_millis(50))? {
-            if let Event::Key(key) = crossterm::event::read()? {
+        let ready = match crossterm::event::poll(std::time::Duration::from_millis(50)) {
+            Ok(ready) => ready,
+            Err(_) => break StartupAction::Quit,
+        };
+        if ready {
+            let event = match crossterm::event::read() {
+                Ok(event) => event,
+                Err(_) => break StartupAction::Quit,
+            };
+            if let Event::Key(key) = event {
                 if key.kind != KeyEventKind::Release {
                     if let Some(action) = screen.handle_key(key.code, key.modifiers) {
                         break action;

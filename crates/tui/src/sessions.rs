@@ -632,6 +632,9 @@ pub(crate) fn restore_session(
 ) -> usize {
     use flashagent_core::{DoneReason, LoopEvent};
     let before = history.len();
+    // Read before the messages are consumed: the note goes into the history
+    // after them, and only if the turn never finished.
+    let turn_in_flight = saved.turn_in_flight;
     // What earlier compactions took out of the context comes back with the
     // session: the file is the one place it is kept.
     archive.extend(saved.archive.into_iter().map(ChatMessage::from));
@@ -741,6 +744,11 @@ pub(crate) fn restore_session(
     }
     // How long each thought took was not saved.
     chat.forget_thought_times();
+    if turn_in_flight {
+        // The model reads half an answer as a finished one: the note says so in
+        // the history, where it is read, not only on the screen.
+        flashagent_core::mark_cut_short(history, flashagent_core::CutShort::Interrupted);
+    }
     history.len() - before
 }
 
@@ -1003,7 +1011,9 @@ mod session_tests {
         assert!(shown.contains("First I will open the fi"), "the answer itself must still be there:\n{shown}");
         // The system message is replaced by the fresh one, so prompt + answer.
         assert_eq!(count, 2, "the unfinished answer stays in the history, so the model can go on from it");
-        assert!(history.last().unwrap().content.ends_with("the fi"), "the answer was rewritten: {:?}", history.last().unwrap().content);
+        let last = &history.last().unwrap().content;
+        assert!(last.starts_with("Sure. First I will open the fi"), "the answer was rewritten: {last:?}");
+        assert!(last.contains("This reply was cut off"), "the model is not told the answer stops mid-word: {last:?}");
     }
 
     #[test]

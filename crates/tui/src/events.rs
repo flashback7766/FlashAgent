@@ -30,6 +30,7 @@ impl App {
                 }
             }
             UiEvent::MemorySummary(result) => self.on_memory_summary(result),
+            UiEvent::ImageCostFailed { model } => self.image_cost_failed(&model),
             UiEvent::ImageCost { model, per_pixel, fixed } => {
                 self.image_costs.set(&model, flashagent_tui::image_cost::ImageCost { per_pixel, fixed });
                 self.image_costs.save();
@@ -367,6 +368,15 @@ impl App {
         // conversation came back as it was before the summary.
         self.autosave(open, cwd_display);
         true
+    }
+
+    /// A cost probe that failed frees the model it was for, so the next picture
+    /// asks again. Only the model in flight can be freed: a late failure for an
+    /// older one must not free the probe of the current picture.
+    pub(crate) fn image_cost_failed(&mut self, model: &str) {
+        if self.image_cost_probe.as_deref() == Some(model) {
+            self.image_cost_probe = None;
+        }
     }
 
     /// Every successful compaction retires the old request's count and keeps

@@ -710,9 +710,12 @@ impl AgentLoop {
                         call.args_json.push_str(&args_delta);
                     }
                     LlmEvent::Usage(u) => {
-                        tokens_used += u.prompt.unwrap_or(0) + u.completion.unwrap_or(0);
-                        output_tokens += u.completion.unwrap_or(0);
-                        last_prompt_tokens = u.prompt.map(|p| p as usize).or(last_prompt_tokens);
+                        let (charged, completion, prompt) = usage_counts(u.prompt, u.completion);
+                        tokens_used += charged;
+                        output_tokens += completion;
+                        if let Some(prompt) = prompt {
+                            last_prompt_tokens = Some(prompt);
+                        }
                         events(LoopEvent::Usage(u));
                     }
                     LlmEvent::Replay(state) => replay = Some(state),
@@ -726,6 +729,13 @@ impl AgentLoop {
             for ev in scanner.finish() {
                 absorb_scanned(ev, &known_tools, &mut assistant_text, &mut text_calls, &mut events);
             }
+
+            // A call that was still arriving when the stream ended is not a call:
+            // repair would close its arguments and a write would replace a file with
+            // half its content. The `None` arm above covers the server closing; the
+            // repetition breaker ends the stream without either, and used to let
+            // the half-written call through.
+            drop_unfinished_calls(&mut indexed_calls, finished);
 
             // A nameless call cannot be dispatched and would poison the history.
             let mut calls: Vec<ToolCall> = indexed_calls.into_iter().map(|(_, call)| call).filter(|c| !c.name.trim().is_empty()).collect();
@@ -759,6 +769,12 @@ impl AgentLoop {
                 replay,
             };
             let was_continuation = std::mem::take(&mut continuing);
+            // The allowance belongs to the reply it continues: a new reply starts
+            // with all of it. Shared across a turn, three continuations anywhere
+            // left every later answer cut at the limit and kept in silence.
+            if !was_continuation {
+                continuations = 0;
+            }
             // A server that signs its reasoning (Anthropic) binds it to the request
             // as sent, nudge included. Stored without the nudge, or merged into the
             // message it continued, the reply is refused on the next request and
@@ -1338,6 +1354,9 @@ pub enum CutShort {
     ByError,
     /// Stopped, but a tool would not wind down: the turn's steps were dropped.
     Abandoned,
+    /// The process ended while the turn was running: a reboot, a crash, a
+    /// closed terminal. Nobody stopped it.
+    Interrupted,
 }
 
 /// Where a turn ended early, written into the history at that point, so the
@@ -1363,6 +1382,11 @@ pub fn mark_cut_short(history: &mut Vec<ChatMessage>, how: CutShort) {
             let note = "[The user stopped this turn, and it did not stop in time, so its steps are missing here. Tools it ran may have changed files: check before repeating anything.]";
             (note, note, note)
         }
+        CutShort::Interrupted => (
+            "[No reply: FlashAgent closed before you answered.]",
+            "[FlashAgent closed after these results, before you replied to them.]",
+            "[This reply was cut off: FlashAgent closed while it was being written. Any tool call you had started may not have run; check before repeating anything.]",
+        ),
     };
     let note = match last.role {
         Role::Assistant if !last.tool_calls.is_empty() => return,
@@ -1568,6 +1592,25 @@ fn extract_draft_from_steps(text: &str) -> Option<String> {
         }
     }
     None
+}
+
+/// What a usage frame contributes to the turn and to the prompt estimate. A
+/// gateway that reports a negative count must not become a prompt larger than
+/// any window: read as `usize`, -1 asked for compaction on every step.
+fn usage_counts(prompt: Option<i64>, completion: Option<i64>) -> (i64, i64, Option<usize>) {
+    let prompt = prompt.filter(|p| *p > 0);
+    let completion = completion.unwrap_or(0).max(0);
+    (prompt.unwrap_or(0) + completion, completion, prompt.map(|p| p as usize))
+}
+
+/// A call whose arguments were still arriving when the stream ended is dropped
+/// unrun. A call without a name is dropped later anyway; a complete one that
+/// arrived before the cut is kept.
+fn drop_unfinished_calls(calls: &mut Vec<(usize, ToolCall)>, finished: bool) {
+    if finished {
+        return;
+    }
+    calls.retain(|(_, call)| call.name.trim().is_empty() || flashagent_llm::is_complete_json(&call.args_json));
 }
 
 #[cfg(test)]
@@ -3349,6 +3392,53 @@ mod tests {
         assert_eq!(done, DoneReason::Completed);
         assert_eq!(history[1].content, "part0 part1 part2 part3 ");
         assert_eq!(llm.turns.lock().unwrap().len(), 1, "asked to go on more than {MAX_CONTINUATIONS} times");
+    }
+
+    #[test]
+    fn a_continuation_allowance_belongs_to_the_reply_it_continues() {
+        // Three continuations in one reply used to spend the allowance for the
+        // whole turn: every later answer cut at the limit was kept in silence.
+        let llm = MockLlm {
+            turns: std::sync::Mutex::new(vec![
+                cut_turn("first "),
+                tool_turn("shell", "c1"),
+                cut_turn("second "),
+                cut_turn("third "),
+                cut_turn("fourth "),
+                text_turn("never asked for"),
+            ]),
+        };
+        let l = AgentLoop::new(
+            LoopConfig { max_steps: Some(10), ..Default::default() },
+            Arc::new(AtomicBool::new(false)),
+        );
+        let (history, done) = run_loop(&l, &llm, &MockTools::new(), |_| {});
+        assert_eq!(done, DoneReason::Completed);
+        let answer = history.iter().rev().find(|m| m.role == Role::Assistant).map(|m| m.content.clone()).unwrap_or_default();
+        assert!(answer.contains("never asked for"), "the allowance was spent by another reply: {answer:?}");
+    }
+
+    #[test]
+    fn a_call_still_arriving_when_the_stream_was_cut_is_dropped() {
+        let mut calls = vec![
+            (0, ToolCall { id: "a".into(), name: "write_file".into(), args_json: r#"{"path":"a.md","content":"half"#.into() }),
+            (1, ToolCall { id: "b".into(), name: "read_file".into(), args_json: r#"{"path":"b.rs"}"#.into() }),
+        ];
+        drop_unfinished_calls(&mut calls, false);
+        assert_eq!(calls.len(), 1, "a half-written call was kept to run");
+        assert_eq!(calls[0].1.name, "read_file", "the complete call was dropped with it");
+
+        // A finished stream answers for its calls as written.
+        let mut calls = vec![(0, ToolCall { id: "a".into(), name: "write_file".into(), args_json: r#"{"path":"#.into() })];
+        drop_unfinished_calls(&mut calls, true);
+        assert_eq!(calls.len(), 1);
+    }
+
+    #[test]
+    fn a_negative_prompt_count_does_not_become_a_prompt_larger_than_any_window() {
+        assert_eq!(usage_counts(Some(-1), Some(10)), (10, 10, None));
+        assert_eq!(usage_counts(Some(5000), Some(0)), (5000, 0, Some(5000)));
+        assert_eq!(usage_counts(None, Some(-5)), (0, 0, None), "a negative completion is no completion");
     }
 
     #[test]

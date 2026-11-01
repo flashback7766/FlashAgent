@@ -298,6 +298,11 @@ pub async fn search(
         let desc = r.get("description").and_then(Value::as_str).unwrap_or("");
         out.push_str(&format!("{}. {title}\n{url}\n{desc}\n\n", i + 1));
     }
+    if out.is_empty() {
+        // An empty list is an answer: without this the tool returned a blank
+        // string, which reads as a broken tool rather than as no matches.
+        return Ok("no results".into());
+    }
     Ok(out)
 }
 

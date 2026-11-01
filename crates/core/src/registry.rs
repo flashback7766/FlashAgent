@@ -173,8 +173,8 @@ impl Handler {
 pub enum Availability {
     /// Every conversation, whatever the window and whatever the model can do.
     Always,
-    /// Only when the tool schemas are worth their tokens: a small window gets
-    /// the core set.
+    /// The tools a task cannot be done without: offered whatever the window,
+    /// because dropping one leaves the task impossible rather than cheaper.
     Core,
     /// Only when the server said the model can see images.
     Vision,

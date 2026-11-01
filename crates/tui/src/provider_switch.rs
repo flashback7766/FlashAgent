@@ -17,7 +17,7 @@ pub(crate) struct ProviderSwitch {
 }
 
 /// The window assumed for a model no server has described.
-const UNKNOWN_CONTEXT: usize = 131_072;
+pub(crate) const UNKNOWN_CONTEXT: usize = 131_072;
 
 /// Counts switches, so only the latest one reports its server's answer.
 static SWITCHES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);

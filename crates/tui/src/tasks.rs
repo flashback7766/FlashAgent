@@ -224,9 +224,7 @@ impl App {
             finished.id,
             if finished.done == flashagent_core::DoneReason::Completed { "answered" } else { "stopped early" },
         );
-        for line in notice_lines(&said) {
-            self.chat.push_system(&line);
-        }
+        self.chat.push_system(&said);
         self.task_inbox.push(notice);
         self.say(BackgroundNotice::fading(format!("Subagent {said} \u{b7} the agent will be told"), 6));
         self.deliver_task_notices(cx);
@@ -279,9 +277,10 @@ impl App {
         self.agents.record_review(&review.agent, review.verdict);
         self.renderer.request_reprint();
         let said = format!("{role} {} \u{b7} {}", review.agent, review.verdict.describe());
-        for line in notice_lines(&said) {
-            self.chat.push_system(&line);
-        }
+        // A report and its review belong to the transcript, not only to a row in
+        // `/agents`: `notice_lines` reads a background task's message and says
+        // nothing about a sentence, so this line was never shown.
+        self.chat.push_system(&said);
         let notice = format!(
             "[Review of subagent {} ({role}): {}, {}.]\n[This is an automatic notice from \
              review_agent, not a message from the user. It is the check the parent did before \
