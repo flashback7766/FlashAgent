@@ -154,6 +154,9 @@ pub fn render_markdown_text(text: &str, width: usize) -> Vec<String> {
                 let title = if lang.is_empty() { "code".to_string() } else { lang.to_string() };
                 let border_color = "\x1b[38;2;75;99;130m";
                 let reset = "\x1b[0m";
+                // A narrow window cannot fit the longest language tag: the border
+                // was wider than the terminal and its corner was cut off.
+                let title = clip_to_width(&title, width.saturating_sub(9));
                 let dash_count = width.saturating_sub(visible_width(&title) + 5).max(4);
                 out.push(format!("{border_color}╭─ {reset}\x1b[38;2;194;231;255m{title}\x1b[0m {border_color}{}╮{reset}", "─".repeat(dash_count)));
             } else {
@@ -431,6 +434,30 @@ pub fn render_markdown_text(text: &str, width: usize) -> Vec<String> {
         i += 1;
     }
 
+    // A fence the answer never closed: a box left open runs to the bottom of
+    // the transcript, so it is closed here.
+    if in_code_block {
+        let border_color = "\x1b[38;2;75;99;130m";
+        let reset = "\x1b[0m";
+        out.push(format!("{border_color}╰{}╯{reset}", "─".repeat(width.saturating_sub(2).max(4))));
+    }
+    out
+}
+
+/// `text` cut to `max` cells with an ellipsis: a title must not push the border
+/// wider than the window.
+fn clip_to_width(text: &str, max: usize) -> String {
+    if visible_width(text) <= max {
+        return text.to_string();
+    }
+    let mut out = String::new();
+    for c in text.chars() {
+        if visible_width(&out) + visible_width(&c.to_string()) > max.saturating_sub(1) {
+            break;
+        }
+        out.push(c);
+    }
+    out.push('…');
     out
 }
 
@@ -601,6 +628,20 @@ https://example.com/a/very/long/url/that/cannot/be/broken/anywhere/at/all/really
         assert!(body.contains("let x = **not bold**;"), "markdown inside code must stay literal: {body}");
         assert!(body.contains("# not a heading"), "{body}");
         assert!(text.last().unwrap().contains('╯'), "the frame must close: {:?}", text.last());
+    }
+
+    #[test]
+    fn a_code_block_the_answer_forgot_to_close_is_closed_by_the_frame() {
+        let out = plain(&render("```rust\nlet x = 1;", 40));
+        assert!(out.last().unwrap().contains('╯'), "the frame was left open: {:?}", out.last());
+    }
+
+    #[test]
+    fn a_long_language_tag_does_not_widen_the_frame() {
+        let out = plain(&render("```objective-cpp\nx\n```", 30));
+        for row in &out {
+            assert!(visible_width(row) <= 30, "the row is wider than the window: {row:?}");
+        }
     }
 
     #[test]

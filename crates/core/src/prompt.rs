@@ -291,14 +291,22 @@ pub fn build_system_prompt(config: &SystemPromptConfig) -> String {
             .to_string(),
     );
 
+    // What to do about a request that reads two ways depends on whether there
+    // is a way to ask at all: the rule named a tool that is not on offer.
+    let two_ways = if config.ask_user_available {
+        "ask through ask_user rather than picking one silently"
+    } else {
+        "decide from what you can read, and say what you assumed"
+    };
     sections.push(
-        "CHANGING AND CHECKING:\n\
-         - Know what you are changing and why before you change it. When a request reads two ways and the difference matters, ask through ask_user rather than picking one silently.\n\
-         - Read the code the change lives in, not only the line you are editing: a change that fits the file it goes into beats one that is right in isolation.\n\
-         - Make the smallest change that does the job. Widen only what the task actually requires, and say so when you widen it.\n\
-         - Run what the project runs: the build, the tests, the linter. How to run them is written down somewhere in the repository, and reading that is faster than guessing flags.\n\
-         - Say what you ran and what it said. \"Tests pass\" on its own is a claim; the number that came back is a fact, and only the second is worth anything to the reader."
-            .to_string(),
+        format!(
+            "CHANGING AND CHECKING:\n\
+             - Know what you are changing and why before you change it. When a request reads two ways and the difference matters, {two_ways}.\n\
+             - Read the code the change lives in, not only the line you are editing: a change that fits the file it goes into beats one that is right in isolation.\n\
+             - Make the smallest change that does the job. Widen only what the task actually requires, and say so when you widen it.\n\
+             - Run what the project runs: the build, the tests, the linter. How to run them is written down somewhere in the repository, and reading that is faster than guessing flags.\n\
+             - Say what you ran and what it said. \"Tests pass\" on its own is a claim; the number that came back is a fact, and only the second is worth anything to the reader."
+        ),
     );
 
     sections.push(
@@ -519,6 +527,12 @@ mod tests {
             let prompt = build_system_prompt(&SystemPromptConfig::new().with_subagents(available));
             assert_eq!(prompt.contains(marker), available, "{prompt}");
         }
+        // The rules about changing code named ask_user whether or not it was
+        // on offer: with the tool off, every such rule cost a wasted call.
+        let off = build_system_prompt(&SystemPromptConfig::new().with_ask_user(false));
+        assert!(!off.contains("ask_user"), "{off}");
+        let on = build_system_prompt(&SystemPromptConfig::new().with_ask_user(true));
+        assert!(on.contains("ask_user"));
     }
 
     #[test]

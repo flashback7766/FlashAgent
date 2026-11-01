@@ -7,11 +7,12 @@ use std::process::{Command, Stdio};
 pub use flashagent_core::base64_encode;
 
 pub fn set_clipboard_text(text: &str) -> bool {
-    // OSC 52 works in tmux, Kitty, Alacritty, WezTerm, Windows Terminal.
+    // OSC 52 works in tmux, Kitty, Alacritty, WezTerm, Windows Terminal. The
+    // escape is fire-and-forget: a terminal that ignores it still took the
+    // write, and there is no answer to wait for. What can be known is whether
+    // anything was written at all, and the old `true` promised more than that.
     let b64 = base64_encode(text.as_bytes());
-    let _ = write!(std::io::stdout(), "\x1b]52;c;{b64}\x07");
-    let _ = std::io::stdout().flush();
-    let success = true;
+    let osc52 = write!(std::io::stdout(), "\x1b]52;c;{b64}\x07").is_ok() && std::io::stdout().flush().is_ok();
 
     if let Ok(mut cb) = arboard::Clipboard::new() {
         if cb.set_text(text.to_string()).is_ok() {
@@ -85,7 +86,7 @@ pub fn set_clipboard_text(text: &str) -> bool {
         }
     }
 
-    success
+    osc52
 }
 
 pub fn get_clipboard_text() -> Option<String> {

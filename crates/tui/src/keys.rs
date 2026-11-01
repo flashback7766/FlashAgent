@@ -54,6 +54,9 @@ impl App {
         match open_in_external_editor(&self.input, &self.config.external_editor) {
             Ok(edited) => {
                 self.input.set(edited);
+                // The edited text is not the history entry it came from: ↑/↓
+                // used to replace it with a neighbour as if it were untouched.
+                self.history_index = None;
                 self.autocomplete_idx = 0;
             }
             Err(err) => self.notice(flashagent_tui::i18n::tr_fill("Failed to launch external editor: {err}", &[("err", &err.to_string())])),

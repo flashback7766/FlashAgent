@@ -140,14 +140,48 @@ impl SnapshotStore {
     pub fn before_write(&self, tool: &str, args_json: &str) {
         if MEMORY_TOOLS.contains(&tool) {
             let args: Option<serde_json::Value> = serde_json::from_str(args_json).ok();
-            if let Some(title) = args.as_ref().and_then(|a| a.get("title")).and_then(|t| t.as_str()) {
-                let store = crate::memory_store::Store::new(&self.cwd);
-                // As the store resolves a name: the file as listed, then the slug.
-                if !title.contains(['/', '\\']) && !title.trim().is_empty() && title != ".." {
-                    self.keep_before(store.dir().join(format!("{title}.md")));
+            let Some(title) = args.as_ref().and_then(|a| a.get("title")).and_then(|t| t.as_str()) else { return };
+            if title.contains(['/', '\\']) || title.trim().is_empty() || title == ".." {
+                return;
+            }
+            let named = args.as_ref().and_then(|a| a.get("scope")).and_then(|s| s.as_str());
+            let kind = args.as_ref().and_then(|a| a.get("kind")).and_then(|k| k.as_str());
+            // The scope a write without one lands in: a preference is about the
+            // person, everything else about the code.
+            let default_scope = match named {
+                Some(scope) => crate::memory_store::Scope::parse(Some(scope)),
+                None if kind.map(crate::memory_store::Kind::parse) == Some(crate::memory_store::Kind::Preference) => {
+                    crate::memory_store::Scope::Global
                 }
-                self.keep_before(store.dir().join(format!("{}.md", crate::memory_store::slugify(title))));
-                self.keep_before(store.index_path());
+                None => crate::memory_store::Scope::Project,
+            };
+            // An update or a removal names a fact that already exists: keep the
+            // file it is in, wherever that is. A file that does not exist is
+            // nobody's — arming it for deletion let a global memory write mark a
+            // project MEMORY.md, and a rewind then deleted it.
+            let mut kept_any = false;
+            for scope in [crate::memory_store::Scope::Project, crate::memory_store::Scope::Global] {
+                let Some(store) = crate::memory_store::Store::for_scope(scope, &self.cwd) else { continue };
+                let mut here = false;
+                for path in [
+                    store.dir().join(format!("{title}.md")),
+                    store.dir().join(format!("{}.md", crate::memory_store::slugify(title))),
+                ] {
+                    if path.exists() {
+                        self.keep_before(path);
+                        here = true;
+                    }
+                }
+                if here {
+                    self.keep_before(store.index_path());
+                    kept_any = true;
+                }
+            }
+            if !kept_any {
+                if let Some(store) = crate::memory_store::Store::for_scope(default_scope, &self.cwd) {
+                    self.keep_before(store.index_path());
+                    self.keep_before(store.dir().join(format!("{}.md", crate::memory_store::slugify(title))));
+                }
             }
             return;
         }
@@ -565,6 +599,22 @@ mod tests {
         s.rewind(0);
         assert!(!note.exists());
         assert_eq!(std::fs::read_to_string(&index).unwrap(), "# Memory\n");
+    }
+
+    #[test]
+    fn a_global_memory_write_does_not_arm_a_rewind_of_the_project_index() {
+        let (project, _snaps, s) = store();
+        s.begin_turn("p");
+        // A preference without a scope is global; nothing here touches the project.
+        s.before_write("memory_create", r#"{"title":"favourite editor","kind":"preference"}"#);
+        // The owner creates a project index while the turn runs.
+        let index = project.path().join("MEMORY.md");
+        std::fs::write(&index, "# Memory\n\nhand written\n").unwrap();
+        let preview = s.preview_rewind(0);
+        assert!(
+            !preview.iter().any(|p| p.path == index && p.will_delete),
+            "a rewind would delete a project file the turn never touched: {preview:?}"
+        );
     }
 
     #[test]

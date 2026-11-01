@@ -225,6 +225,10 @@ impl Plan {
         if lower.contains("context limit") {
             return match context_room(&lower) {
                 Some(room) if room < self.max_tokens => {
+                    // Remember it for this server and model: the next turn would
+                    // otherwise ask for the same too-large max_tokens and pay for
+                    // the same refusal again.
+                    CAPS.lock().insert(cap_key.to_string(), room);
                     self.max_tokens = room;
                     true
                 }
@@ -1819,6 +1823,19 @@ mod tests {
         let seen = seen.lock().unwrap();
         assert_eq!(seen.len(), 3);
         assert_eq!(sent_body(seen.last().unwrap())["max_tokens"], 21333);
+    }
+
+    #[tokio::test]
+    async fn a_context_limit_the_server_names_is_used_from_then_on() {
+        let refusal = r#"{"type":"error","error":{"type":"invalid_request_error","message":"input length and `max_tokens` exceed context limit: 1000 + 64000 > 5000, decrease input length or max_tokens and try again"}}"#;
+        let (url, seen) = serve(move |req| if req.contains("\"max_tokens\":64000") { ("400 Bad Request", refusal.to_string()) } else { ("200 OK", answer("ok")) }).await;
+        let llm = client(&url, "claude-opus-5-5");
+        for _ in 0..2 {
+            assert_eq!(said(&collect(&llm, &[ChatMessage::user("hi")]).await), "ok");
+        }
+        let seen = seen.lock().unwrap();
+        assert_eq!(seen.len(), 3, "the second turn asked again with a max_tokens already refused");
+        assert!(sent_body(seen.last().unwrap())["max_tokens"].as_u64().unwrap() < 64000);
     }
 
     #[tokio::test]
