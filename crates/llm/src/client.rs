@@ -244,7 +244,8 @@ impl Client {
     }
 
     /// What goes out with a request: the caller's options, without sampling
-    /// the provider should choose itself.
+    /// the provider should choose itself, and without what the model's own
+    /// sheet says it refuses.
     pub(crate) fn sampling_for_protocol(&self, options: &TurnOptions) -> TurnOptions {
         let mut options = options.clone();
         let tuned_by_maker = matches!(self.protocol(), ApiProtocol::Anthropic | ApiProtocol::Gemini);
@@ -255,6 +256,25 @@ impl Client {
             options.repeat_penalty = None;
             options.presence_penalty = None;
             options.min_p = None;
+        }
+        // What the listing said the model refuses or caps. Sending it costs a
+        // rejected request on every launch, and a reply longer than the model
+        // may write is rejected whole rather than cut short.
+        let limits = self.discovery.read().as_ref().and_then(|d| d.model(&self.model())).map(|m| m.limits);
+        if let Some(limits) = limits {
+            if limits.refuses_temperature {
+                options.temperature = None;
+            }
+            if limits.refuses_top_p {
+                options.top_p = None;
+            }
+            if limits.refuses_top_k {
+                options.top_k = None;
+            }
+            if let Some(cap) = limits.output {
+                let cap = u32::try_from(cap).unwrap_or(u32::MAX);
+                options.max_tokens = options.max_tokens.map(|asked| asked.min(cap));
+            }
         }
         options
     }
@@ -1008,6 +1028,37 @@ mod tests {
     }
 
     #[test]
+    fn the_sheet_that_says_temperature_is_refused_is_believed_before_the_refusal() {
+        // OpenCode's catalog says which sampling a model takes. Learning it
+        // from a 400 costs a refused request on every launch, and a reply cap
+        // above what the model may write is rejected whole rather than cut.
+        let llm = client("m");
+        *llm.discovery.write() = Some(ServerDiscovery {
+            base_url: "https://opencode.ai/inference/go/v1".into(),
+            models: vec![DiscoveredModel {
+                id: "m".into(),
+                limits: crate::thinking::ModelLimits {
+                    prompt: Some(200_000),
+                    output: Some(65_536),
+                    refuses_temperature: true,
+                    refuses_top_p: true,
+                    refuses_top_k: false,
+                },
+                ..Default::default()
+            }],
+            ..Default::default()
+        });
+        let asked = TurnOptions { temperature: Some(0.6), top_p: Some(0.9), top_k: Some(20), max_tokens: Some(128_000), ..Default::default() };
+        let sent = llm.sampling_for_protocol(&asked);
+        assert_eq!((sent.temperature, sent.top_p, sent.top_k), (None, None, Some(20)), "only the fields the model refuses are dropped");
+        assert_eq!(sent.max_tokens, Some(65_536), "a reply longer than the model may write is rejected whole");
+        assert_eq!(llm.sampling_for_protocol(&TurnOptions { max_tokens: Some(1000), ..Default::default() }).max_tokens, Some(1000), "a cap under the model's own stays as asked");
+        // Another model on the same server has nothing on its sheet.
+        llm.set_model("other");
+        assert_eq!(llm.sampling_for_protocol(&asked), asked);
+    }
+
+    #[test]
     fn a_maker_tuned_api_chooses_its_own_sampling_unless_the_user_set_it_by_hand() {
         let options = TurnOptions { temperature: Some(0.6), top_p: Some(0.95), top_k: Some(20), min_p: Some(0.0), max_tokens: Some(100), ..Default::default() };
         let llm = client("m");
@@ -1028,7 +1079,7 @@ mod tests {
         use crate::thinking::token_count_label as label;
         assert_eq!([label(1_000_000), label(1_048_576), label(2_000_000), label(1_500_000)], ["1M", "1M", "2M", "1.5M"]);
         assert_eq!([label(128_000), label(131_072), label(262_144), label(32_768), label(200_000)], ["128K", "128K", "256K", "32K", "200K"]);
-        let mut m = DiscoveredModel { id: "m".into(), display_name: None, is_loaded: false, context_length: Some(1_000_000), max_context_length: None, thinking: ThinkingProfile::unreported(), supports_tools: true, supports_vision: false };
+        let mut m = DiscoveredModel { id: "m".into(), display_name: None, is_loaded: false, context_length: Some(1_000_000), max_context_length: None, thinking: ThinkingProfile::unreported(), supports_tools: true, supports_vision: false, ..Default::default() };
         assert_eq!(m.context_display().as_deref(), Some("1M ctx"), "it read 977k ctx");
         m.context_length = Some(131_072);
         assert_eq!(m.context_display().as_deref(), Some("128k ctx"));
@@ -1045,6 +1096,7 @@ mod tests {
             thinking: ThinkingProfile::unreported(),
             supports_tools: true,
             supports_vision: false,
+            limits: Default::default(),
         };
         let models = || vec![listed("typesafe/jev-router"), listed("stealth/space-bunny-alpha"), listed("stealth/space-bunny-alpha-pro")];
         // One letter off, on OpenRouter: the first listed model was taken, and billed.
@@ -1091,6 +1143,7 @@ mod tests {
                 thinking: ThinkingProfile::unreported(),
                 supports_tools: true,
                 supports_vision: false,
+                limits: Default::default(),
             }],
             ServerKind::LmStudio,
             None,

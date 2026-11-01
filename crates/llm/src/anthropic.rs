@@ -1084,6 +1084,7 @@ fn listed_model(v: &Value) -> Option<DiscoveredModel> {
         thinking,
         supports_tools: true,
         supports_vision: caps["image_input"]["supported"].as_bool().unwrap_or(f.vision),
+        limits: Default::default(),
         id,
     })
 }

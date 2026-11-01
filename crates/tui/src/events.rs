@@ -439,7 +439,7 @@ impl App {
         // A cloud listing names no active model, but it does name the one in use.
         let resolved = Self::resolve_discovered_model(&disc, &self.current_model);
         if let Some(active) = resolved {
-            let new_ctx_len = active.context_length.or(active.max_context_length).unwrap_or(131_072);
+            let new_ctx_len = active.prompt_budget().unwrap_or(131_072);
             let new_ctx_disp = active.context_display();
             let model_changed = active.id != self.current_model;
             let ctx_changed = self.context_usage.total_capacity != new_ctx_len || self.current_context != new_ctx_disp;
@@ -1217,6 +1217,7 @@ mod tests {
             thinking: flashagent_llm::ThinkingProfile::unreported(),
             supports_tools: true,
             supports_vision: false,
+            limits: Default::default(),
         };
         let cloud = flashagent_llm::ServerDiscovery {
             base_url: "https://openrouter.ai/api/v1".into(),
@@ -1227,6 +1228,15 @@ mod tests {
         };
         let got = App::resolve_discovered_model(&cloud, "stealth/space-bunny-alpha").expect("the model in use was never resolved");
         assert_eq!(got.context_length, Some(1_000_000), "the window stays 128k without this");
+
+        // A listing that names the prompt budget apart from the window: the
+        // gauge, the compaction and the label count what one request may carry.
+        let capped = flashagent_llm::DiscoveredModel {
+            limits: flashagent_llm::ModelLimits { prompt: Some(272_000), ..Default::default() },
+            ..listed.clone()
+        };
+        assert_eq!(capped.prompt_budget(), Some(272_000));
+        assert_eq!(capped.context_display().as_deref(), Some("272k ctx"));
 
         // A local server still speaks for itself first.
         let mut local = cloud.clone();
