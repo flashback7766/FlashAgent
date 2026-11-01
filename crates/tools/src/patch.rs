@@ -195,7 +195,10 @@ fn apply_hunks(orig: &str, hunks: &[Hunk], rel_path: &str) -> Result<String, Too
         }).collect();
         let inserted = replaced.len();
         file_lines.splice(pos..pos + expected_len, replaced);
-        if at_eof {
+        // The ending is set on the line the hunk writes at the end of the file.
+        // A hunk that only deletes there writes nothing: the line that becomes
+        // last keeps its own ending, which is what its bytes in the file say.
+        if at_eof && inserted > 0 {
             if let Some(last) = file_lines.last_mut() {
                 last.eol = final_eol;
             }
@@ -378,6 +381,12 @@ mod tests {
 
         patch_file(&temp, "a.txt", "@@ -2,0 +3,1 @@\n+f\n").unwrap();
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "a\ne\nf");
+
+        // Deleting the last line of a file without a final newline leaves the
+        // line above with the ending it already had.
+        std::fs::write(&path, "a\nb").unwrap();
+        patch_file(&temp, "a.txt", "@@ -2,1 +1,0 @@\n-b\n").unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "a\n");
     }
 
     #[test]

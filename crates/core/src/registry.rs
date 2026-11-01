@@ -593,7 +593,7 @@ pub static TOOLS: &[ToolDef] = &[
         name: "send_message",
         description: "Send a message to another agent working on this task, or to the parent with to \"parent\". Use it to hand over a finding, ask a running sibling a question, or redirect one of your own children. A message reaches the other agent between its steps, the way a keystroke from the user would; it does not stop it. The other agent decides what to do with it.",
         params: &[
-            one_of("to", "The agent_id of the agent to write to, or \"parent\" for the one that sent you.", &["parent"]),
+            s("to", "The agent_id of the agent to write to, or \"parent\" for the one that sent you."),
             s("message", "What to say. Say what you found or asked, with the file:line it came from."),
         ],
         required: &["to", "message"],
@@ -745,6 +745,15 @@ fn json_string(text: &str) -> String {
 mod tests {
     use super::*;
     use std::collections::BTreeSet;
+
+    #[test]
+    fn send_message_takes_any_agent_id_and_not_only_the_parent() {
+        // The description and the handler take any `agent_id`; an enum of one
+        // value made a server with guided decoding send everything to the parent.
+        let def = find("send_message").expect("send_message is registered");
+        let to = def.params.iter().find(|p| p.name == "to").expect("the addressee is a parameter");
+        assert!(to.choices.is_empty(), "the schema allows only {:?}", to.choices);
+    }
 
     #[test]
     fn every_tool_has_one_name_and_one_handler() {

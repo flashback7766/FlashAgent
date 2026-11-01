@@ -6,8 +6,10 @@
 use std::path::{Path, PathBuf};
 
 /// Anything outside these markers is the user's own text and is never touched.
-const BEGIN: &str = "<!-- flashagent:memory -->";
-const END: &str = "<!-- /flashagent:memory -->";
+/// The block the index is written into. Read by `memory.rs` to tell the
+/// owner's text from the model's record, so both halves name the same pair.
+pub(crate) const BEGIN: &str = "<!-- flashagent:memory -->";
+pub(crate) const END: &str = "<!-- /flashagent:memory -->";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Scope {

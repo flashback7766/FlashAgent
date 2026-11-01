@@ -96,6 +96,9 @@ pub fn normalize_url(url: &str) -> String {
 fn host_of(url: &str) -> Option<String> {
     let url = normalize_url(url);
     let host = url.split_once("://")?.1.split('/').next()?;
+    // A URL may carry credentials. They are not part of the host, and this name
+    // is shown in the provider menu and written to the config.
+    let host = host.rsplit_once('@').map_or(host, |(_, after)| after);
     (!host.is_empty()).then(|| host.to_string())
 }
 
@@ -1854,6 +1857,12 @@ mod tests {
         assert_eq!(cfg.active_profile().model, "kept");
         assert!(rejected.contains(&"auto_save_sessions".to_string()), "{rejected:?}");
         assert!(rejected.contains(&"token_budget".to_string()), "{rejected:?}");
+    }
+
+    #[test]
+    fn a_provider_name_never_carries_the_password_from_its_url() {
+        assert_eq!(host_of("https://user:secret@api.openai.com/v1"), Some("api.openai.com".to_string()));
+        assert_eq!(host_of("http://localhost:1234/v1"), Some("localhost:1234".to_string()));
     }
 
     #[test]

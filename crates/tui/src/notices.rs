@@ -225,7 +225,7 @@ impl App {
             return;
         }
         self.notices.push(flashagent_tui::notice_log::NoticeEntry {
-            when: how_long_ago(std::time::Instant::now()),
+            when: std::time::Instant::now(),
             text: text.to_string(),
             warning,
         });
@@ -240,20 +240,6 @@ impl App {
     /// The notices, newest first.
     pub(crate) fn notice_history(&self) -> Vec<flashagent_tui::notice_log::NoticeEntry> {
         self.notices.iter().rev().cloned().collect()
-    }
-}
-
-/// How long ago something happened, in words.
-fn how_long_ago(at: std::time::Instant) -> String {
-    let secs = at.elapsed().as_secs();
-    if secs < 5 {
-        flashagent_tui::i18n::tr("just now").to_string()
-    } else if secs < 60 {
-        flashagent_tui::i18n::tr_fill("{secs}s ago", &[("secs", &secs.to_string())])
-    } else if secs < 3600 {
-        flashagent_tui::i18n::tr_fill("{n} min ago", &[("n", &(secs / 60).to_string())])
-    } else {
-        flashagent_tui::i18n::tr_fill("{n} h ago", &[("n", &(secs / 3600).to_string())])
     }
 }
 

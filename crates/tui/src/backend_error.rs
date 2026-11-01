@@ -55,7 +55,7 @@ pub fn explain(raw: &str, url: &str, model: &str) -> Explained {
     if lower.contains("model_not_found")
         || lower.contains("no endpoints found")
         || lower.contains("does not exist")
-        || (lower.contains("404") && lower.contains("model"))
+        || (lower.contains("returned 404") || lower.contains("status 404")) && lower.contains("model")
         || lower.contains("no model loaded")
         || lower.contains("model unloaded")
     {
@@ -98,7 +98,9 @@ pub fn explain(raw: &str, url: &str, model: &str) -> Explained {
     }
 
     if matches!(code, Some(401) | Some(403))
-        || lower.contains("401") || lower.contains("403") || lower.contains("unauthorized")
+        || lower.contains("returned 401") || lower.contains("returned 403")
+        || lower.contains("status 401") || lower.contains("status 403")
+        || lower.contains("unauthorized")
         || lower.contains("invalid api key") || lower.contains("invalid_api_key") || lower.contains("incorrect api key")
         // A key the server never saw at all: OpenCode's gateway words it its own way.
         || lower.contains("missing api key") || lower.contains("requires a credential")
@@ -136,7 +138,9 @@ pub fn explain(raw: &str, url: &str, model: &str) -> Explained {
         };
     }
 
-    if code == Some(429) || lower.contains("429") || lower.contains("rate limit") || lower.contains("quota") {
+    if code == Some(429) || lower.contains("returned 429") || lower.contains("status 429")
+        || lower.contains("rate limit") || lower.contains("quota")
+    {
         return Explained {
             headline: crate::i18n::tr_fill("{base} is rate-limiting this key", &[("base", base)]),
             hint: Some(crate::i18n::tr("Wait and press Ctrl+R, or switch to a local provider with /provider.").to_string()),
@@ -252,6 +256,17 @@ mod tests {
 
     fn headline(raw: &str) -> String {
         explain(raw, URL, "gemma-4-e2b").headline
+    }
+
+    #[test]
+    fn a_number_inside_the_body_is_not_taken_for_a_status_code() {
+        // "got 4032" used to be read as a 403 and explained as a rejected key.
+        let e = explain(
+            r#"backend returned 400: {"error":{"message":"'max_tokens' must be <= 4096, got 4032"}}"#,
+            URL,
+            "m",
+        );
+        assert!(!e.headline.contains("rejected the API key"), "{}", e.headline);
     }
 
     #[test]
