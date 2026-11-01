@@ -1768,7 +1768,7 @@ gets it, and fixed what that turned up.
 - The tool-calling check printed its verdict to a screen the app then
   cleared, so the one thing a new user needed to read was gone before they
   could read it. It is now the first line of the conversation: *Tool-calling
-  check: 6/8 (unreliable), expect to babysit it.*
+  check: 6/8 — unreliable: expect to babysit it.*
 - That check ran before the "do you trust this directory?" question, so the
   first thing a new user did was wait a minute and only then get asked where
   they were. The instant question comes first.
@@ -1941,7 +1941,7 @@ Stable versions start at `v1.0.0` and ship on the rolling `stable` release.
 
 - Narrow terminals no longer cut text in half. Lines built from several facts
   now drop whole facts when the width runs out (`gemma-4-e2b · auto · 64k`
-  becomes `gemma-4-e2b · auto`, not `gemma-4-e2b · auto [off`) the composer
+  becomes `gemma-4-e2b · auto`, not `gemma-4-e2b · auto [off`); the composer
   shortens its prompt, and a tip too long for two lines ends on a word. A
   test renders the welcome card at six widths down to 30 columns and fails if
   any row overflows.
