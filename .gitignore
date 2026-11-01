@@ -36,7 +36,9 @@ Thumbs.db
 
 # Maintainer workflow notes for AI agents: kept locally, not part of the project
 .audit/
-.agents/
+.agents/*
+# A skill is part of the project, unlike the notes beside it.
+!.agents/skills/
 AGENTS.md
 CONTEXT.md
 MEMORY.md
