@@ -279,7 +279,14 @@ impl Store {
         block.push_str(END);
 
         let path = self.index_path();
-        let existing = std::fs::read_to_string(&path).unwrap_or_default();
+        // A missing index is written from scratch. One that exists but cannot be
+        // read is not empty: rewriting it would wipe what the owner put there,
+        // and the error is the only way to say so.
+        let existing = match std::fs::read_to_string(&path) {
+            Ok(text) => text,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+            Err(e) => return Err(e),
+        };
         let updated = match existing.find(BEGIN) {
             // The block runs from BEGIN to the END after it, or to the end of
             // the file when the closing marker never arrived. The reader reads
@@ -434,6 +441,16 @@ mod tests {
         let index = std::fs::read_to_string(store.index_path()).unwrap();
         assert!(index.contains("Hand-written intro."), "{index}");
         assert!(!index.contains("a-fact"), "a forgotten memory leaves the index:\n{index}");
+    }
+
+    #[test]
+    fn an_index_that_cannot_be_read_is_not_replaced_with_one_fact() {
+        let (store, _d) = temp_store();
+        // Not UTF-8: what an editor set to cp1251 leaves behind.
+        std::fs::write(store.index_path(), b"# Memory\n\n\xcf\xf0\xe8\xe2\xe5\xf2\n").unwrap();
+        assert!(store.save(&entry("a-fact", "something worth keeping")).is_err(), "the save wiped a file it could not read");
+        let bytes = std::fs::read(store.index_path()).unwrap();
+        assert!(bytes.starts_with(b"# Memory"), "the owner's text was replaced");
     }
 
     #[test]

@@ -354,20 +354,47 @@ fn match_lines(text: &str, needle: &str, loose: bool) -> Option<(String, Vec<Str
 /// `new` re-indented to the file's own layout. Only lines the model wrote with
 /// some indentation are touched; a blank line stays blank. This runs only when
 /// the match needed the loose tier, so an exact match is never disturbed.
+///
+/// The shift is taken from the first line, which stands for the file's own
+/// first line, and applied to every line of the edit — including the ones past
+/// the old block. Those used to keep the model's indent, so a line added after
+/// a loose match landed outside the block it was written into.
 fn with_file_indent(new: &str, indents: &[String]) -> String {
-    if indents.is_empty() {
-        return new.to_string();
+    let Some(file_base) = indents.first() else { return new.to_string() };
+    let model_base = new
+        .lines()
+        .find(|line| !line.trim().is_empty())
+        .map_or(0, |line| line.len() - line.trim_start().len());
+    let mut out = String::with_capacity(new.len());
+    for (i, line) in new.split_inclusive('\n').enumerate() {
+        let body = line.trim_end_matches(['\r', '\n']);
+        let ending = &line[body.len()..];
+        if body.trim().is_empty() {
+            out.push_str(line);
+            continue;
+        }
+        let own = body.len() - body.trim_start().len();
+        // A line the old block also had takes the file's indent for that line, as
+        // it always did. A line the edit adds has no such line, so it follows the
+        // shift of the block's first line — which is what keeps it inside it.
+        let want = if let Some(file_indent) = indents.get(i) {
+            out.push_str(file_indent);
+            out.push_str(body.trim_start());
+            out.push_str(ending);
+            continue;
+        } else {
+            (file_base.len() as isize + own as isize - model_base as isize).max(0) as usize
+        };
+        if want <= file_base.len() {
+            out.push_str(&file_base[..want]);
+        } else {
+            out.push_str(file_base);
+            out.push_str(&" ".repeat(want - file_base.len()));
+        }
+        out.push_str(body.trim_start());
+        out.push_str(ending);
     }
-    new.split_inclusive('\n')
-        .enumerate()
-        .map(|(i, line)| {
-            let Some(indent) = indents.get(i) else { return line.to_string() };
-            if line.trim().is_empty() {
-                return line.to_string();
-            }
-            format!("{indent}{}", line.trim_start())
-        })
-        .collect()
+    out
 }
 
 /// new_string in the file's own line endings: models write `\n`, and a CRLF
@@ -1634,6 +1661,22 @@ mod tests {
 
         let out = std::fs::read_to_string(dir.path().join("a.py")).unwrap();
         assert_eq!(out, "async def handle(self, q):\n        if media:\n            return None\n");
+    }
+
+    #[test]
+    fn a_loose_match_reindents_every_line_the_edit_adds() {
+        // The model dropped the indent on both sides and added a line. That line
+        // used to keep its own zero indent and land outside the block.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.py"), "def f():\n    if media:\n        return 1\n").unwrap();
+        edit_file(
+            dir.path(),
+            "a.py",
+            &[chunk("if media:\n    return 1", "if media:\n    return 1\nreturn 2", false)],
+        )
+        .unwrap();
+        let out = std::fs::read_to_string(dir.path().join("a.py")).unwrap();
+        assert_eq!(out, "def f():\n    if media:\n        return 1\n    return 2\n");
     }
 
     #[test]

@@ -679,7 +679,7 @@ fn names_files(prog: &str) -> bool {
         prog,
         "ls" | "cat" | "head" | "tail" | "wc" | "stat" | "file" | "du" | "realpath" | "readlink" | "nl"
             | "cmp" | "sha256sum" | "sha1sum" | "md5sum" | "grep" | "egrep" | "fgrep" | "diff"
-            | "rg" | "sort"
+            | "rg" | "sort" | "cut" | "tree" | "find"
     )
 }
 
@@ -1124,17 +1124,17 @@ impl PermissionState {
         if let Some(verdict) = self.outside_project_verdict(call, &mut diff).or_else(|| self.local_network_verdict(call)) {
             return verdict;
         }
-        if always {
-            return Verdict::Allow;
-        }
         let mode = self.mode();
+        // A standing rule skips the card, never a rail: planning stays read-only,
+        // the blacklist still asks, and /goal still refuses. It used to return
+        // Allow here, before the mode and the blacklist were even looked at, so
+        // one hand-written `run_shell` rule switched all three off.
         match self.category(&call.name) {
             Category::Read | Category::Net => Verdict::Allow,
             Category::Write => match mode {
                 PermissionMode::Bypass | PermissionMode::AcceptEdits => Verdict::Allow,
-                PermissionMode::Planning => {
-                    Verdict::Deny("planning mode is read-only".into())
-                }
+                PermissionMode::Planning => Verdict::Deny("planning mode is read-only".into()),
+                PermissionMode::Manual if always => Verdict::Allow,
                 PermissionMode::Manual => Verdict::NeedApproval { diff: diff() },
             },
             Category::Shell => {
@@ -1163,6 +1163,7 @@ impl PermissionState {
                 }
                 match mode {
                     PermissionMode::Bypass => Verdict::Allow,
+                    PermissionMode::Manual | PermissionMode::AcceptEdits if always => Verdict::Allow,
                     PermissionMode::Planning if cmd.as_deref().is_some_and(|c| {
                         let root = self.project_root.lock().expect("root lock").clone();
                         is_read_only_shell_under(root.as_deref().unwrap_or(std::path::Path::new("")), c)
@@ -1181,6 +1182,7 @@ impl PermissionState {
                 PermissionMode::Planning => {
                     Verdict::Deny("external tools are not available in planning mode".into())
                 }
+                PermissionMode::Manual | PermissionMode::AcceptEdits if always => Verdict::Allow,
                 PermissionMode::Manual | PermissionMode::AcceptEdits => Verdict::NeedApproval { diff: None },
             },
         }
@@ -1742,6 +1744,48 @@ mod tests {
         assert!(is_read_only_shell_in(root, "ls -la", posix), "an option takes no path");
         // An ordinary read still needs no card.
         assert!(is_read_only_shell_in(&here(), "cat src/main.rs", posix));
+    }
+
+    /// `cut`, `tree` and `find` take files as operands too. Without them in the
+    /// list that resolves operands, a link out of the project was read by
+    /// asking the shell for it instead of a file tool.
+    #[cfg(unix)]
+    #[test]
+    fn planning_reads_no_file_through_a_link_even_with_cut_tree_or_find() {
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::write(outside.path().join("id_rsa"), "PRIVATE KEY").unwrap();
+        let project = project();
+        std::os::unix::fs::symlink(outside.path(), project.path().join("keys")).unwrap();
+        let posix = &[ShellDialect::Posix];
+        assert!(!is_read_only_shell_in(project.path(), "cut -c1-9999 keys/id_rsa", posix), "the key was read through cut");
+        assert!(!is_read_only_shell_in(project.path(), "find keys -type f", posix), "the link was followed by find");
+        assert!(!is_read_only_shell_in(project.path(), "tree keys", posix), "the link was followed by tree");
+        // A plain read of a project file is still a read.
+        assert!(is_read_only_shell_in(project.path(), "cut -c1-10 src/main.rs", posix));
+    }
+
+    /// A standing "Always" skips the card, never a rail: planning stays
+    /// read-only and the blacklist still asks.
+    #[test]
+    fn a_standing_always_rule_does_not_unlock_planning_or_the_blacklist() {
+        let planning = PermissionState::new(PermissionMode::Planning, Arc::new(DenyAllGate));
+        planning.allow_tool_always("write_file");
+        assert!(
+            matches!(planning.decide(&call("write_file", r#"{"path":"a.rs","content":""}"#), || None), Verdict::Deny(_)),
+            "a standing rule turned planning into a write mode"
+        );
+        planning.allow_tool_always("mcp__srv__tool");
+        assert!(
+            matches!(planning.decide(&call("mcp__srv__tool", "{}"), || None), Verdict::Deny(_)),
+            "a standing rule let an external tool run in planning"
+        );
+
+        let manual = PermissionState::new(PermissionMode::Manual, Arc::new(DenyAllGate));
+        manual.allow_tool_always("run_shell");
+        assert!(
+            matches!(manual.decide(&call("run_shell", r#"{"command":"sudo ls"}"#), || None), Verdict::NeedApproval { .. }),
+            "a standing rule skipped the blacklist"
+        );
     }
 
     /// A project reached through a link in its own path — `/tmp` on macOS, a

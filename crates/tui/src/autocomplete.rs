@@ -258,6 +258,15 @@ pub fn needs_argument(trigger: &str) -> bool {
     matches!(trigger, "/goal" | "/commit" | "/channel")
 }
 
+/// The line already names a sub-command: a saved provider, a palette, a skill.
+/// Enter must run what was typed; the popup offers the longer name beside it,
+/// and picking that one used to switch to a different provider than the one
+/// written out.
+pub fn is_complete_sub_command(input: &str) -> bool {
+    let lower = input.trim_start().to_lowercase();
+    sub_commands(&lower).is_some_and(|items| items.iter().any(|item| item.trigger.to_lowercase() == lower))
+}
+
 /// From `.agents/skills/*.md` and `~/.flashagent/skills/*.md`.
 pub fn load_skills(cwd: &Path) -> Vec<AutocompleteItem> {
     let mut skills = Vec::new();
@@ -555,6 +564,17 @@ mod tests {
         assert_eq!(found, vec!["/provider Anthropic"], "matched however it is written");
         assert_eq!(find_matches("/provider ", Path::new(".")).len(), 2);
         assert!(find_matches("/provider Anthropic", Path::new(".")).is_empty(), "typed in full: nothing left to offer");
+        set_provider_names(Vec::new());
+    }
+
+    #[test]
+    fn a_sub_command_typed_in_full_is_not_swapped_for_a_longer_one() {
+        set_provider_names(vec![
+            ("Anthropic".into(), "Anthropic".into()),
+            ("Anthropic Proxy".into(), "Anthropic".into()),
+        ]);
+        assert!(is_complete_sub_command("/provider Anthropic"), "the typed name was read as a prefix");
+        assert!(!is_complete_sub_command("/provider Anthrop"));
         set_provider_names(Vec::new());
     }
 

@@ -1125,8 +1125,7 @@ fn append_approval_card(tail: &mut Vec<RenderLine>, gate: &TuiGate, st: &FrameSt
 /// `joined` is true when the work box above has already drawn the top edge of
 /// this block: the card is then its bottom half, and a second `╭` under the
 /// `├─┤` seam would open a box inside an unclosed one.
-fn append_question_card(tail: &mut Vec<RenderLine>, question_gate: &TuiQuestionGate, st: &FrameState<'_>, width: usize, inner_w: usize, border_color: &str, joined: bool) -> usize {
-    let req = question_gate.pending().expect("question card needs a pending request");
+fn append_question_card(tail: &mut Vec<RenderLine>, req: &QuestionRequest, question_state: Option<&QuestionUiState>, width: usize, inner_w: usize, border_color: &str, joined: bool) -> usize {
     let reset = "\x1b[0m";
     // The composer becomes the question card.
     let title = format!(" {} ", flashagent_tui::i18n::tr("Question from FlashAgent"));
@@ -1161,7 +1160,7 @@ fn append_question_card(tail: &mut Vec<RenderLine>, question_gate: &TuiQuestionG
         ));
     }
 
-    let q_state = st.question_state;
+    let q_state = question_state;
     let sel_idx = q_state.map(|s| s.selected_index).unwrap_or(0);
     let is_writing = q_state.map(|s| s.is_writing).unwrap_or(false);
     let no_answer = flashagent_tui::Composer::new();
@@ -1575,8 +1574,8 @@ impl Renderer {
             input_line_idx = append_approval_card(&mut tail, gate, &st, width, height as usize, inner_w, &border_color, joined);
         } else if st.channel_prompt.is_some() {
             input_line_idx = append_channel_card(&mut tail, &st, width, inner_w, t, joined);
-        } else if question_gate.pending().is_some() {
-            input_line_idx = append_question_card(&mut tail, question_gate, &st, width, inner_w, &border_color, joined);
+        } else if let Some(req) = question_gate.pending() {
+            input_line_idx = append_question_card(&mut tail, &req, st.question_state, width, inner_w, &border_color, joined);
         } else if let Some(overlay) = overlay {
             // The composer turns into the open menu or screen.
             // The composer turns into the open menu or screen.
@@ -2405,5 +2404,24 @@ mod footer_tests {
         let (narrow, gauge_vis) = fit_status_row(20, &left, &provider, "1% · 9.5K/1M");
         assert_eq!(gauge_vis, 12);
         assert!(flashagent_tui::strip_ansi(&narrow).ends_with("1% · 9.5K/1M"));
+    }
+
+    #[test]
+    fn the_question_card_is_drawn_from_the_request_the_frame_read() {
+        // The gate is answered from the turn's task, so a second look at it
+        // inside the drawing code could find nothing and panicked. The card is
+        // drawn from the request the frame already has.
+        let req = QuestionRequest {
+            question: "Which branch?".into(),
+            options: Some(vec!["main".into(), "release".into()]),
+            multi_select: false,
+            deadline: None,
+        };
+        let mut tail = Vec::new();
+        let answer_row = append_question_card(&mut tail, &req, None, 40, 38, "", false);
+        let screen: String = tail.iter().map(|(_, row)| row.as_str()).collect::<Vec<_>>().join("\n");
+        assert!(screen.contains("Which branch?"), "{screen}");
+        assert!(screen.contains("main"), "{screen}");
+        assert!(answer_row < tail.len(), "the answer row was not placed in the card");
     }
 }

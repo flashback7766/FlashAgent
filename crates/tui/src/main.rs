@@ -24,7 +24,7 @@ use flashagent_tui::MascotMood;
 use flashagent_tui::{
     clip_ansi, pad_box_row, render_session_saved_card, restore_line_color,
     visible_width, welcome_card, AutocompletePopup, ChatView, CompactionResult, ConfirmChoice, ConfirmSelect,
-    ContextModal, LineKind, McpModal, McpModalAction, McpViewTab, PrefillTracker, ReasoningExpansion,
+    ContextModal, LineKind, McpModal, McpModalAction, McpViewTab, PrefillTracker, QuestionRequest, ReasoningExpansion,
     RenderLine, SamplingAction, SamplingView, SelectItem, SelectMenu, SettingsAction, SettingsView,
     TuiGate, TuiQuestionGate, UiEvent,
 };
@@ -1943,13 +1943,15 @@ async fn approve_project_mcp_servers(
     // Remembered only in the ordinary mode: the safe mode asks every time.
     if !config.safe_mode {
         for (name, cfg) in mcp.project_servers() {
-            if asked.contains(&name) {
+            if asked.remember.contains(&name) {
                 config.trust_mcp_server(cwd, &name, &mcp_command_line(&cfg));
             }
         }
         let _ = config.save();
     }
-    allowed.extend(asked);
+    allowed.extend(asked.remember);
+    // "Just this time" runs the server now and asks again next launch.
+    allowed.extend(asked.once);
     allowed
 }
 

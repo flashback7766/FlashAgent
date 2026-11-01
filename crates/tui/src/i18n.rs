@@ -625,6 +625,8 @@ static RU: &[(&str, &str)] = &[
     ("no home directory to save sessions in", "некуда сохранять сессии: нет домашней папки"),
     ("compaction archive has no parent directory", "у архива компакции нет родительской папки"),
     ("No home directory to read sessions from; starting fresh.", "Некуда читать сессии: нет домашней папки. Начинаем заново."),
+    ("Not switching while the context is being compacted", "Не переключаю: идёт сжатие контекста"),
+    ("An answer is still being written · Esc stops it now", "Ответ ещё пишется · Esc остановит его сейчас"),
     ("No home directory to read sessions from", "Некуда читать сессии: нет домашней папки"),
     ("(no prompt)", "(без запроса)"),
     ("not executed:", "не выполнено:"),

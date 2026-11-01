@@ -510,10 +510,13 @@ impl Decoder {
             // Several Gemini-compatible gateways end the turn with a frame
             // carrying nothing but the counts. It arrives after the finish
             // reason, and reading it is what keeps the token budget and the
-            // compaction threshold honest.
-            self.usage = Some(usage);
-            if was_done && !self.usage_sent {
-                self.flush_usage(out);
+            // compaction threshold honest. One already reported is not a second
+            // bill: keeping it here made `finish` send it again.
+            if !self.usage_sent {
+                self.usage = Some(usage);
+                if was_done {
+                    self.flush_usage(out);
+                }
             }
         }
         if self.done {
@@ -1124,6 +1127,21 @@ mod tests {
         ]);
         let usages: Vec<Usage> = ok_events(decode(&[&stream])).into_iter().filter_map(|e| if let LlmEvent::Usage(u) = e { Some(u) } else { None }).collect();
         assert_eq!(usages, vec![Usage { prompt: Some(100), completion: Some(50), cached: Some(64), mtp: None, cost: None, cost_details: None, ..Default::default() }]);
+    }
+
+    /// The same counts repeated in a frame after the terminal one are the same
+    /// bill, not a second: two `Usage` events doubled the turn in the budget.
+    #[test]
+    fn counts_repeated_after_the_terminal_frame_are_not_billed_twice() {
+        let stream = sse(&[
+            json!({
+                "candidates": [{ "content": { "parts": [{ "text": "a" }] }, "finishReason": "STOP" }],
+                "usageMetadata": { "promptTokenCount": 100, "candidatesTokenCount": 20, "totalTokenCount": 120 },
+            }),
+            json!({ "usageMetadata": { "promptTokenCount": 100, "candidatesTokenCount": 20, "totalTokenCount": 120 } }),
+        ]);
+        let usages: Vec<Usage> = ok_events(decode(&[&stream])).into_iter().filter_map(|e| if let LlmEvent::Usage(u) = e { Some(u) } else { None }).collect();
+        assert_eq!(usages.len(), 1, "the same turn was reported twice: {usages:?}");
     }
 
     /// Several Gemini-compatible gateways send the counts in a usage-only frame

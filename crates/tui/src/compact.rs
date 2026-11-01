@@ -247,8 +247,30 @@ impl TurnCompactor {
     /// A server that reports no usage is estimated with the counter of the
     /// model in use.
     fn used(&self, history: &[ChatMessage], prompt_tokens: Option<usize>) -> usize {
-        prompt_tokens.unwrap_or_else(|| history.iter().map(|m| est_tokens(&self.model, &m.content)).sum())
+        used_tokens(&self.model, history, prompt_tokens)
     }
+}
+
+/// What the conversation will cost as a prompt. The tool calls travel with the
+/// messages and cost as much as the text around them; the gauge counts them, and
+/// the trigger used to count only `content`, so a turn of large edits looked
+/// small until the request no longer fit the window.
+fn used_tokens(model: &str, history: &[ChatMessage], prompt_tokens: Option<usize>) -> usize {
+    prompt_tokens.unwrap_or_else(|| {
+        history
+            .iter()
+            .map(|m| {
+                let mut tokens = est_tokens(model, &m.content);
+                for call in &m.tool_calls {
+                    tokens += est_tokens(model, &call.name) + est_tokens(model, &call.args_json);
+                }
+                if let Some(reasoning) = m.reasoning.as_deref() {
+                    tokens += est_tokens(model, reasoning);
+                }
+                tokens
+            })
+            .sum()
+    })
 }
 
 /// Assistant messages kept whole at the end of a turn that is compacted while it runs.
@@ -1025,6 +1047,29 @@ fn normalize_compaction_summary(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_tool_call_is_counted_in_the_number_the_trigger_uses() {
+        // A turn of large edits used to look small to the trigger while the
+        // gauge already counted the arguments: compaction came too late.
+        let mut call = ChatMessage::assistant("");
+        call.tool_calls.push(flashagent_llm::ToolCall {
+            id: "c1".into(),
+            name: "write_file".into(),
+            args_json: serde_json::json!({
+                "path": "src/main.rs",
+                "content": "fn main() {}\n".repeat(500),
+            })
+            .to_string(),
+        });
+        let history = vec![ChatMessage::user("do it"), call];
+        let content_only: usize = history.iter().map(|m| est_tokens("test-model", &m.content)).sum();
+        let counted = used_tokens("test-model", &history, None);
+        assert!(
+            counted > content_only + 100,
+            "the arguments of the tool call are not in the trigger's number: {counted} against {content_only}"
+        );
+    }
 
     /// The room is the window minus the fixed part — once. What the turn
     /// already holds is the conversation itself, and it is what gets

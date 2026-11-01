@@ -1072,24 +1072,40 @@ impl AppConfig {
 
     /// Default when missing or invalid; a file that is not text is said so.
     pub fn load() -> Self {
-        if let Some(path) = Self::default_path() {
-            if path.exists() {
-                if let Some(content) = std::fs::read(&path).ok().and_then(|bytes| decode_text(&bytes)) {
-                    let (cfg, rejected) = Self::from_json_str(&content);
-                    for field in &rejected {
-                        eprintln!(
-                            "Warning: {} in {} is not valid; using the default for it. \
-                             Every other setting was kept.",
-                            field,
-                            path.display()
-                        );
-                    }
-                    return cfg;
-                }
-                eprintln!("Warning: {} could not be read as text; using the default settings.", path.display());
-            }
+        match Self::default_path() {
+            Some(path) if path.exists() => Self::load_file(&path),
+            _ => Self::default(),
         }
+    }
+
+    /// Reads one file, and keeps a copy of it as it was when it cannot be read
+    /// as a config: the first save writes a default over it, and a typo is
+    /// cheaper to fix in the original than to reconstruct by hand.
+    fn load_file(path: &std::path::Path) -> Self {
+        if let Some(content) = std::fs::read(path).ok().and_then(|bytes| decode_text(&bytes)) {
+            let (cfg, rejected) = Self::from_json_str(&content);
+            if rejected.iter().any(|field| field == "the file (it is not valid JSON)") {
+                Self::keep_a_copy_of(path);
+            }
+            for field in &rejected {
+                eprintln!(
+                    "Warning: {} in {} is not valid; using the default for it. \
+                     Every other setting was kept.",
+                    field,
+                    path.display()
+                );
+            }
+            return cfg;
+        }
+        Self::keep_a_copy_of(path);
+        eprintln!("Warning: {} could not be read as text; using the default settings.", path.display());
         Self::default()
+    }
+
+    /// The file as it was, beside itself. Best effort: a copy that cannot be
+    /// written must not stop the app from starting.
+    fn keep_a_copy_of(path: &std::path::Path) {
+        let _ = std::fs::copy(path, path.with_extension("json.broken"));
     }
 
     /// One bad field must not cost the other thirty: failing fields fall back to
@@ -1845,6 +1861,17 @@ mod tests {
         let (cfg, rejected) = AppConfig::from_json_str("this is not json at all");
         assert_eq!(cfg, AppConfig::default().normalised());
         assert_eq!(rejected.len(), 1);
+    }
+
+    #[test]
+    fn a_config_that_cannot_be_read_is_kept_beside_the_default_that_replaces_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        std::fs::write(&path, r#"{"temperature":0.6,}"#).unwrap();
+        let _ = AppConfig::load_file(&path);
+        let saved = dir.path().join("config.json.broken");
+        assert!(saved.exists(), "the unreadable config was not kept");
+        assert_eq!(std::fs::read_to_string(&saved).unwrap(), r#"{"temperature":0.6,}"#);
     }
 
     #[test]

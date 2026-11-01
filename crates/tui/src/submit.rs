@@ -1000,6 +1000,7 @@ impl App {
         // own counter, and the compaction decides on the same numbers the bar
         // shows.
         let model = self.current_model.clone();
+        let session = cx.session_id.clone();
         let tx = cx.tx.clone();
         tokio::spawn(async move {
             let sink = SummarySink::ui(tx.clone());
@@ -1019,7 +1020,7 @@ impl App {
             )
             .await;
             let saved = result.as_ref().map(|r| r.saved);
-            let _ = tx.send(UiEvent::Compacted { history, saved, card: result });
+            let _ = tx.send(UiEvent::Compacted { session, history, saved, card: result });
         });
     }
 

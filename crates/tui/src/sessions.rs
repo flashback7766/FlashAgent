@@ -38,7 +38,10 @@ impl From<&ChatMessage> for SavedMessage {
                 .map(|tc| SavedToolCall {
                     id: tc.id.clone(),
                     name: tc.name.clone(),
-                    args_json: tc.args_json.clone(),
+                    // The arguments carry keys as readily as the result does: a
+                    // write of a `.env`, a curl with a bearer token. The file is
+                    // the one thing people hand to a bug report.
+                    args_json: redact_secrets(&tc.args_json),
                 })
                 .collect(),
             images: m.images.clone(),
@@ -440,7 +443,21 @@ impl App {
 
     /// A session picked from the list replaces the open one on screen and in
     /// the history, which is saved first. False if nothing was switched.
+    /// The history is with the compaction task while it runs. A session picked
+    /// now would be opened, and the summary that lands afterwards would be
+    /// written into its file. False when the switch must wait.
+    pub(crate) fn may_switch_session(&mut self) -> bool {
+        if self.compacting {
+            self.notice(tr("Not switching while the context is being compacted"));
+            return false;
+        }
+        true
+    }
+
     pub(crate) fn switch_session(&mut self, current: &str, id: &str, memory_block: &str, perm: &PermissionedTools) -> bool {
+        if !self.may_switch_session() {
+            return false;
+        }
         // A recap still being written belongs to the session being left: its
         // suggestion and its name must not land in the one being opened.
         self.cancel_recap();
@@ -1067,6 +1084,21 @@ mod session_tests {
     }
 
     #[test]
+    fn a_key_in_tool_arguments_is_not_written_to_the_session_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut call = ChatMessage::assistant("Writing the env file.");
+        call.tool_calls.push(flashagent_llm::ToolCall {
+            id: "c1".into(),
+            name: "write_file".into(),
+            args_json: r#"{"path":".env","content":"OPENAI_API_KEY=sk-proj-AAAABBBBCCCCDDDDEEEE"}"#.into(),
+        });
+        let path = save_session_in(dir.path(), "s", "m", "~/p", &[call], &[], false, None).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(!text.contains("sk-proj-AAAABBBB"), "the arguments kept the key:\n{text}");
+        assert!(text.contains("sk-proj-[redacted]"), "nothing marks what was taken out:\n{text}");
+    }
+
+    #[test]
     fn redaction_leaves_ordinary_words_that_begin_like_a_key_alone() {
         assert_eq!(redact_secrets("I read the sk-learn docs and sketched a parser"), "I read the sk-learn docs and sketched a parser");
         assert_eq!(redact_secrets("see https://example.com/sketch.png"), "see https://example.com/sketch.png");
@@ -1078,6 +1110,15 @@ mod session_tests {
         assert_eq!(redact_secrets("no secrets here"), "no secrets here");
         // Nothing is invented for text that has none.
         assert!(!redact_secrets("plain").contains("redacted"));
+    }
+
+    #[test]
+    fn a_session_switch_waits_for_the_compaction_to_land() {
+        let mut app = crate::tests::test_app();
+        app.compacting = true;
+        assert!(!app.may_switch_session(), "a session could be picked while its history is with the compaction task");
+        app.compacting = false;
+        assert!(app.may_switch_session());
     }
 
     #[test]

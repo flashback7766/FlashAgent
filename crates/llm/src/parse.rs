@@ -853,9 +853,9 @@ impl TextToolScanner {
                 let after_lang = after_fence.strip_prefix("json").unwrap_or(after_fence);
                 if let Some(after_nl) = after_lang.strip_prefix("\r\n").or_else(|| after_lang.strip_prefix('\n')) {
                     let inner = after_nl.trim_start_matches([' ', '\t']);
-                    if inner.strip_prefix('{').is_some_and(is_tool_call_start)
-                        || inner.strip_prefix('[').is_some_and(is_tool_call_start)
-                    {
+                    // An array of calls is how some models send several at once;
+                    // a single object in a fence is an example, and stays text.
+                    if inner.strip_prefix('[').is_some_and(is_tool_call_start) {
                         return Some(at);
                     }
                 }
@@ -970,38 +970,41 @@ impl TextToolScanner {
         Some((rest[open..open + len].to_string(), START_CALL_FENCE.len() + open + len + close))
     }
 
-    fn find_bare(&self) -> Option<(String, usize)> {
-        let start = self.find_bare_start()?;
-        if start != 0 {
-            return None;
-        }
-        let rest = &self.buf;
-        let trimmed = rest.trim_start_matches([' ', '\t']);
-        let offset = rest.len() - trimmed.len();
-        if let Some(after_fence) = trimmed.strip_prefix("```") {
-            let after_lang = after_fence.strip_prefix("json").unwrap_or(after_fence);
-            let header_len = after_lang.as_ptr() as usize - trimmed.as_ptr() as usize;
-            let (after_nl, nl_len) = if let Some(s) = after_lang.strip_prefix("\r\n") {
-                (s, 2)
-            } else {
-                let s = after_lang.strip_prefix('\n')?;
-                (s, 1)
-            };
-            let inner = after_nl.trim_start_matches([' ', '\t']);
-            let inner_offset = after_nl.len() - inner.len();
-            let json_len = balanced_len(inner)?;
-            let after_json = &inner[json_len..];
-            let close_fence_len = if let Some(p) = after_json.find("```") {
-                p + 3
-            } else {
-                0
-            };
-            let consumed = offset + header_len + nl_len + inner_offset + json_len + close_fence_len;
-            return Some((inner[..json_len].to_string(), consumed));
-        }
-        let len = balanced_len(trimmed)?;
-        Some((trimmed[..len].to_string(), offset + len))
+/// A bare call is an object or an array at the start of a line: the shape a
+/// model writes when the server has no native tool-call field. A `json` fence
+/// holding an object is an example; one holding an array is a batch of calls.
+fn find_bare(&self) -> Option<(String, usize)> {
+    let start = self.find_bare_start()?;
+    if start != 0 {
+        return None;
     }
+    let rest = &self.buf;
+    let trimmed = rest.trim_start_matches([' ', '\t']);
+    let offset = rest.len() - trimmed.len();
+    if let Some(after_fence) = trimmed.strip_prefix("```") {
+        let after_lang = after_fence.strip_prefix("json").unwrap_or(after_fence);
+        let header_len = after_lang.as_ptr() as usize - trimmed.as_ptr() as usize;
+        let (after_nl, nl_len) = if let Some(s) = after_lang.strip_prefix("\r\n") {
+            (s, 2)
+        } else {
+            let s = after_lang.strip_prefix('\n')?;
+            (s, 1)
+        };
+        let inner = after_nl.trim_start_matches([' ', '\t']);
+        let inner_offset = after_nl.len() - inner.len();
+        let json_len = balanced_len(inner)?;
+        let after_json = &inner[json_len..];
+        let close_fence_len = if let Some(p) = after_json.find("```") {
+            p + 3
+        } else {
+            0
+        };
+        let consumed = offset + header_len + nl_len + inner_offset + json_len + close_fence_len;
+        return Some((inner[..json_len].to_string(), consumed));
+    }
+    let len = balanced_len(trimmed)?;
+    Some((trimmed[..len].to_string(), offset + len))
+}
 }
 
 /// String-aware; None while the value is still open.
@@ -1768,6 +1771,17 @@ mod tests {
         // A ```json fence may be an example and stays text.
         let (_, calls) = scan(&["Example:\n```json\n", "{\"name\": \"read_file\", \"arguments\": {}}", "\n```"]);
         assert!(calls.is_empty());
+    }
+
+    /// A fenced example delivered in one piece used to be a call while the same
+    /// example cut into deltas was text: the scanner answered by how the stream
+    /// happened to be chunked, and `rm -rf` in a documentation block could run.
+    #[test]
+    fn a_fenced_example_delivered_in_one_piece_is_still_text() {
+        let whole = "Example:\n```json\n{\"name\": \"write_file\", \"arguments\": {\"path\": \"README.md\", \"content\": \"\"}}\n```\nDone.";
+        let (text, calls) = scan(&[whole]);
+        assert!(calls.is_empty(), "a fenced example was executed: {calls:?}");
+        assert!(text.contains("write_file"), "the example vanished from the answer: {text}");
     }
 
     #[test]
