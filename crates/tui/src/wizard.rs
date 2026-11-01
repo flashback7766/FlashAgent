@@ -1741,6 +1741,7 @@ mod tests {
                 thinking: flashagent_llm::ThinkingProfile::unsupported(),
                 supports_tools: true,
                 supports_vision: false,
+                limits: Default::default(),
             },
             flashagent_llm::DiscoveredModel {
                 id: "deepseek-r1-distill-qwen-14b".to_string(),
@@ -1756,6 +1757,7 @@ mod tests {
                 },
                 supports_tools: true,
                 supports_vision: false,
+                limits: Default::default(),
             },
             flashagent_llm::DiscoveredModel {
                 id: "llama-3.2-3b-instruct".to_string(),
@@ -1766,6 +1768,7 @@ mod tests {
                 thinking: flashagent_llm::ThinkingProfile::unsupported(),
                 supports_tools: false,
                 supports_vision: true,
+                limits: Default::default(),
             },
         ];
 
@@ -1803,6 +1806,7 @@ mod tests {
                 thinking: flashagent_llm::ThinkingProfile::unsupported(),
                 supports_tools: true,
                 supports_vision: false,
+                limits: Default::default(),
             }],
             active_model: None,
             kind: flashagent_llm::thinking::ServerKind::LmStudio,

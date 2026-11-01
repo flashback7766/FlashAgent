@@ -24,7 +24,7 @@ pub use encoding::base64_encode;
 pub use protocol::{ApiProtocol, Endpoint};
 pub use parse::{is_complete_json, ChunkParser, SseDecoder, TextToolScanner, ScannerEvent};
 pub use repair::{effective_args, repair_json};
-pub use thinking::{DiscoveredModel, ServerDiscovery, TaskComplexity, ThinkingProfile, ThinkingProtocol};
+pub use thinking::{DiscoveredModel, ModelLimits, ServerDiscovery, TaskComplexity, ThinkingProfile, ThinkingProtocol};
 pub use tokenizer::{
     count_tokens, load_measurements, measurement_of, measurements, measurements_path, note_measured, save_measurements,
     set_measurement, Measurement,

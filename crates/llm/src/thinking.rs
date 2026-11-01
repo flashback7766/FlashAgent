@@ -86,7 +86,7 @@ impl ServerKind {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct DiscoveredModel {
     /// E.g. `gemma-4-e2b-it-qat@q4_k_xl`.
     pub id: String,
@@ -98,12 +98,48 @@ pub struct DiscoveredModel {
     pub thinking: ThinkingProfile,
     pub supports_tools: bool,
     pub supports_vision: bool,
+    /// What the model takes and refuses beyond the window and the effort
+    /// ladder, when the server said so.
+    #[serde(default)]
+    pub limits: ModelLimits,
+}
+
+/// The numbers a listing states apart from the whole window: OpenCode's
+/// catalog gives `limit.input` for what may go into one request, `limit.context`
+/// for input and output together, `limit.output` for the longest reply, and
+/// `capabilities.temperature`/`top_p`/`top_k` for sampling the model refuses.
+/// A request built on the window alone can exceed the input the model takes, and
+/// sampling it refuses costs a refused request on every launch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct ModelLimits {
+    /// The prompt budget when the server names it apart from the window.
+    pub prompt: Option<usize>,
+    /// The longest reply the model may produce.
+    pub output: Option<usize>,
+    pub refuses_temperature: bool,
+    pub refuses_top_p: bool,
+    pub refuses_top_k: bool,
+}
+
+impl ModelLimits {
+    /// The budget a prompt may fill: the stated input first, the window after.
+    pub fn prompt_budget(&self, context_length: Option<usize>, max_context_length: Option<usize>) -> Option<usize> {
+        self.prompt.or(context_length).or(max_context_length)
+    }
 }
 
 impl DiscoveredModel {
-    /// E.g. `128k ctx`, `1M ctx`.
+    /// The budget a prompt may fill: the stated input first, the window after.
+    /// `limit.context` counts input and output together, so a request built on
+    /// it alone can exceed what the model accepts.
+    pub fn prompt_budget(&self) -> Option<usize> {
+        self.limits.prompt_budget(self.context_length, self.max_context_length)
+    }
+
+    /// E.g. `128k ctx`, `1M ctx`. The stated prompt budget when there is one:
+    /// the gauge and the compaction are about what a request may carry.
     pub fn context_display(&self) -> Option<String> {
-        let len = self.context_length.or(self.max_context_length)?;
+        let len = self.prompt_budget()?;
         Some(format!("{} ctx", token_count_label(len).replace('K', "k")))
     }
 
@@ -926,6 +962,7 @@ pub fn parse_gemini_models(data: &serde_json::Value) -> Vec<DiscoveredModel> {
                 thinking: gemini_profile(&id, thinks),
                 supports_tools: true,
                 supports_vision: true,
+                limits: Default::default(),
                 id,
             })
         })
@@ -1059,6 +1096,7 @@ pub fn parse_server_models(data: &serde_json::Value) -> Vec<DiscoveredModel> {
                 thinking,
                 supports_tools,
                 supports_vision,
+                limits: Default::default(),
             });
         }
         if !discovered.is_empty() {
@@ -1117,6 +1155,7 @@ pub fn parse_server_models(data: &serde_json::Value) -> Vec<DiscoveredModel> {
         // v0 and plain OpenAI listings say nothing about reasoning unless a
         // capability object lists effort levels.
         let mut thinking = ThinkingProfile::unreported();
+        let mut limits = ModelLimits::default();
 
         if let Some(caps) = m.get("capabilities") {
             if let Some(arr) = caps.as_array() {
@@ -1191,7 +1230,21 @@ pub fn parse_server_models(data: &serde_json::Value) -> Vec<DiscoveredModel> {
             if let Some(context) = m.pointer("/limit/context").and_then(|v| v.as_u64()) {
                 context_length = Some(context as usize);
             }
+            // `limit.context` is input and output together; `limit.input` is
+            // what one request may carry, and the gauge and the compaction must
+            // read that one or they build a prompt the model refuses.
+            limits.prompt = m.pointer("/limit/input").and_then(|v| v.as_u64()).map(|n| n as usize);
+            limits.output = m.pointer("/limit/output").and_then(|v| v.as_u64()).map(|n| n as usize);
             display_name = m.get("name").and_then(|v| v.as_str()).map(String::from);
+        }
+        // Sampling the model refuses outright: sending it costs a rejected
+        // request per model on every launch, and the adaptive drop only learns
+        // it after the refusal.
+        if let Some(caps) = m.get("capabilities") {
+            let no = |key: &str| caps.get(key).and_then(|v| v.as_bool()) == Some(false);
+            limits.refuses_temperature = no("temperature");
+            limits.refuses_top_p = no("top_p");
+            limits.refuses_top_k = no("top_k");
         }
         if let Some(tools) = m.pointer("/capabilities/tools/supported").and_then(|v| v.as_bool()) {
             supports_tools |= tools;
@@ -1203,11 +1256,19 @@ pub fn parse_server_models(data: &serde_json::Value) -> Vec<DiscoveredModel> {
                 .map(|a| a.iter().filter_map(|v| v.as_str().map(|s| s.to_lowercase())).collect())
                 .unwrap_or_default();
             if !levels.is_empty() {
+                // The level the model starts at, when it names one: Go's
+                // `kimi-k3.1-pro` sends `{"type":"effort","value":"max"}`.
+                let default_preset = reasoning.get("default").and_then(|d| match d {
+                    serde_json::Value::String(s) => Some(s.to_lowercase()),
+                    serde_json::Value::Object(o) => o.get("value").and_then(|v| v.as_str()).map(|s| s.to_lowercase()),
+                    _ => None,
+                });
                 thinking = ThinkingProfile {
-                    presets: levels,
+                    presets: levels.clone(),
                     protocol: ThinkingProtocol::ReasoningEffort,
                     supported: true,
-                    default_preset: None,
+                    // A default the model does not offer is not its default.
+                    default_preset: default_preset.filter(|d| levels.iter().any(|p| p == d)),
                 };
             } else if reasoning.get("supported").and_then(|v| v.as_bool()) == Some(false) {
                 thinking = ThinkingProfile::unsupported();
@@ -1229,6 +1290,7 @@ pub fn parse_server_models(data: &serde_json::Value) -> Vec<DiscoveredModel> {
             thinking,
             supports_tools,
             supports_vision,
+            limits,
         });
     }
 
@@ -1292,7 +1354,10 @@ mod tests {
         // `limit`, tool and reasoning support under `capabilities`, the vision
         // flag under `modalities`. Before this, every model on it looked
         // tool-less (nothing read `capabilities.tools.supported`), blind to its
-        // context (`limit.context`) and mute about its effort levels.
+        // context (`limit.context`) and mute about its effort levels. It also
+        // states the prompt budget apart from the window (`limit.input`), the
+        // longest reply, the sampling a model refuses, and the level it starts
+        // at, and the request is built from those.
         let listing = serde_json::json!({ "data": [
             {
                 "id": "kimi-k3.1-pro",
@@ -1303,7 +1368,9 @@ mod tests {
                 "modalities": { "input": ["text"], "output": ["text"] },
                 "capabilities": {
                     "tools": { "supported": true },
-                    "reasoning": { "supported": true, "effort": ["low", "high", "max"] }
+                    "reasoning": { "supported": true, "effort": ["low", "high", "max"], "default": { "type": "effort", "value": "max" } },
+                    "temperature": false,
+                    "top_p": false
                 }
             },
             {
@@ -1323,7 +1390,7 @@ mod tests {
                 "type": "chat",
                 "limit": { "context": 1048576, "output": 131072 },
                 "modalities": { "input": ["text", "image"], "output": ["text"] },
-                "capabilities": { "tools": { "supported": true }, "reasoning": { "supported": true, "effort": ["none", "minimal", "low", "medium", "high", "xhigh"] } }
+                "capabilities": { "tools": { "supported": true }, "reasoning": { "supported": true, "effort": ["none", "minimal", "low", "medium", "high", "xhigh"], "default": "ultra" } }
             }
         ]});
         let disc = parse_server_models(&listing);
@@ -1331,14 +1398,22 @@ mod tests {
 
         let kimi = &disc[0];
         assert_eq!(kimi.context_length, Some(262144));
+        assert_eq!(kimi.limits.prompt, Some(200000), "limit.input is the prompt budget, not the window");
+        assert_eq!(kimi.limits.output, Some(65536));
+        assert!(kimi.limits.refuses_temperature && kimi.limits.refuses_top_p && !kimi.limits.refuses_top_k);
+        assert_eq!(kimi.context_display().as_deref(), Some("200k ctx"), "the gauge says what a request may carry");
+        assert_eq!(kimi.prompt_budget(), Some(200000));
         assert_eq!(kimi.display_name.as_deref(), Some("Kimi K3.1 Pro"));
         assert!(kimi.supports_tools);
         assert!(!kimi.supports_vision);
         assert!(kimi.thinking.supported);
         assert_eq!(kimi.thinking.presets, vec!["low", "high", "max"]);
+        assert_eq!(kimi.thinking.default_preset.as_deref(), Some("max"), "the level its own sheet starts at");
         assert_eq!(kimi.thinking.protocol, ThinkingProtocol::ReasoningEffort, "the levels go into reasoning_effort");
 
         let sonnet = &disc[1];
+        assert_eq!(sonnet.limits.prompt, None, "no limit.input: the window is the budget");
+        assert_eq!(sonnet.context_display().as_deref(), Some("1M ctx"));
         assert!(!sonnet.thinking.supported, "the server said this model cannot reason");
         assert!(sonnet.supports_tools);
 
@@ -1349,6 +1424,7 @@ mod tests {
         let nemotron = &disc[3];
         assert!(nemotron.supports_vision, "the image in modalities.input is the vision flag");
         assert_eq!(nemotron.thinking.presets, vec!["none", "minimal", "low", "medium", "high", "xhigh"]);
+        assert_eq!(nemotron.thinking.default_preset, None, "a default the model does not offer is not its default");
     }
 
     #[test]
@@ -1419,6 +1495,7 @@ mod tests {
                 thinking: ThinkingProfile::unreported(),
                 supports_tools: true,
                 supports_vision: false,
+                limits: Default::default(),
             }],
             ..Default::default()
         };
@@ -1439,6 +1516,7 @@ mod tests {
             thinking: ThinkingProfile::unreported(),
             supports_tools: true,
             supports_vision: false,
+            limits: Default::default(),
         };
         let disc = ServerDiscovery { models: vec![model("listed")], active_model: Some(model("loaded")), ..Default::default() };
         assert_eq!(disc.model("listed").map(|m| m.id.as_str()), Some("listed"));
@@ -1457,6 +1535,7 @@ mod tests {
             thinking: ThinkingProfile::unsupported(),
             supports_tools: true,
             supports_vision: false,
+            limits: Default::default(),
         };
         assert_eq!(model.capabilities_summary(), "Gemini 3 Flash · 1M ctx · tools · no reasoning");
         // A model the server named nothing is listed as it is.

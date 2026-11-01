@@ -1283,7 +1283,7 @@ mod tests {
     #[test]
     fn a_model_listed_without_tools_is_never_sent_declarations() {
         let llm = client("gemma-3-27b-it");
-        let mut gemma = DiscoveredModel { id: "gemma-3-27b-it".into(), display_name: None, is_loaded: false, context_length: None, max_context_length: None, thinking: ThinkingProfile::unsupported(), supports_tools: false, supports_vision: false };
+        let mut gemma = DiscoveredModel { id: "gemma-3-27b-it".into(), display_name: None, is_loaded: false, context_length: None, max_context_length: None, thinking: ThinkingProfile::unsupported(), supports_tools: false, supports_vision: false, ..Default::default() };
         llm.settle_discovery(0, vec![gemma.clone()], ServerKind::Gemini, None);
         let read_file = ToolSpec { name: "read_file".into(), description: "Read a file.".into(), parameters_json: r#"{"type":"object"}"#.into() };
         let sent = request_body(&llm, &[ChatMessage::system("Be brief."), ChatMessage::user("hi")], std::slice::from_ref(&read_file), &TurnOptions::default());

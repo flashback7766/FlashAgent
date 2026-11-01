@@ -608,6 +608,7 @@ mod tests {
             thinking: ThinkingProfile::unreported(),
             supports_tools: true,
             supports_vision: false,
+            limits: Default::default(),
         }
     }
 

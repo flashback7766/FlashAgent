@@ -593,6 +593,32 @@ fn listing_timeout(base: &str) -> Duration {
     Duration::from_millis(if near { 1500 } else { 15_000 })
 }
 
+/// OpenCode serves one catalog for the console and one for Go, and neither
+/// sits under the base the documentation gives for a request:
+/// `/inference/openai/v1` and `/inference/go/openai/v1` answer 404 at `/models`,
+/// while `/inference/v1/models` and `/inference/go/v1/models` list every model.
+/// The host is the same, so the catalog is derived from it and a base copied
+/// out of the docs still lists its models.
+fn opencode_catalogs(base: &str) -> Vec<String> {
+    let Some(host) = host_of(base) else { return Vec::new() };
+    if host != "opencode.ai" && !host.ends_with(".opencode.ai") {
+        // A lookalike in the path or another host is another server.
+        return Vec::new();
+    }
+    let path = base.split_once("://").map_or(base, |(_, rest)| rest.split_once('/').map_or("", |(_, path)| path));
+    let catalog = if path.starts_with("inference/go/") {
+        "inference/go/v1"
+    } else if path.starts_with("inference/") {
+        "inference/v1"
+    } else {
+        return Vec::new();
+    };
+    let scheme = base.split("://").next().filter(|s| *s == "http" || *s == "https").unwrap_or("https");
+    let url = format!("{scheme}://{host}/{catalog}/models");
+    // A base that is the catalog's own is already probed as `{base}/models`.
+    (url != format!("{base}/models")).then_some(url).into_iter().collect()
+}
+
 /// Tries LM Studio's `/api/v1/models` and `/api/v0/models`, then the standard `/models`.
 pub(crate) async fn discover(client: &Client, generation: u64) -> Option<ServerDiscovery> {
     if let Some(disc) = discover_gemini(client, generation).await {
@@ -624,6 +650,11 @@ pub(crate) async fn discover(client: &Client, generation: u64) -> Option<ServerD
 
     let mut candidates: Vec<String> = Vec::with_capacity(4);
     for url in [format!("{root}/api/v1/models"), v0_url.clone(), format!("{base}/models"), format!("{root}/models")] {
+        if !candidates.contains(&url) {
+            candidates.push(url);
+        }
+    }
+    for url in opencode_catalogs(&base) {
         if !candidates.contains(&url) {
             candidates.push(url);
         }
@@ -864,6 +895,24 @@ mod tests {
     use crate::LlmBackend;
     use futures::StreamExt;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    #[test]
+    fn a_documented_opencode_base_still_finds_the_catalog() {
+        // The docs give `/inference/openai/v1` as the endpoint, and it answers
+        // 404 at `/models`: the catalog is one path up, on the same host.
+        assert_eq!(opencode_catalogs("https://opencode.ai/inference/openai/v1"), vec!["https://opencode.ai/inference/v1/models"]);
+        assert_eq!(opencode_catalogs("https://opencode.ai/inference/anthropic/v1"), vec!["https://opencode.ai/inference/v1/models"]);
+        assert_eq!(opencode_catalogs("https://opencode.ai/inference/go/openai/v1"), vec!["https://opencode.ai/inference/go/v1/models"]);
+        assert_eq!(
+            opencode_catalogs("https://staging.opencode.ai/inference/openai/v1"),
+            vec!["https://staging.opencode.ai/inference/v1/models"],
+            "a subdomain keeps its own host"
+        );
+        assert!(opencode_catalogs("https://opencode.ai/inference/v1").is_empty(), "that base is its own catalog");
+        assert!(opencode_catalogs("https://opencode.ai/inference/go/v1").is_empty());
+        assert!(opencode_catalogs("https://example.com/inference/openai/v1").is_empty(), "another host is another server");
+        assert!(opencode_catalogs("https://example.com/opencode.ai/inference/openai/v1").is_empty(), "a path is not a host");
+    }
 
     fn client(url: impl Into<String>, model: &str) -> Client {
         Client::new(Endpoint::new(ApiProtocol::OpenAi, url, None), model)

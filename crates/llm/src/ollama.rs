@@ -575,6 +575,7 @@ pub(crate) async fn discover(client: &Client, generation: u64) -> Option<ServerD
                 thinking: shown.thinking,
                 supports_tools: shown.tools,
                 supports_vision: shown.vision,
+                limits: Default::default(),
                 display_name: None,
                 id: name,
             })
@@ -614,6 +615,7 @@ mod tests {
             thinking: profile(&["off", "on"], "on"),
             supports_tools: true,
             supports_vision: true,
+            limits: Default::default(),
         }
     }
 

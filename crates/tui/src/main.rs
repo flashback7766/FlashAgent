@@ -394,10 +394,7 @@ async fn prepare_backend(config: &mut AppConfig, mut skip_trust: bool, ran_setup
     let active_model_info = discovery.as_ref().and_then(|d| d.model(&model).cloned());
 
     let context_display = active_model_info.as_ref().and_then(|m| m.context_display());
-    let context_capacity = active_model_info
-        .as_ref()
-        .and_then(|m| m.context_length.or(m.max_context_length))
-        .unwrap_or(131_072);
+    let context_capacity = active_model_info.as_ref().and_then(|m| m.prompt_budget()).unwrap_or(131_072);
 
     let available_models: Vec<String> = discovery
         .as_ref()
@@ -3124,6 +3121,7 @@ mod tests {
             thinking: ThinkingProfile::unsupported(),
             supports_tools: true,
             supports_vision: vision,
+            limits: Default::default(),
         };
         let disc = ServerDiscovery {
             base_url: "http://localhost:1234/v1".into(),
