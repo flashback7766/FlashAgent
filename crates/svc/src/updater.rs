@@ -359,7 +359,10 @@ fn is_writable(path: &Path) -> bool {
     }
     let probe = parent.join(format!(".flashagent-write-test.{}", std::process::id()));
     match std::fs::OpenOptions::new().write(true).create(true).truncate(true).open(&probe) {
-        Ok(_) => {
+        Ok(file) => {
+            // The handle must go before the file: on Windows an open file cannot
+            // be removed, and the probe stayed in the install folder.
+            drop(file);
             let _ = std::fs::remove_file(&probe);
             true
         }
