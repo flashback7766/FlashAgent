@@ -71,8 +71,8 @@ impl App {
         }
         // Postponed, not dropped: the recap is still wanted, only not yet, and
         // the conversation it would describe keeps growing. Clearing the timer
-        // here meant one moment of work in flight — a child finishing, a shell
-        // task starting — cost the recap for the rest of the session, since
+        // here meant one moment of work in flight (a child finishing, a shell
+        // task starting) cost the recap for the rest of the session, since
         // nothing else arms it except the end of a turn.
         if self.recap_blocked_by(cx).is_some() {
             self.recap_due = Some(std::time::Instant::now() + recap_idle());
@@ -357,8 +357,8 @@ pub(crate) fn start_turn(&mut self, cx: &LoopCtx<'_>, budgets: GoalBudgets) {
     /// over go back to what they were, and the prompt stops saying that an
     /// autonomous run is under way.
     ///
-    /// One place for every ending — a turn that finished, a turn that failed,
-    /// a turn that would not wind down — so a goal can never leave the app in
+    /// One place for every ending (a turn that finished, a turn that failed,
+    /// a turn that would not wind down), so a goal can never leave the app in
     /// a mode the owner did not choose. The prompt matters most here: it is
     /// rebuilt with `goal_active`, and a flag left on says to the model for
     /// the rest of the session that there is no user to answer it.
@@ -462,7 +462,7 @@ pub(crate) fn start_turn(&mut self, cx: &LoopCtx<'_>, budgets: GoalBudgets) {
         // The goal ends the same way whether the turn finished or failed: the
         // mode, the effort and the limits the run took over go back to what
         // they were, and the prompt stops saying that an autonomous run is
-        // under way. A goal that failed is a goal that ended — the app must
+        // under way. A goal that failed is a goal that ended: the app must
         // not stay in Accept All with the goal's limits.
         let goal_reason = match &res {
             Ok((_, reason)) => *reason,
@@ -521,7 +521,7 @@ pub(crate) fn start_turn(&mut self, cx: &LoopCtx<'_>, budgets: GoalBudgets) {
                         // is measured against, and what the card says it freed.
                         let before = self.context_usage.total_used();
                         // The room one request may carry: the window minus the
-                        // prompt, the memory and the schemas — once. What the
+                        // prompt, the memory and the schemas (once). What the
                         // turn holds now is the conversation itself, and it is
                         // what gets summarized, so it is not subtracted here.
                         let room = crate::compact::room_for(
@@ -679,7 +679,7 @@ pub(crate) fn is_transport_cut(raw: &str) -> bool {
 }
 
 /// What a turn cut off by a dropped connection is told: that it was cut off,
-/// and how much of it arrived. The count is the part that matters — without it
+/// and how much of it arrived. The count is the part that matters: without it
 /// "it failed" reads as though nothing was written, and the text that is on
 /// screen looks like the whole answer. `None` for every other failure, which
 /// said no before there was anything to cut.

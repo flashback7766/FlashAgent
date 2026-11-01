@@ -371,8 +371,8 @@ fn is_writable(path: &Path) -> bool {
 }
 
 /// Where the install lives, when the running executable is its own parked
-/// copy. A process that has updated once runs from the backup name —
-/// `/proc/self/exe` follows the rename that parked it — and installing to
+/// copy. A process that has updated once runs from the backup name
+/// (`/proc/self/exe` follows the rename that parked it), and installing to
 /// that name writes over the copy the rollback exists for, or fails outright
 /// once the cleanup has taken it. The binary the owner starts is the one the
 /// last update placed beside it.
@@ -461,7 +461,7 @@ fn replace_executable(
 /// Moves the running binary to the backup name. Windows cannot rename over
 /// a name another copy holds and needs the removal first; unix replaces
 /// atomically, and a `NotFound` means the target was parked away by another
-/// update between the check and this rename — the place step still puts our
+/// update between the check and this rename: the place step still puts our
 /// build where the owner runs it from.
 #[cfg(windows)]
 fn park_running_binary(target: &Path, old_backup: &Path) -> anyhow::Result<()> {
@@ -569,8 +569,8 @@ pub async fn download_and_apply(download_url: &str, asset_name: &str, checksums_
 }
 
 /// The build this process has already put on the disk, if it did. A process
-/// that has updated once runs from its parked copy — `/proc/self/exe`
-/// follows the rename — and a second install from it aims at the parked
+/// that has updated once runs from its parked copy (`/proc/self/exe`
+/// follows the rename), and a second install from it aims at the parked
 /// name, where the last thing it should do is write. One install per
 /// process; the restart applies what landed.
 static INSTALLED_THIS_RUN: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
@@ -733,7 +733,7 @@ mod tests {
     fn a_parked_process_installs_beside_its_parked_copy() {
         // A process that has already updated once runs from its parked name:
         // /proc/self/exe follows the rename. Installing to that name would
-        // write over the rollback — or fail, once the cleanup takes it. The
+        // write over the rollback, or fail once the cleanup takes it. The
         // install lives where the last update placed it: beside the copy.
         let parked = std::path::Path::new("/opt/bin/.flashagent-old.123.bak");
         let sibling = if cfg!(windows) { "flashagent.exe" } else { "flashagent" };
@@ -764,7 +764,7 @@ mod tests {
     #[test]
     fn the_park_replaces_what_stands_at_the_backup_name() {
         // The second update of a running process reuses the same {pid} backup
-        // name; the park must replace the name, not die on it — the running
+        // name; the park must replace the name, not die on it: the running
         // binary it parked before is this process's own inode.
         let dir = std::env::temp_dir().join(format!("fa-park2-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();

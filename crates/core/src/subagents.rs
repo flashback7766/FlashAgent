@@ -168,15 +168,15 @@ pub trait SubagentToolFactory: Send + Sync {
 /// Twenty was a number picked before anything
 /// had run: a child that reads a few files and answers takes six, and one that
 /// audits a repository takes hundreds. The ceiling is here to catch a runaway,
-/// not to end real work, so it sits far above both — and because the tool clamps
+/// not to end real work, so it sits far above both, and because the tool clamps
 /// to it, a model cannot lift it by asking for more.
 const DEFAULT_MAX_STEPS: u32 = 500;
 
 /// The wall clock a child gets when neither the caller nor the model set one.
 /// 500 steps is not a bound on anything if a step may be a slow request or a
 /// long test run, so the budget is the real backstop. An hour is far longer than
-/// the work a background child should take — the parent is carrying on in the
-/// meantime — and short enough that a wedged child is stopped while its result
+/// the work a background child should take (the parent is carrying on in the
+/// meantime) and short enough that a wedged child is stopped while its result
 /// is still worth something.
 const DEFAULT_CHILD_TIMEOUT: Duration = Duration::from_secs(60 * 60);
 
@@ -199,7 +199,7 @@ fn child_timeout(requested: Option<Duration>) -> Duration {
 /// How many children may run at once. Unlimited in stock: the cap was a
 /// judgement about what a model tends to ask for, not a limit the work needs,
 /// and refusing a child the user asked for is worse than the cost of running
-/// it. The rule is still there — `SubagentHost::with_max_live` sets it — for
+/// it. The rule is still there (`SubagentHost::with_max_live` sets it) for
 /// anyone who wants a ceiling, and a refusal still names itself.
 pub const DEFAULT_MAX_LIVE: usize = usize::MAX;
 
@@ -734,8 +734,8 @@ impl Drop for RegisteredGuard {
 /// way the run ended.
 ///
 /// A child that returns takes the straight path and reports itself. Every other
-/// way out — a panic in a tool factory, a future unwinding mid-stream when the
-/// connection drops, the task being aborted — drops this guard instead, and the
+/// way out (a panic in a tool factory, a future unwinding mid-stream when the
+/// connection drops, the task being aborted) drops this guard instead, and the
 /// parent hears about it either way. That matters because `spawn_agent` already
 /// promised the model the answer would arrive on its own: a child that died
 /// quietly left its row pinned for ever, `AgentTree::running()` over by one, and
@@ -1395,7 +1395,7 @@ mod tests {
     }
 
     /// A child that fails inside the loop emits no Done of its own, so the host
-    /// has to close the row — once, and only when nothing else did.
+    /// has to close the row, once, and only when nothing else did.
     #[tokio::test]
     async fn a_child_that_failed_still_closes_its_row_once() {
         struct Broken;
@@ -1634,7 +1634,7 @@ mod tests {
 
     /// A child whose own work panics never reaches the line that reports it. It
     /// used to: the parent's row stayed pinned for ever, `running()` never
-    /// dropped, and the model waited for an answer that was never coming —
+    /// dropped, and the model waited for an answer that was never coming,
     /// while `spawn_agent` had already promised the answer would arrive on its
     /// own.
     #[tokio::test]
@@ -1732,7 +1732,7 @@ mod tests {
     }
 
     /// The straight path and the drop guard share one announcement, so a child
-    /// that ends normally is still announced exactly once — the double Done this
+    /// that ends normally is still announced exactly once; the double Done this
     /// crate used to send is not back.
     #[tokio::test]
     async fn a_child_that_ends_normally_is_announced_once_and_only_once() {

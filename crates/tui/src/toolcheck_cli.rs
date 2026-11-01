@@ -86,7 +86,7 @@ pub(crate) async fn run_tool_check_cli(config: &AppConfig, all_models: bool, onl
     let endpoint = config.endpoint();
     // Every key is checked, not the first: an unknown one among good ones used
     // to pass, then quietly widen the run to every scenario before the report
-    // dropped it — minutes of model time for a check that showed nothing.
+    // dropped it: minutes of model time for a check that showed nothing.
     if let Some(bad) = only.iter().find(|want| !flashagent_core::toolcheck::scenarios().iter().any(|s| s.key == **want)) {
         let known: Vec<&str> = flashagent_core::toolcheck::scenarios().iter().map(|s| s.key).collect();
         eprintln!("No scenario called {bad}. The ones there are: {}", known.join(", "));

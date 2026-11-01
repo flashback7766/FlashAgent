@@ -282,7 +282,7 @@ impl ThinkingProfile {
     ///
     /// The probe order is the whole point: a level named for how much thinking it
     /// buys, most first. `high` sat above `max` here, so on a model advertising
-    /// both — `claude-opus-5` builds `off, low, medium, high, max` — the
+    /// both (`claude-opus-5` builds `off, low, medium, high, max`) the
     /// function named for the maximum returned the rung below it. A user who
     /// picked the top of the ladder got the top of nothing.
     pub fn max_effort(&self) -> Option<&str> {

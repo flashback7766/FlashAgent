@@ -433,7 +433,7 @@ fn always_rule(segment: &str) -> ShellRule {
 /// The command is cut as every shell that could run it reads it, and a
 /// segment that is blacklisted is pinned to the command as written: a prefix
 /// would cover the dangerous variants, which the blacklist then asks about
-/// anyway — "Always" on `git push --force` must stick.
+/// anyway; "Always" on `git push --force` must stick.
 fn always_rules_for(cmd: &str, dialects: &[ShellDialect]) -> Vec<ShellRule> {
     let mut rules: Vec<ShellRule> = Vec::new();
     for seg in segments_in_dialects(cmd, dialects) {
@@ -489,7 +489,7 @@ fn shell_command(args_json: &str) -> Option<String> {
 ///
 /// Not every mode, and not every rule: a command from the blacklist is asked
 /// about even in Accept All, where no rule silences it, and in Accept All
-/// during a run it is refused outright — there is nobody to answer a card.
+/// during a run it is refused outright; there is nobody to answer a card.
 /// What lets it through in Manual and Accept Edits is an exact "Always" rule:
 /// one saved for that very command. In practice this matters for `/goal`, the
 /// only mode that would otherwise run them unasked.
@@ -1272,7 +1272,7 @@ pub const DENIED: &str = "denied by permissions: ";
 pub const QUESTION_CLOSED: &str = "the user closed the question without answering. Do not ask it again right away: carry on with what you can do without the answer, or say in one sentence what you need from them.";
 
 /// A small model read "denied by user" as a privilege error and asked for sudo.
-pub const DECLINED: &str = "The user declined this call. Do not retry it and do not look for a way around it — ask them what they would prefer, or carry on with what you can do without it.";
+pub const DECLINED: &str = "The user declined this call. Do not retry it and do not look for a way around it: ask them what they would prefer, or carry on with what you can do without it.";
 
 #[async_trait]
 impl ToolExec for PermissionedTools {
@@ -1788,8 +1788,8 @@ mod tests {
         );
     }
 
-    /// A project reached through a link in its own path — `/tmp` on macOS, a
-    /// linked workspace anywhere — used to compare an unresolved root against an
+    /// A project reached through a link in its own path (`/tmp` on macOS, a
+    /// linked workspace anywhere) used to compare an unresolved root against an
     /// operand that had been resolved component by component, so every read
     /// looked like it left the project and Planning asked about all of them.
     #[cfg(unix)]

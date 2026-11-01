@@ -1,6 +1,6 @@
 //! Backend failures in words a person can act on. Two layers: first the
-//! server's own sentence is dug out of whatever shape it arrived in — every
-//! provider nests it differently, and a gateway wraps it again — then the
+//! server's own sentence is dug out of whatever shape it arrived in (every
+//! provider nests it differently, and a gateway wraps it again), then the
 //! sentence and the status code are matched against the few situations that
 //! cover nearly every failure, local or hosted. Anything unknown keeps the
 //! provider's own words; only a body with nothing readable in it keeps the
@@ -164,7 +164,7 @@ pub fn explain(raw: &str, url: &str, model: &str) -> Explained {
         || lower.contains("incomplete message") || lower.contains("body stream")
     {
         let hint = if local {
-            crate::i18n::tr("The server dropped the connection \u{2014} often it ran out of memory. Its log will say. Ctrl+R retries.")
+            crate::i18n::tr("The server dropped the connection. Often it ran out of memory. Its log will say. Ctrl+R retries.")
         } else {
             crate::i18n::tr("The provider ended the answer with the error below. Ctrl+R retries.")
         };
@@ -186,7 +186,7 @@ pub fn explain(raw: &str, url: &str, model: &str) -> Explained {
     }
 
     // Unrecognised, but readable: the provider's own words, without the JSON
-    // around them. Better a strange message than a confident wrong one — and
+    // around them. Better a strange message than a confident wrong one; and
     // better still without the dump where the words belong.
     if let Some(said) = said {
         return Explained { headline: said, hint: None, raw: raw.to_string() };
@@ -354,7 +354,7 @@ mod tests {
     #[test]
     fn a_gateways_wrapper_is_unwrapped_and_the_json_goes_back_to_a_footnote() {
         // Seen live on OpenCode Go: a 400 whose message a gateway wrapped, and
-        // which matched nothing — so the whole dump became the headline.
+        // which matched nothing. So the whole dump became the headline.
         let e = explain(
             r#"llm: backend returned 400: {"error":{"type":"server_error","message":"Upstream request failed: This Go model requires Global regions. Select Global in your workspace's Privacy settings to use it."}}"#,
             "https://opencode.ai/inference/go/v1",

@@ -93,7 +93,7 @@ pub fn view_image(cwd: &Path, args_json: &str, vision_supported: bool) -> ToolOu
     match std::fs::metadata(&path) {
         Ok(meta) if meta.len() > MAX_BYTES as u64 => {
             return fail(format!(
-                "view_image: {} is {:.1} MB, over the {} MB limit — resize it or point at a smaller copy",
+                "view_image: {} is {:.1} MB, over the {} MB limit: resize it or point at a smaller copy",
                 args.path,
                 meta.len() as f64 / (1024.0 * 1024.0),
                 MAX_BYTES / (1024 * 1024)
@@ -111,7 +111,7 @@ pub fn view_image(cwd: &Path, args_json: &str, vision_supported: bool) -> ToolOu
     }
     if bytes.len() > MAX_BYTES {
         return fail(format!(
-            "view_image: {} is {:.1} MB, over the {} MB limit — resize it or point at a smaller copy",
+            "view_image: {} is {:.1} MB, over the {} MB limit: resize it or point at a smaller copy",
             args.path,
             bytes.len() as f64 / (1024.0 * 1024.0),
             MAX_BYTES / (1024 * 1024)
@@ -123,7 +123,7 @@ pub fn view_image(cwd: &Path, args_json: &str, vision_supported: bool) -> ToolOu
         .unwrap_or_default();
     ToolOutput {
         content: format!(
-            "Opened {}{size}. The image follows this result — describe what you actually see in it.",
+            "Opened {}{size}. The image follows this result. Describe what you actually see in it.",
             args.path
         ),
         is_error: false,

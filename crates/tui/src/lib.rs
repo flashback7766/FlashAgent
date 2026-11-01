@@ -312,7 +312,7 @@ pub type SettledLines = std::sync::Arc<Vec<RenderLine>>;
 
 /// What a click on a transcript row reaches: a block's header, which folds
 /// or opens it, or the cut of a preview, which shows the whole block. The
-/// body of an open block reaches nothing — it is text to read, and a click
+/// body of an open block reaches nothing: it is text to read, and a click
 /// there used to fold pages of thought away by accident.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Click {
@@ -683,15 +683,15 @@ impl ChatView {
     ///
     /// What is remembered is where the transcript stood, not a number: the
     /// baseline used to be counted in characters and subtracted from a count in
-    /// tokens, so after every compaction the gauge read zero — the summary, the
+    /// tokens, so after every compaction the gauge read zero. The summary, the
     /// only thing the model gets now, was the one thing that was not counted.
     pub fn forget_counted_context(&mut self) {
         self.context_baseline_line = self.lines.len();
     }
 
     /// The baseline marks where the compacted part ended: the lines before it
-    /// stand for a summary the model already has. A cut that removes them —
-    /// `/rewind` past the compaction — leaves nothing to count from, and the
+    /// stand for a summary the model already has. A cut that removes them
+    /// (`/rewind` past the compaction) leaves nothing to count from, and the
     /// gauge read zero for a conversation still on screen.
     fn drop_context_baseline_if_cut(&mut self) {
         if self.context_baseline_line >= self.lines.len() {
@@ -1963,7 +1963,7 @@ impl ChatView {
                 // The header is the whole control: a click there folds or
                 // opens. The cut of a preview opens the block the rest of
                 // the way; the body of an open block is text to read. Only
-                // a header of a block kind counts — an answer that happens
+                // a header of a block kind counts. An answer that happens
                 // to open a span answers no click.
                 if matches!(rows[*at].0, LineKind::Reasoning | LineKind::Tool | LineKind::ToolError) {
                     owners[*at] = Some(Click::Fold(*i));
@@ -2058,7 +2058,7 @@ impl ChatView {
         true
     }
 
-    /// What a click on a rendered row reaches, if anything — the same map the
+    /// What a click on a rendered row reaches, if anything: the same map the
     /// hover reads. A block's header and a preview's cut answer; the body of
     /// an open block and every answer beside a block do not.
     pub fn owner_at(&self, row: usize) -> Option<Click> {
@@ -3758,8 +3758,8 @@ hm".into()));
 
     #[test]
     fn a_thought_row_has_an_owner_and_an_answer_row_does_not() {
-        // The hover marks the rows a click would reach — the thought, the tool
-        // call — and leaves the answer beside them alone.
+        // The hover marks the rows a click would reach (the thought, the tool
+        // call) and leaves the answer beside them alone.
         let mut chat = ChatView::default();
         chat.push_user("hi");
         chat.push_line(LineKind::Reasoning, "the thought the model had");
@@ -4153,7 +4153,7 @@ hm".into()));
 
     /// A turn can end while its mid-turn compaction is still writing (Esc, a
     /// failed request). The card promised a summary, so it is withdrawn rather
-    /// than left spinning — but only when one is open: every other turn ends
+    /// than left spinning, but only when one is open: every other turn ends
     /// with no card, and pushing a failure there would invent one.
     #[test]
     fn abandoning_a_mid_turn_compaction_settles_only_an_open_card() {

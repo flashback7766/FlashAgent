@@ -345,8 +345,8 @@ impl App {
             return;
         }
         update_context_usage(&self.current_model, &mut self.context_usage, &self.history, cx.memory_block, &self.chat, cx.perm);
-        // Whatever was typed while compaction ran goes out now — whether the
-        // summary was saved or not — as steering if a turn is under way, or a
+        // Whatever was typed while compaction ran goes out now (whether the
+        // summary was saved or not) as steering if a turn is under way, or a
         // fresh turn otherwise.
         self.send_queued_after_compaction(cx);
     }
@@ -625,7 +625,7 @@ impl App {
                 // per request: the running estimate starts again so this
                 // request's figure is added rather than read as a correction of
                 // the last one's. The first step is a request like any other,
-                // and its buffer must start empty too — it used to inherit the
+                // and its buffer must start empty too. It used to inherit the
                 // answer of the turn before, which is what made a regenerate
                 // measure its text against the answer it replaced.
                 self.token_tracker.on_request_start();
@@ -637,7 +637,7 @@ impl App {
                 self.token_tracker.on_usage(u);
                 // What the server read is the one honest size of the prompt: it
                 // holds what stands in front of the conversation that the app
-                // cannot count — a proxy's own system, tools and memory, the
+                // cannot count: a proxy's own system, tools and memory, the
                 // chat template. The bar stands on it until the turn ends.
                 if let Some(p) = u.prompt.filter(|p| *p > 0) {
                     self.context_usage.server_seen = Some(p as usize);
@@ -793,7 +793,7 @@ impl App {
             if !model_sees_images(cx.source, &self.current_model) {
                 self.say(
                     BackgroundNotice::sticky(flashagent_tui::i18n::tr_fill(
-                        "{label} attached · {model} cannot see images — press F3 for one that can",
+                        "{label} attached · {model} cannot see images: press F3 for one that can",
                         &[("label", &label), ("model", &self.current_model)],
                     ))
                     .warning(),
@@ -834,8 +834,8 @@ impl App {
         let scrollbar_was = self.renderer.scrollbar_visible();
         self.renderer.mouse_at = Some((m.row, m.column));
         match m.kind {
-            // The pointer crossing anything a press could reach — a card's
-            // row, or a thought or tool call in the transcript — marks it. A
+            // The pointer crossing anything a press could reach (a card's
+            // row, or a thought or tool call in the transcript) marks it. A
             // frame is drawn only when the pointer crosses a row's boundary:
             // a motion inside one row changed nothing worth a repaint.
             MouseEventKind::Moved => {
@@ -850,7 +850,7 @@ impl App {
             // A thumb under the hand follows the mouse, and that is all it
             // does until the button comes back up. A selection being made
             // only paints: the clipboard is written once, when the button
-            // comes up — writing it on every motion was what made the
+            // comes up. Writing it on every motion was what made the
             // highlight crawl behind the hand.
             MouseEventKind::Drag(crossterm::event::MouseButton::Left) => {
                 if self.renderer.scrollbar_follow(m.row) {
@@ -1030,7 +1030,7 @@ impl App {
         }
     }
 
-    /// The transcript as the frame draws it — with the expansion the user
+    /// The transcript as the frame draws it: with the expansion the user
     /// actually runs, not every block forced open. A count taken with every
     /// block open would see a fold of a never-opened block as no change at
     /// all, and the header the pointer is on would drift off the screen.

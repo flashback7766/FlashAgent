@@ -10,7 +10,7 @@ pub struct ContextUsage {
     pub total_capacity: usize,
     /// What the server last said it read for a whole request. It is bigger
     /// than the sum of the components whenever something stands in front of
-    /// the conversation that the app cannot see — a proxy's own system prompt,
+    /// the conversation that the app cannot see: a proxy's own system prompt,
     /// tools and memory, the chat template around them. `total_used` takes it
     /// as a floor: the window holds what the model read, not what the app can
     /// count. It describes the request it was reported for, so it is cleared

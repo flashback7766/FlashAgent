@@ -557,7 +557,7 @@ impl BuiltinTools {
                     ToolError::Other(message) if asked > MAX_FOREGROUND_TIMEOUT_MS && message.contains("timeout") => {
                         ToolError::Other(format!(
                             "{message} (asked for {asked}ms, the ceiling for a foreground command is \
-                             {MAX_FOREGROUND_TIMEOUT_MS}ms — run it with background:true instead)"
+                             {MAX_FOREGROUND_TIMEOUT_MS}ms; run it with background:true instead)"
                         ))
                     }
                     other => other,
@@ -679,7 +679,7 @@ impl ReadArgs {
         items.extend(self.files.into_iter().map(|f| (f.path, f.offset, f.limit)));
         // The usual 2000 lines are shared out, so the output limit does not cut the
         // last file away. The share is the division itself: a floor of 200
-        // lines undid it, and twenty files were read at 200 lines each — four
+        // lines undid it, and twenty files were read at 200 lines each: four
         // thousand lines, of which the end was cut off.
         let share = (2000 / items.len().max(1)).max(1);
         let items: Vec<(String, usize, usize)> = items.into_iter().map(|(p, o, l)| (p, o.unwrap_or(0), l.unwrap_or(share))).collect();

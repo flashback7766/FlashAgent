@@ -197,7 +197,7 @@ pub(crate) fn write_atomic(file: &Path, content: &str) -> std::io::Result<()> {
     // A symlink is written through, not replaced: the file it points at is
     // the one the caller means. A link to a file that does not exist yet
     // cannot be resolved, and writing over the link's own name would destroy
-    // it and drop a regular file in its place — refused instead: where the
+    // it and drop a regular file in its place, so this is refused instead: where the
     // link points is the owner's setup, and a message says what happened.
     if std::fs::canonicalize(file).is_err() && std::fs::symlink_metadata(file).is_ok_and(|m| m.is_symlink()) {
         return Err(std::io::Error::other(format!(
@@ -210,7 +210,7 @@ pub(crate) fn write_atomic(file: &Path, content: &str) -> std::io::Result<()> {
     let name = target.file_name().and_then(|n| n.to_str()).unwrap_or("file");
     // The temporary name must fit NAME_MAX beside the file it stands in for:
     // uniqueness comes from the process and the counter, so a long name is
-    // only a hint and is cut short — on a character boundary.
+    // only a hint and is cut short, on a character boundary.
     let mut cut = name.len().min(96);
     while cut > 0 && !name.is_char_boundary(cut) {
         cut -= 1;
@@ -288,7 +288,7 @@ fn find_actual_string(text: &str, needle: &str) -> Option<(String, Vec<String>)>
 /// When it is set, the file's own indentation of the matched lines comes back
 /// with the match. A model that under-indents its `old_string` would
 /// otherwise under-indent the `new_string` too, and in Python or YAML that
-/// silently changes what the code means — worse than refusing the edit.
+/// silently changes what the code means, worse than refusing the edit.
 fn match_lines(text: &str, needle: &str, loose: bool) -> Option<(String, Vec<String>)> {
     let line_of = |s: &str| if loose { normalize_line_loose(s) } else { normalize_line(s) };
     let indent_of = |s: &str| s.len() - s.trim_start().len();
@@ -356,7 +356,7 @@ fn match_lines(text: &str, needle: &str, loose: bool) -> Option<(String, Vec<Str
 /// the match needed the loose tier, so an exact match is never disturbed.
 ///
 /// The shift is taken from the first line, which stands for the file's own
-/// first line, and applied to every line of the edit — including the ones past
+/// first line, and applied to every line of the edit, including the ones past
 /// the old block. Those used to keep the model's indent, so a line added after
 /// a loose match landed outside the block it was written into.
 fn with_file_indent(new: &str, indents: &[String]) -> String {
@@ -376,7 +376,7 @@ fn with_file_indent(new: &str, indents: &[String]) -> String {
         let own = body.len() - body.trim_start().len();
         // A line the old block also had takes the file's indent for that line, as
         // it always did. A line the edit adds has no such line, so it follows the
-        // shift of the block's first line — which is what keeps it inside it.
+        // shift of the block's first line, which is what keeps it inside it.
         let want = if let Some(file_indent) = indents.get(i) {
             out.push_str(file_indent);
             out.push_str(body.trim_start());
@@ -464,7 +464,7 @@ fn not_found(path: &str, text: &str, needle: &str) -> ToolError {
 /// The first word of `want` that is not in `have`, named so the model can see
 /// what it got wrong; `None` when the lines are different lines rather than one
 /// misremembered one. One added, dropped or swapped word is the case worth
-/// naming — `pub` that the file does not have — and anything further off is
+/// naming (`pub` that the file does not have), and anything further off is
 /// noise that would send the model guessing again.
 fn first_difference(want: &str, have: &str) -> Option<String> {
     let w: Vec<&str> = want.split_whitespace().collect();
@@ -527,7 +527,7 @@ pub(crate) fn apply_edits(path: &str, mut text: String, edits: &[EditChunk]) -> 
         // The edits are applied from the end of the file towards its start,
         // whatever order the model listed them in. Every edit was planned
         // against the text as it was, so an edit that makes the file longer
-        // must not move the ones before it — and the order in the list says
+        // must not move the ones before it, and the order in the list says
         // nothing about where in the file the edits are.
         let mut places: Vec<(usize, usize, String)> =
             planned.iter().flat_map(|edit| edit.places.iter().cloned()).collect();
@@ -871,7 +871,7 @@ pub(crate) fn glob_files(cwd: &Path, pattern: &str) -> Result<String, ToolError>
     // A relative pattern stays inside the project, whatever its first part
     // is. It used to be decided by the part before the first wildcard, so a
     // pattern that named a symlink pointing out of the project (or one that
-    // climbed out of it with `..`) switched the filter off — while `grep`,
+    // climbed out of it with `..`) switched the filter off, while `grep`,
     // which never follows a symlink, kept looking inside. The two tools
     // answered the same question differently.
     let confine = !absolute;

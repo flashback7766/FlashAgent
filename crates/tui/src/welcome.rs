@@ -309,7 +309,7 @@ impl Shape {
 }
 
 /// A stable tag carries build metadata (v1.0.0+b610), and the release builds
-/// compile the test suite with the same version in the environment — the
+/// compile the test suite with the same version in the environment: the
 /// header must fit its column whatever the tag says. The metadata goes
 /// first; whatever is still too long is cut the way a long path would be.
 pub(crate) fn fit_version(ver: &str, budget: usize) -> String {
@@ -323,7 +323,7 @@ pub(crate) fn fit_version(ver: &str, budget: usize) -> String {
 
 /// What a click on the welcome card's own buttons does: the mascot, the model
 /// and effort values, and the keys listed under Quick Commands. Ctrl+D quit is
-/// deliberately absent — quitting is not a thing a stray click should do.
+/// deliberately absent: quitting is not a thing a stray click should do.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WelcomeButton {
     Mascot,
@@ -762,7 +762,7 @@ mod version_tests {
     #[test]
     fn a_long_stable_tag_does_not_push_the_header_past_its_column() {
         // The release workflow runs the test suite with
-        // FLASHAGENT_VERSION=v1.0.0+b610 in the environment — 4 columns
+        // FLASHAGENT_VERSION=v1.0.0+b610 in the environment: 4 columns
         // longer than the b610 the beta showed, which burst the frame at
         // 56 cols. The metadata goes, the rest fits.
         assert_eq!(fit_version("v1.0.0+b610", 6), "v1.0.0");

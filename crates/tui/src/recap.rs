@@ -219,7 +219,7 @@ pub(crate) fn sanitize_session_title(s: &str) -> Option<String> {
 /// Takes the text between the quotes after `"field":` up to the first
 /// unescaped quote or the end.
 ///
-/// An unclosed value is dropped, not guessed — unless it is long enough and
+/// An unclosed value is dropped, not guessed, unless it is long enough and
 /// ends like a whole sentence: that is an answer that was cut off at the end,
 /// and the words that arrived are complete.
 pub(crate) fn salvage_json_string_field(raw: &str, field: &str) -> Option<String> {

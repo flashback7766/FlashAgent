@@ -157,7 +157,7 @@ impl SnapshotStore {
             };
             // An update or a removal names a fact that already exists: keep the
             // file it is in, wherever that is. A file that does not exist is
-            // nobody's — arming it for deletion let a global memory write mark a
+            // nobody's: arming it for deletion let a global memory write mark a
             // project MEMORY.md, and a rewind then deleted it.
             let mut kept_any = false;
             for scope in [crate::memory_store::Scope::Project, crate::memory_store::Scope::Global] {

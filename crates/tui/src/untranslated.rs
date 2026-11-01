@@ -16,7 +16,7 @@
 //!
 //! Whether the phrase stands next to a `tr` call does not matter: a call
 //! without a translation in the table shows the English all the same, and
-//! that was the first kind of gap this collector found — a phrase that went
+//! that was the first kind of gap this collector found: a phrase that went
 //! through `tr` and still came out in English, because the table did not
 //! hold it. The other way round is a gap as well: a phrase the code asks for
 //! and the table does not hold. Both are looked for here, the second one by
@@ -196,8 +196,8 @@ fn table() -> BTreeSet<String> {
 
 /// The table as it is written: every pair, in the order it stands.
 ///
-/// The pairs are read one after another — the English phrase, then the
-/// Russian one — so a pair that lost its second half shows as a pair that
+/// The pairs are read one after another (the English phrase, then the
+/// Russian one) so a pair that lost its second half shows as a pair that
 /// lost its first, and the guard below catches it.
 fn pairs() -> Vec<(String, String)> {
     let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("src").join("i18n.rs");
@@ -581,7 +581,7 @@ fn strip_codes(phrase: &str) -> String {
 /// - a word the table of translations knows (`used`, `Searched`, `Memory`,
 ///   `Editing`, `stopped`): the table holds the words of the interface, so a
 ///   word it knows is a word a person reads, and a word it does not know is
-///   a name, a path or a command — `config`, `src/main.rs`, `uvx` — and those
+///   a name, a path or a command (`config`, `src/main.rs`, `uvx`) and those
 ///   are not something a person reads.
 fn looks_like_text(phrase: &str, table: &BTreeSet<String>) -> bool {
     let plain = strip_codes(phrase);
@@ -800,8 +800,8 @@ fn every_phrase_the_interface_shows_is_translated() {
 /// not hold the phrase.
 ///
 /// The phrase goes through `tr` and comes out in English all the same, in the
-/// middle of a Russian screen. It is not found by looking the table up — the
-/// table has no such entry — but by walking the sources.
+/// middle of a Russian screen. It is not found by looking the table up (the
+/// table has no such entry) but by walking the sources.
 #[test]
 fn every_phrase_the_code_asks_for_is_in_the_table() {
     let table = table();

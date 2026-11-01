@@ -138,7 +138,7 @@ const MAX_REDIRECTS: usize = 5;
 ///
 /// A local address (this machine, the LAN, cloud metadata) is fetched only if
 /// the URL names it outright, since only then did the permission layer ask the
-/// user — host and port both, because `127.0.0.1:8080` and `127.0.0.1:9090`
+/// user: host and port both, because `127.0.0.1:8080` and `127.0.0.1:9090`
 /// are two different programs. A DNS name resolving locally, an odd IP
 /// spelling (`127.1`) or a redirect to a local address is refused. The
 /// checked address is the one connected to, and every redirect is checked

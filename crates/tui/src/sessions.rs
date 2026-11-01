@@ -297,7 +297,7 @@ fn save_on_exit_with(
     let spare = std::env::temp_dir().join("flashagent-unsaved");
     match save_session_in(&spare, session_id, model, cwd, history, archive, false, title) {
         Ok(path) => Err(tr_fill(
-            "{why}.\nA copy was written to {path} — move it into ~/.flashagent/sessions/ to resume it.",
+            "{why}.\nA copy was written to {path}. Move it into ~/.flashagent/sessions/ to resume it.",
             &[("why", &why), ("path", &path.display().to_string())],
         )),
         Err(also) => Err(tr_fill(
@@ -396,7 +396,7 @@ impl App {
         // The running turn's own history, not this app's copy of it. `self.history`
         // is only replaced when the turn ends, so writing that here wrote the
         // same pre-turn bytes every five seconds and lost the whole turn to a
-        // crash — which is the thing this function exists to prevent.
+        // crash, which is the thing this function exists to prevent.
         let Some(shared) = self.turn_history.clone() else { return };
         let snapshot = shared.snapshot();
         let model = self.current_model.clone();
@@ -496,7 +496,7 @@ impl App {
         self.history = vec![ChatMessage::system(base_system)];
         self.chat.clear();
         // The name comes with the session: the one being opened is listed under
-        // the name it had, or under none — never under the name the session
+        // the name it had, or under none: never under the name the session
         // just left carried. The archive of the conversation the summary
         // replaced travels the same way: what session A compacted away is not
         // session B's past, and extending without clearing wrote it into B's

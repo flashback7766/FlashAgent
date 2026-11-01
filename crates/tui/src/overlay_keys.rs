@@ -585,7 +585,7 @@ impl App {
         self.tools_action(cx, view, action);
     }
 
-    /// What a tools action starts — the keys' and the clicks' one path.
+    /// What a tools action starts: the keys' and the clicks' one path.
     pub(crate) fn tools_action(&mut self, cx: &LoopCtx<'_>, view: flashagent_tui::tools_view::ToolsView, action: flashagent_tui::tools_view::ToolsAction) {
         use flashagent_tui::tools_view::ToolsAction;
         match action {

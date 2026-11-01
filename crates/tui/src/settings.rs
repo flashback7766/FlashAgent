@@ -685,7 +685,7 @@ impl SettingsView {
     /// A click on the card. `line` counts from the card's first row on screen
     /// (the title), `column` from the screen's left edge, `width` is the width
     /// the tabs line was fitted to. A row selects its item; the row already
-    /// selected acts, as Enter would — a click is a focus first, an action
+    /// selected acts, as Enter would. A click is a focus first, an action
     /// second, so a stray press on the way to another row changes nothing.
     pub fn click(&mut self, line: usize, column: usize, width: usize) -> SettingsAction {
         if line == 1 {
@@ -873,7 +873,7 @@ impl SettingsView {
             SettingsTab::Style => {
                 format!(
                     "\x1b[38;2;135;130;125m{}\x1b[0m",
-                    crate::i18n::tr("Tone only — tools and code are unaffected. Applies from your next message.")
+                    crate::i18n::tr("Tone only: tools and code are unaffected. Applies from your next message.")
                 )
             }
             _ => String::new(),

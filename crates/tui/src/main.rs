@@ -2871,7 +2871,7 @@ mod tests {
 
     /// A window that filled up mid-task is the other way round: refusing the
     /// compaction leaves the model one step from the end of the window, so a
-    /// summary that was cut off is still better than none — as long as it says
+    /// summary that was cut off is still better than none, as long as it says
     /// out loud that it was.
     #[tokio::test]
     async fn a_window_forced_compaction_keeps_a_cut_summary_and_says_so() {
@@ -2895,8 +2895,8 @@ mod tests {
     }
 
     /// The conversation must arrive exactly as the model saw it during the turn,
-    /// with the instruction after it. Anything reshaped here — a new system
-    /// prompt, a flattened transcript — shares no prefix with the cache and the
+    /// with the instruction after it. Anything reshaped here (a new system
+    /// prompt, a flattened transcript) shares no prefix with the cache and the
     /// whole conversation is prefilled again, which is what cost 2.5 minutes
     /// at 80k tokens.
     #[test]
@@ -3660,7 +3660,7 @@ mod tests {
     /// The card says what the compaction cost. A conversation too long for one
     /// request is summarized in parts and the parts are summarized into one:
     /// every one of those calls is part of the price, and only the last one
-    /// was counted — the card said a fraction of what was spent.
+    /// was counted. The card said a fraction of what was spent.
     #[tokio::test]
     async fn a_compaction_in_parts_costs_what_all_of_its_calls_cost() {
         /// Answers with a summary and a bill, and counts its own calls.

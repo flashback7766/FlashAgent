@@ -114,7 +114,7 @@ pub struct ChunkParser {
     done: bool,
     /// A frame arrived that could not be read and no readable frame has come
     /// since. Whatever it carried may be the finish reason, so a terminal
-    /// inferred after it — `[DONE]` — cannot be called a clean stop.
+    /// inferred after it (`[DONE]`) cannot be called a clean stop.
     lost: bool,
 }
 
@@ -472,7 +472,7 @@ impl ChunkParser {
             // it is broken, and gets one of the slots above the cap, chosen
             // by its low bits: the same broken index always meets itself,
             // and the table stops at twice the cap. Two broken indices a
-            // whole cap apart (100 and 164, say) do share a slot — a
+            // whole cap apart (100 and 164, say) do share a slot: a
             // collision that needs a server numbering two calls sixty-four
             // apart and both wrongly, which no smaller table can avoid
             // while keeping the bound.

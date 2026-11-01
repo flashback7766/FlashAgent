@@ -110,7 +110,7 @@ pub fn outline_file(cwd: &Path, rel_path: &str) -> Result<String, ToolError> {
     Ok(summary)
 }
 
-/// `pub`, `pub(crate)`, `pub(super)`, `pub(in path)` — the declaration follows.
+/// `pub`, `pub(crate)`, `pub(super)`, `pub(in path)`: the declaration follows.
 fn strip_visibility(line: &str) -> &str {
     let Some(rest) = line.strip_prefix("pub") else { return line };
     let rest = rest.trim_start();

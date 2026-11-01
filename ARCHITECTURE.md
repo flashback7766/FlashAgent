@@ -111,8 +111,8 @@ page, which is what cmd.exe and most Windows tools write to a pipe.
 
 The system prompt and the tool schemas are a fixed cost on every step of
 every turn, and that cost is flat: 20k at every window (`core::budget`).
-The prompt is capped at 10k — the one part that cannot be scaled down
-without making the model worse — and the schemas get the rest, split
+The prompt is capped at 10k (the one part that cannot be scaled down
+without making the model worse), and the schemas get the rest, split
 between the built-in set and what MCP servers add, with a tenth kept spare
 because the total is a ceiling. A small window no longer trims the toolset:
 what the window buys is room for the conversation.
@@ -140,8 +140,8 @@ a system message that changed each turn would invalidate the memory block
 and the whole conversation behind it. It is written before the warm-up,
 which exists to prefill exactly the prefix the first turn will send.
 
-The prompt itself is a method followed by repairs on it — decide what done
-means, take the next step, check it, say what happened — and every section
+The prompt itself is a method followed by repairs on it (decide what done
+means, take the next step, check it, say what happened), and every section
 below that is something that was seen to go wrong. A test holds them in that
 order and holds a rule to a single place, because a rule stated twice is a
 rule to keep in sync. Sections that only apply in one mode are left out
@@ -165,7 +165,7 @@ declined call is returned to the model as an error it must not retry. The
 mode the user is in is saved as the one to start in next time.
 
 Safe mode is a layer on top of the permission mode, not a fifth mode: reading
-and editing inside the project, and nothing else — the shell, the web and the
+and editing inside the project, and nothing else. The shell, the web and the
 subagents are off. A project MCP server asks every time and nothing is
 remembered while it is on.
 
