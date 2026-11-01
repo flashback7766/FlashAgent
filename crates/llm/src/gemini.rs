@@ -617,7 +617,17 @@ fn read_usage(meta: &Value) -> Option<Usage> {
         (answer, thoughts) => Some(answer.unwrap_or(0) + thoughts.unwrap_or(0)),
     };
     (prompt.is_some() || completion.is_some())
-        .then_some(Usage { prompt, completion, cached: count("cachedContentTokenCount"), mtp: None, cost: None, cost_details: None, ..Default::default() })
+        .then_some(Usage {
+            prompt,
+            completion,
+            cached: count("cachedContentTokenCount"),
+            mtp: None,
+            cost: None,
+            cost_details: None,
+            // The gateway's own count of the plan allowance the turn used.
+            allowance: meta.pointer("/opencode/allowance").and_then(Value::as_f64).filter(|v| v.is_finite() && *v >= 0.0),
+            ..Default::default()
+        })
 }
 
 fn error_message(error: &Value) -> String {
@@ -1329,6 +1339,16 @@ mod tests {
             assert!(!first_line.contains("key="), "the key never goes in the address");
             assert!(request.contains(r#""contents":[{"parts":[{"text":"hi"}],"role":"user"}]"#), "{request}");
         }
+    }
+
+    #[test]
+    fn a_gateways_allowance_rides_with_the_usage_it_sends() {
+        let stream = sse(&[json!({
+            "candidates": [{ "content": { "parts": [{ "text": "hi" }] }, "finishReason": "STOP" }],
+            "usageMetadata": { "promptTokenCount": 5, "candidatesTokenCount": 2, "opencode": { "allowance": 0.0042 } }
+        })]);
+        let usages: Vec<Usage> = ok_events(decode(&[&stream])).into_iter().filter_map(|e| if let LlmEvent::Usage(u) = e { Some(u) } else { None }).collect();
+        assert_eq!(usages[0].allowance, Some(0.0042), "the quota is reported with the usage it belongs to");
     }
 
     #[tokio::test]

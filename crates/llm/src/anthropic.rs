@@ -796,6 +796,8 @@ struct Tokens {
     written: i64,
     read: i64,
     output: i64,
+    /// What the gateway counted against a plan's monthly allowance, if it said.
+    allowance: Option<f64>,
 }
 
 impl Tokens {
@@ -814,6 +816,10 @@ impl Tokens {
             if let Some(n) = usage[key].as_i64() {
                 *slot = n;
             }
+        }
+        // The gateway's own count of the plan allowance the turn used.
+        if let Some(counted) = usage.pointer("/opencode/allowance").and_then(Value::as_f64).filter(|v| v.is_finite() && *v >= 0.0) {
+            self.allowance = Some(counted);
         }
     }
 }
@@ -1024,6 +1030,7 @@ impl Decoder {
                 // Anthropic prices per token, not per turn, and this is a stream:
                 // there is no account total to read here.
                 cost: None, cost_details: None,
+                allowance: t.allowance,
                 ..Default::default()
             })));
         }
@@ -1637,6 +1644,17 @@ mod tests {
         let text = said(&events(&transcript, 64));
         assert!(text.starts_with("Sure, the exploit\n\n[The model declined"), "{text}");
         assert!(text.contains("(cyber)"), "{text}");
+    }
+
+    #[test]
+    fn a_gateways_allowance_rides_with_the_usage_it_sends() {
+        let transcript = sse(&[
+            opening(json!({ "input_tokens": 5 })),
+            json!({ "type": "message_delta", "delta": { "stop_reason": "end_turn" }, "usage": { "output_tokens": 2, "cost": 0, "opencode": { "allowance": 0.0042 } } }),
+            json!({ "type": "message_stop" }),
+        ]);
+        let usage: Vec<Usage> = events(&transcript, 5).into_iter().filter_map(|e| if let LlmEvent::Usage(u) = e { Some(u) } else { None }).collect();
+        assert_eq!(usage[0].allowance, Some(0.0042), "the quota is reported with the usage it belongs to");
     }
 
     #[test]

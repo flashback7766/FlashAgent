@@ -649,6 +649,9 @@ impl App {
                     u.cost,
                     u.cost_details.and_then(|d| d.upstream_cost),
                 );
+                // A plan that bills by quota sends no per-turn price; what it
+                // counted against the monthly allowance is its only figure.
+                self.cost.record_allowance(u.allowance);
                 if let Some(ledger) = self.goal_ledger.as_mut() {
                     ledger.record_cost(&self.config.active_profile().name, u.cost);
                 }

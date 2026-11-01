@@ -357,6 +357,7 @@ impl Decoder {
                 cost: usage["cost"].as_f64(),
                 cost_details: usage.pointer("/cost_details/upstream_inference_cost").and_then(Value::as_f64)
                     .map(|upstream_cost| CostDetails { upstream_cost: Some(upstream_cost) }),
+                allowance: usage.pointer("/opencode/allowance").and_then(Value::as_f64).filter(|v| v.is_finite() && *v >= 0.0),
                 ..Default::default()
             })));
         }
@@ -512,6 +513,16 @@ mod tests {
 
     fn resource_error() -> String {
         json!({"error": {"message": format!("OpenAI Responses bad request: {RESOURCE_MISMATCH} [trace_id=00112233445566778899aabbccddeeff]")}}).to_string()
+    }
+
+    #[test]
+    fn a_gateways_allowance_rides_with_the_usage_it_sends() {
+        let wire = sse(&[
+            json!({"type":"response.output_text.delta","item_id":"m","delta":"hi"}),
+            json!({"type":"response.completed","response":{"status":"completed","output":[],"usage":{"input_tokens":5,"output_tokens":2,"cost":0,"opencode":{"allowance":0.0042}}}}),
+        ]);
+        let events = decode(&wire, 7);
+        assert!(events.iter().any(|e| matches!(e, LlmEvent::Usage(u) if u.allowance == Some(0.0042))), "{events:?}");
     }
 
     #[test]

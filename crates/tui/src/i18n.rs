@@ -569,6 +569,8 @@ static RU: &[(&str, &str)] = &[
     ("The server dropped the connection. Often it ran out of memory. Its log will say. Ctrl+R retries.", "Сервер оборвал соединение — часто ему не хватило памяти. Об этом скажет его лог. Ctrl+R повторяет."),
     ("The provider ended the answer with the error below. Ctrl+R retries.", "Провайдер закончил ответ ошибкой ниже. Ctrl+R повторяет."),
     ("This session: ${amount} over {turns}", "Эта сессия: ${amount} за {turns}"),
+    ("This session: ${amount} of the monthly allowance over {turns}", "Эта сессия: ${amount} из месячного лимита за {turns}"),
+    ("  the monthly allowance: ${amount} over {turns}", "  месячный лимит: ${amount} за {turns}"),
     ("  the providers themselves: ${amount} over {turns}", "  сами провайдеры: ${amount} за {turns}"),
     (
         "No backend in this session reported a price \u{b7} {name} is running free on your own hardware, or its API does not say what a turn costs",
