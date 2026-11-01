@@ -242,8 +242,11 @@ pub struct McpTrustScreen {
     pub servers: Vec<McpServerToAsk>,
     /// Which one is on screen.
     pub current: usize,
-    /// The ones the owner said yes to.
+    /// The ones the owner said yes to, and that are remembered.
     pub allowed: Vec<String>,
+    /// The ones the owner said yes to once: they run now, and the question is
+    /// asked again next time.
+    pub once: Vec<String>,
 }
 
 /// One server to ask about.
@@ -256,7 +259,7 @@ pub struct McpServerToAsk {
 
 impl McpTrustScreen {
     pub fn new(servers: Vec<McpServerToAsk>) -> Self {
-        Self { servers, current: 0, allowed: Vec::new() }
+        Self { servers, current: 0, allowed: Vec::new(), once: Vec::new() }
     }
 
     /// `Some(true)` when every server has been asked about, `Some(false)` when
@@ -274,8 +277,11 @@ impl McpTrustScreen {
                 self.allowed.push(self.servers[self.current].name.clone());
                 self.advance();
             }
-            // Yes, but only this time.
+            // Yes, but only this time: the server starts now, and the question
+            // is asked again next time. It used to advance without running,
+            // which made it indistinguishable from "No".
             KeyCode::Char('2') => {
+                self.once.push(self.servers[self.current].name.clone());
                 self.advance();
             }
             // No.
@@ -351,7 +357,15 @@ impl McpTrustScreen {
 /// The screen is only shown when there is something to ask about: a project
 /// without an `.mcp.json`, or one whose servers were allowed before, opens
 /// without a word.
-pub async fn run_mcp_trust_screen(servers: Vec<McpServerToAsk>) -> anyhow::Result<Vec<String>> {
+/// What the trust screen decided: the servers to remember, and the ones to
+/// start only for this run.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct McpTrustAnswer {
+    pub remember: Vec<String>,
+    pub once: Vec<String>,
+}
+
+pub async fn run_mcp_trust_screen(servers: Vec<McpServerToAsk>) -> anyhow::Result<McpTrustAnswer> {
     use crossterm::{
         cursor,
         event::{Event, KeyEventKind},
@@ -360,7 +374,7 @@ pub async fn run_mcp_trust_screen(servers: Vec<McpServerToAsk>) -> anyhow::Resul
     };
 
     if servers.is_empty() {
-        return Ok(Vec::new());
+        return Ok(McpTrustAnswer::default());
     }
 
     enable_raw_mode()?;
@@ -395,7 +409,7 @@ pub async fn run_mcp_trust_screen(servers: Vec<McpServerToAsk>) -> anyhow::Resul
     let _ = execute!(stdout, cursor::Show, LeaveAlternateScreen);
     disable_raw_mode()?;
 
-    Ok(std::mem::take(&mut screen.allowed))
+    Ok(McpTrustAnswer { remember: std::mem::take(&mut screen.allowed), once: std::mem::take(&mut screen.once) })
 }
 
 pub async fn run_trust_screen(cwd: &mut PathBuf) -> anyhow::Result<StartupAction> {
@@ -468,12 +482,14 @@ mod tests {
         assert_eq!(screen.allowed, vec!["one".to_string()]);
         screen.handle_key(KeyCode::Char('2'), KeyModifiers::NONE);
         assert_eq!(screen.allowed, vec!["one".to_string()], "just this time is not remembered");
+        assert_eq!(screen.once, vec!["two".to_string()], "just this time does not run either");
         assert!(screen.done());
 
         // "No" is not a yes.
         let mut screen = McpTrustScreen::new(servers.clone());
         screen.handle_key(KeyCode::Char('3'), KeyModifiers::NONE);
         assert!(screen.allowed.is_empty());
+        assert!(screen.once.is_empty(), "No is not a yes");
 
         // Esc stops asking; what was allowed stays allowed.
         let mut screen = McpTrustScreen::new(servers);

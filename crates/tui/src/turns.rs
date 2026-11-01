@@ -281,8 +281,25 @@ pub(crate) fn start_turn(&mut self, cx: &LoopCtx<'_>, budgets: GoalBudgets) {
         ));
     }
 
+    /// A second turn cannot start while the first runs: the handle would be
+    /// dropped and the transcript cut under the answer being written. The
+    /// welcome card's click reached this path without the key's own check.
+    pub(crate) fn may_regenerate(&mut self) -> bool {
+        if self.running {
+            self.say(BackgroundNotice::fading(
+                tr("An answer is still being written · Esc stops it now").to_string(),
+                4,
+            ));
+            return false;
+        }
+        true
+    }
+
     /// Ctrl+R and /regenerate. False when there is no prompt to answer again.
     pub(crate) fn regenerate(&mut self, cx: &LoopCtx<'_>) -> bool {
+        if !self.may_regenerate() {
+            return false;
+        }
         let Some(user_idx) = self.history.iter().rposition(flashagent_core::is_prompt) else {
             return false;
         };
@@ -739,6 +756,15 @@ fn recap_idle() -> std::time::Duration {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_second_regenerate_cannot_start_while_the_first_answer_is_written() {
+        let mut app = crate::tests::test_app();
+        app.running = true;
+        assert!(!app.may_regenerate(), "a second turn started under the one being written");
+        app.running = false;
+        assert!(app.may_regenerate());
+    }
 
     #[test]
     fn a_dropped_connection_says_the_answer_was_cut_off_and_how_much_arrived() {

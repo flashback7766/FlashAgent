@@ -54,7 +54,7 @@ impl App {
             UiEvent::ServerSilent(url) => self.server_silent = self.provider_switch.is_none() && url == cx.source.0.base_url(),
             UiEvent::CompactionDelta(delta) => self.chat.append_compaction_delta(&delta),
             UiEvent::CompactionReset => self.chat.restart_compaction_card(),
-            UiEvent::Compacted { history, saved, card } => self.on_compacted(cx, history, saved, card),
+            UiEvent::Compacted { session, history, saved, card } => self.on_compacted(cx, &session, history, saved, card),
             UiEvent::Loop { turn_id, event } => self.on_loop_event(cx, turn_id, &event),
             UiEvent::Finished { turn_id, result } => return self.finish_turn(cx, turn_id, result).await,
             UiEvent::Resize(cols, rows) => {
@@ -326,10 +326,36 @@ impl App {
     pub(crate) fn on_compacted(
         &mut self,
         cx: &LoopCtx<'_>,
+        session: &str,
         history: Vec<ChatMessage>,
         _saved: Option<usize>,
         card: Option<CompactionResult>,
     ) {
+        // The compaction task outlives the screen it was started from: a result
+        // for a session that is no longer open is not this conversation's.
+        if !self.apply_compaction_result(session, cx.session_id, history, card, cx.cwd_display) {
+            return;
+        }
+        update_context_usage(&self.current_model, &mut self.context_usage, &self.history, cx.memory_block, &self.chat, cx.perm);
+        // Whatever was typed while compaction ran goes out now — whether the
+        // summary was saved or not — as steering if a turn is under way, or a
+        // fresh turn otherwise.
+        self.send_queued_after_compaction(cx);
+    }
+
+    /// Applies a result made for the open session, and drops one made for
+    /// another. False when it was dropped.
+    pub(crate) fn apply_compaction_result(
+        &mut self,
+        produced_for: &str,
+        open: &str,
+        history: Vec<ChatMessage>,
+        card: Option<CompactionResult>,
+        cwd_display: &str,
+    ) -> bool {
+        if produced_for != open {
+            return false;
+        }
         self.history = history;
         self.compacting = false;
         match card {
@@ -339,12 +365,8 @@ impl App {
         // On disk now, not at the next turn or at the exit: a machine that
         // loses power here used to lose the compaction with it, and the
         // conversation came back as it was before the summary.
-        self.autosave(cx.session_id, cx.cwd_display);
-        update_context_usage(&self.current_model, &mut self.context_usage, &self.history, cx.memory_block, &self.chat, cx.perm);
-        // Whatever was typed while compaction ran goes out now — whether the
-        // summary was saved or not — as steering if a turn is under way, or a
-        // fresh turn otherwise.
-        self.send_queued_after_compaction(cx);
+        self.autosave(open, cwd_display);
+        true
     }
 
     /// Every successful compaction retires the old request's count and keeps
@@ -689,7 +711,11 @@ impl App {
             WelcomeButton::Verbose => self.cycle_verbose(),
             WelcomeButton::PasteImage => self.paste_clipboard(cx),
             WelcomeButton::Regen => {
-                if !self.regenerate(cx) {
+                // A click is the key: while an answer is being written the key
+                // refuses, and the card used to start a second turn under it.
+                if self.running {
+                    self.may_regenerate();
+                } else if !self.regenerate(cx) {
                     self.copy_toast = Some((tr("No previous turn to regenerate").to_string(), std::time::Instant::now()));
                 }
             }
@@ -1076,6 +1102,37 @@ fn decayed(momentum: i32) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_compaction_result_made_for_another_session_changes_nothing() {
+        let mut app = crate::tests::test_app();
+        app.config.auto_save_sessions = false;
+        app.history = vec![ChatMessage::user("the open conversation")];
+        app.chat.push_user("the open conversation");
+        app.compacting = true;
+        let applied = app.apply_compaction_result(
+            "another-session",
+            "the-open-one",
+            vec![ChatMessage::user("the stale result")],
+            None,
+            "~/work",
+        );
+        assert!(!applied, "a result for another session was applied");
+        assert_eq!(app.history[0].content, "the open conversation", "the conversation on screen was replaced");
+        assert!(app.compacting, "the open session's card was closed by someone else's result");
+
+        // The same result, for the session it was made for, lands.
+        let applied = app.apply_compaction_result(
+            "the-open-one",
+            "the-open-one",
+            vec![ChatMessage::user("the new conversation")],
+            None,
+            "~/work",
+        );
+        assert!(applied);
+        assert_eq!(app.history[0].content, "the new conversation");
+        assert!(!app.compacting);
+    }
 
     #[test]
     fn a_zero_saved_event_distinguishes_kept_and_failed_compaction() {

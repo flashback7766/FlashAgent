@@ -1,9 +1,23 @@
 use super::*;
 
+/// One approval on its way to the person at the keyboard.
+struct WaitingApproval {
+    id: u64,
+    request: ApprovalRequest,
+    decision: Option<Decision>,
+}
+
 /// The UI loop reads [`TuiGate::pending`] and answers via [`TuiGate::respond`].
+///
+/// One slot was enough while a single turn asked one question at a time.
+/// Subagents share their parent's gate and ask side by side; with one slot the
+/// second request overwrote the first, one answer released both, and a finished
+/// caller cleared a request it had never seen. Requests queue instead, and only
+/// the head of the queue is on screen.
 #[derive(Default)]
 pub struct TuiGate {
-    pending: Mutex<Option<(ApprovalRequest, Option<Decision>)>>,
+    waiting: Mutex<Vec<WaitingApproval>>,
+    next_id: std::sync::atomic::AtomicU64,
     changed: tokio::sync::Notify,
 }
 
@@ -12,27 +26,33 @@ impl TuiGate {
         Arc::new(Self::default())
     }
 
+    /// The request being answered now: the head of the queue. `None` while the
+    /// head has its answer and its caller is still waking up, so a second click
+    /// cannot reach the request behind it.
     pub fn pending(&self) -> Option<ApprovalRequest> {
-        self.pending.lock().as_ref().map(|(r, _)| r.clone())
+        let waiting = self.waiting.lock();
+        waiting.first().filter(|w| w.decision.is_none()).map(|w| w.request.clone())
     }
 
     /// No-op when nothing is pending.
     pub fn respond(&self, d: Decision) {
-        let mut guard = self.pending.lock();
-        if let Some(slot) = guard.as_mut() {
-            slot.1 = Some(d);
+        {
+            let mut waiting = self.waiting.lock();
+            if let Some(head) = waiting.first_mut().filter(|w| w.decision.is_none()) {
+                head.decision = Some(d);
+            }
         }
-        drop(guard);
         self.changed.notify_waiters();
     }
 
-    async fn wait_decision(&self) -> Decision {
+    async fn wait_decision(&self, id: u64) -> Decision {
         loop {
             // Register before checking, or a respond() in between is a lost wakeup.
             let notified = self.changed.notified();
             tokio::pin!(notified);
             notified.as_mut().enable();
-            if let Some(d) = self.pending.lock().as_ref().and_then(|(_, d)| *d) {
+            // The entry cannot be gone: only this future's guard removes it.
+            if let Some(d) = self.waiting.lock().iter().find(|w| w.id == id).and_then(|w| w.decision) {
                 return d;
             }
             notified.await;
@@ -40,23 +60,38 @@ impl TuiGate {
     }
 }
 
-/// Also on a cancelled turn, so the card never outlives its caller.
-pub(crate) struct ClearOnDrop<'a, T>(&'a Mutex<Option<T>>, &'a tokio::sync::Notify);
+/// Removes a request whose caller went away, so a cancelled turn never leaves a
+/// card that nobody will answer.
+struct ClearOnDrop<'a, T: HasWaiting> {
+    gate: &'a T,
+    id: u64,
+}
 
-impl<T> Drop for ClearOnDrop<'_, T> {
+impl<T: HasWaiting> Drop for ClearOnDrop<'_, T> {
     fn drop(&mut self) {
-        *self.0.lock() = None;
-        self.1.notify_waiters();
+        self.gate.remove(self.id);
+    }
+}
+
+trait HasWaiting {
+    fn remove(&self, id: u64);
+}
+
+impl HasWaiting for TuiGate {
+    fn remove(&self, id: u64) {
+        self.waiting.lock().retain(|w| w.id != id);
+        self.changed.notify_waiters();
     }
 }
 
 #[async_trait]
 impl ApprovalGate for TuiGate {
     async fn approve(&self, req: &ApprovalRequest) -> Decision {
-        *self.pending.lock() = Some((req.clone(), None));
-        let _clear = ClearOnDrop(&self.pending, &self.changed);
+        let id = self.next_id.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.waiting.lock().push(WaitingApproval { id, request: req.clone(), decision: None });
+        let _clear = ClearOnDrop { gate: self, id };
         self.changed.notify_waiters();
-        self.wait_decision().await
+        self.wait_decision(id).await
     }
 }
 
@@ -70,11 +105,19 @@ pub struct QuestionRequest {
 }
 
 /// An answer and whether it was written in, or why there is none.
-pub(crate) type QuestionSlot = Option<(QuestionRequest, Option<Result<(String, bool), String>>)>;
+type QuestionAnswer = Result<(String, bool), String>;
 
+struct WaitingQuestion {
+    id: u64,
+    request: QuestionRequest,
+    answer: Option<QuestionAnswer>,
+}
+
+/// The question side of the same queue, for the same reason.
 #[derive(Default)]
 pub struct TuiQuestionGate {
-    pending: parking_lot::Mutex<QuestionSlot>,
+    waiting: Mutex<Vec<WaitingQuestion>>,
+    next_id: std::sync::atomic::AtomicU64,
     changed: tokio::sync::Notify,
 }
 
@@ -83,8 +126,10 @@ impl TuiQuestionGate {
         Arc::new(Self::default())
     }
 
+    /// The question being answered now: the head of the queue.
     pub fn pending(&self) -> Option<QuestionRequest> {
-        self.pending.lock().as_ref().map(|(r, _)| r.clone())
+        let waiting = self.waiting.lock();
+        waiting.first().filter(|w| w.answer.is_none()).map(|w| w.request.clone())
     }
 
     pub fn respond(&self, answer: String, is_write_in: bool) {
@@ -97,25 +142,33 @@ impl TuiQuestionGate {
         self.settle(Err(flashagent_core::permissions::QUESTION_CLOSED.to_string()));
     }
 
-    fn settle(&self, reply: Result<(String, bool), String>) {
-        let mut guard = self.pending.lock();
-        if let Some(slot) = guard.as_mut() {
-            slot.1 = Some(reply);
+    fn settle(&self, reply: QuestionAnswer) {
+        {
+            let mut waiting = self.waiting.lock();
+            if let Some(head) = waiting.first_mut().filter(|w| w.answer.is_none()) {
+                head.answer = Some(reply);
+            }
         }
-        drop(guard);
         self.changed.notify_waiters();
     }
 
-    async fn wait_answer(&self) -> Result<(String, bool), String> {
+    async fn wait_answer(&self, id: u64) -> QuestionAnswer {
         loop {
             let notified = self.changed.notified();
             tokio::pin!(notified);
             notified.as_mut().enable();
-            if let Some(res) = self.pending.lock().as_ref().and_then(|(_, r)| r.clone()) {
-                return res;
+            if let Some(answer) = self.waiting.lock().iter().find(|w| w.id == id).and_then(|w| w.answer.clone()) {
+                return answer;
             }
             notified.await;
         }
+    }
+}
+
+impl HasWaiting for TuiQuestionGate {
+    fn remove(&self, id: u64) {
+        self.waiting.lock().retain(|w| w.id != id);
+        self.changed.notify_waiters();
     }
 }
 
@@ -134,9 +187,94 @@ impl flashagent_tools::QuestionGate for TuiQuestionGate {
             multi_select,
             deadline,
         };
-        *self.pending.lock() = Some((req, None));
-        let _clear = ClearOnDrop(&self.pending, &self.changed);
+        let id = self.next_id.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.waiting.lock().push(WaitingQuestion { id, request: req, answer: None });
+        let _clear = ClearOnDrop { gate: self, id };
         self.changed.notify_waiters();
-        self.wait_answer().await
+        self.wait_answer(id).await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use flashagent_core::permissions::Category;
+    use flashagent_tools::QuestionGate;
+
+    fn request(tool: &str) -> ApprovalRequest {
+        ApprovalRequest { tool: tool.into(), args_json: "{}".into(), category: Category::Read, diff: None }
+    }
+
+    /// Two subagents share one gate. The second must not overwrite the card the
+    /// person is looking at, and one answer must not release both.
+    #[tokio::test]
+    async fn two_calls_at_once_get_their_own_answers() {
+        let gate = TuiGate::new();
+        let first = {
+            let gate = gate.clone();
+            tokio::spawn(async move { gate.approve(&request("write_file")).await })
+        };
+        for _ in 0..200 {
+            if gate.pending().is_some() {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        let second = {
+            let gate = gate.clone();
+            tokio::spawn(async move { gate.approve(&request("run_shell")).await })
+        };
+        for _ in 0..50 {
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(gate.pending().map(|r| r.tool), Some("write_file".into()), "the queued call took the card");
+        gate.respond(Decision::Allow);
+        assert_eq!(first.await.unwrap(), Decision::Allow);
+        for _ in 0..200 {
+            if gate.pending().is_some() {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(gate.pending().map(|r| r.tool), Some("run_shell".into()), "the queued call was never shown");
+        gate.respond(Decision::Deny);
+        assert_eq!(second.await.unwrap(), Decision::Deny);
+        assert!(gate.pending().is_none());
+    }
+
+    /// The same for questions: two children asking side by side get the answer
+    /// meant for the one on screen, and the parent's question is not lost.
+    #[tokio::test]
+    async fn two_questions_at_once_are_answered_one_by_one() {
+        let gate = TuiQuestionGate::new();
+        let first = {
+            let gate = gate.clone();
+            tokio::spawn(async move { gate.ask("first?", None, false, None).await })
+        };
+        for _ in 0..200 {
+            if gate.pending().is_some() {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        let second = {
+            let gate = gate.clone();
+            tokio::spawn(async move { gate.ask("second?", None, false, None).await })
+        };
+        for _ in 0..50 {
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(gate.pending().map(|q| q.question), Some("first?".into()));
+        gate.respond("one".into(), false);
+        assert_eq!(first.await.unwrap(), Ok(("one".to_string(), false)));
+        for _ in 0..200 {
+            if gate.pending().is_some() {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(gate.pending().map(|q| q.question), Some("second?".into()));
+        gate.cancel();
+        assert!(second.await.unwrap().is_err());
     }
 }

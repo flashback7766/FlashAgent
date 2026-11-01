@@ -136,7 +136,15 @@ pub enum UiEvent {
     /// `/compact` finished. `saved` is `None` when nothing was compacted: the
     /// history comes back either way, unchanged in that case. `card` carries
     /// the summary for the transcript; it is `None` when there is none.
-    Compacted { history: Vec<ChatMessage>, saved: Option<usize>, card: Option<CompactionResult> },
+    Compacted {
+        /// The session the summary was made for. The task outlives the screen it
+        /// was started from, and a result that lands after a switch of sessions
+        /// would otherwise be written into the conversation on screen.
+        session: String,
+        history: Vec<ChatMessage>,
+        saved: Option<usize>,
+        card: Option<CompactionResult>,
+    },
 }
 
 /// Drives terminal colours.
@@ -674,6 +682,16 @@ impl ChatView {
         self.context_baseline_line = self.lines.len();
     }
 
+    /// The baseline marks where the compacted part ended: the lines before it
+    /// stand for a summary the model already has. A cut that removes them —
+    /// `/rewind` past the compaction — leaves nothing to count from, and the
+    /// gauge read zero for a conversation still on screen.
+    fn drop_context_baseline_if_cut(&mut self) {
+        if self.context_baseline_line >= self.lines.len() {
+            self.context_baseline_line = 0;
+        }
+    }
+
     pub fn clear(&mut self) {
         self.lines.clear();
         self.streaming = None;
@@ -726,6 +744,7 @@ impl ChatView {
             self.streaming_reasoning = None;
             self.reasoning_start = None;
             self.open_tool = None;
+            self.drop_context_baseline_if_cut();
             *self.settled_cache.lock() = SettledRenderCache::default();
             self.needs_reprint = true;
             true
@@ -755,6 +774,7 @@ impl ChatView {
         self.streaming_reasoning = None;
         self.reasoning_start = None;
         self.open_tool = None;
+        self.drop_context_baseline_if_cut();
         *self.settled_cache.lock() = SettledRenderCache::default();
         self.needs_reprint = true;
         true
@@ -1927,7 +1947,10 @@ impl ChatView {
             for (k, (at, i)) in marks.iter().enumerate() {
                 let end = marks.get(k + 1).map_or(rows.len(), |(next, _)| *next);
                 let foldable = matches!(self.lines[*i].kind, LineKind::Reasoning | LineKind::Tool | LineKind::ToolError | LineKind::Assistant);
-                if !foldable || rows[*at].1.trim().is_empty() {
+                // A line can own no rows at all: an answer that was nothing but a
+                // think block, when reasoning has its own line already. There is
+                // nothing to fold and no row to put a click on.
+                if !foldable || *at >= rows.len() || rows[*at].1.trim().is_empty() {
                     continue;
                 }
                 // The header is the whole control: a click there folds or
@@ -2648,6 +2671,32 @@ mod tests {
         let dump: String = v.render(100).iter().map(|(_, t)| strip_ansi(t)).collect::<Vec<_>>().join("\n");
         assert!(dump.contains("Thought:"), "{dump}");
         assert!(!dump.contains("Thinking:"), "{dump}");
+    }
+
+    #[test]
+    fn a_rewind_past_the_compaction_mark_counts_the_conversation_again() {
+        let mut v = ChatView::default();
+        v.push_user("first");
+        v.on_event(&LoopEvent::TurnDelta("answer".into()));
+        // The compaction summarized what came before this point.
+        v.forget_counted_context();
+        v.push_user("second");
+        v.on_event(&LoopEvent::TurnDelta("another".into()));
+        assert!(v.truncate_before_nth_last_user(1), "the first turn is a turn");
+        let (user, assistant, _, _) = v.all_content_tokens(&|text| text.len());
+        assert!(user + assistant > 0, "the gauge counts nothing after the mark was cut off");
+    }
+
+    #[test]
+    fn an_answer_that_was_only_a_think_block_draws_no_click_zone() {
+        // The line owns no rows at all while a reasoning line already stands: the
+        // click map used to index the row after the end of the screen and panic.
+        let mut v = ChatView::default();
+        v.push_user("q");
+        v.on_event(&LoopEvent::ReasoningDelta("the native thoughts".into()));
+        v.on_event(&LoopEvent::TurnDelta("<think>the same thought, written out</think>".into()));
+        let rows = v.render(100);
+        assert!(!rows.is_empty(), "the frame came out empty");
     }
 
     #[test]

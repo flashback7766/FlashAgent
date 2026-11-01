@@ -30,21 +30,29 @@ pub fn outline_file(cwd: &Path, rel_path: &str) -> Result<String, ToolError> {
 
         let is_symbol = match ext {
             "rs" => {
-                trimmed.starts_with("fn ")
-                    || trimmed.starts_with("pub fn ")
-                    || trimmed.starts_with("async fn ")
-                    || trimmed.starts_with("pub async fn ")
-                    || trimmed.starts_with("struct ")
-                    || trimmed.starts_with("pub struct ")
-                    || trimmed.starts_with("enum ")
-                    || trimmed.starts_with("pub enum ")
-                    || trimmed.starts_with("trait ")
-                    || trimmed.starts_with("pub trait ")
-                    || trimmed.starts_with("impl ")
-                    || trimmed.starts_with("pub type ")
-                    || trimmed.starts_with("type ")
-                    || trimmed.starts_with("mod ")
-                    || trimmed.starts_with("pub mod ")
+                // A declaration is read past its visibility and modifiers: `pub(crate)`,
+                // `pub(super)`, `unsafe`, `async`, `const`. The old list named whole
+                // prefixes, so half the functions in this repository were invisible to
+                // the outline while it still said "N symbols found".
+                let mut bare = trimmed;
+                bare = strip_visibility(bare);
+                for modifier in ["unsafe ", "async ", "const ", "default ", "extern "] {
+                    if let Some(rest) = bare.strip_prefix(modifier) {
+                        // `extern "C" fn` keeps a string in the middle.
+                        let rest = rest.trim_start();
+                        let rest = rest.strip_prefix('"').and_then(|r| r.split_once('"').map(|(_, after)| after)).unwrap_or(rest).trim_start();
+                        bare = rest;
+                    }
+                }
+                bare.starts_with("fn ")
+                    || bare.starts_with("struct ")
+                    || bare.starts_with("enum ")
+                    || bare.starts_with("trait ")
+                    || bare.starts_with("union ")
+                    || bare.starts_with("type ")
+                    || bare.starts_with("mod ")
+                    || bare.starts_with("macro_rules!")
+                    || bare.starts_with("impl ") || bare.starts_with("impl<")
             }
             "py" => {
                 trimmed.starts_with("def ")
@@ -102,6 +110,16 @@ pub fn outline_file(cwd: &Path, rel_path: &str) -> Result<String, ToolError> {
     Ok(summary)
 }
 
+/// `pub`, `pub(crate)`, `pub(super)`, `pub(in path)` — the declaration follows.
+fn strip_visibility(line: &str) -> &str {
+    let Some(rest) = line.strip_prefix("pub") else { return line };
+    let rest = rest.trim_start();
+    if let Some(after_paren) = rest.strip_prefix('(').and_then(|r| r.split_once(')')) {
+        return after_paren.1.trim_start();
+    }
+    rest
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -143,6 +161,28 @@ pub enum Status {
         assert!(res.contains("pub fn new(name: String) -> Self"));
         assert!(res.contains("fn private_helper(&self) -> bool"));
         assert!(res.contains("pub enum Status"));
+    }
+
+    #[test]
+    fn hidden_and_generic_declarations_are_found() {
+        let temp = crate::testing::tempdir();
+        let file = temp.join("lib.rs");
+        std::fs::write(
+            &file,
+            "pub(crate) fn hidden() {}\n\
+             pub(super) fn near() {}\n\
+             unsafe fn danger() {}\n\
+             const fn built() -> u8 { 1 }\n\
+             pub const fn visible() -> u8 { 1 }\n\
+             impl<T> Foo for T {}\n\
+             impl<'de> Deserialize<'de> for X {}\n\
+             pub union Bits { a: u32 }\n",
+        )
+        .unwrap();
+        let res = outline_file(&temp, "lib.rs").unwrap();
+        for name in ["hidden", "near", "danger", "built", "visible", "impl<T>", "impl<'de>", "union Bits"] {
+            assert!(res.contains(name), "{name} is missing from the outline:\n{res}");
+        }
     }
 
     #[test]
