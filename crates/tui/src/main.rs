@@ -1786,9 +1786,6 @@ async fn run_app(ctx: AppContext) -> Result<SaveOutcome> {
     if ctx.cwd_missing {
         app.chat.push_system(flashagent_tui::i18n::tr("The directory you were in is gone; FlashAgent starts in your home folder."));
     }
-    if ctx.cwd_missing {
-        app.chat.push_system(flashagent_tui::i18n::tr("The directory you were in is gone; FlashAgent starts in your home folder."));
-    }
     // The unreadable file keeps its name: saving over it would destroy what may
     // still be recoverable by hand.
     if let Some(id) = resume_session_id.as_deref() {
@@ -3601,6 +3598,16 @@ mod tests {
             memory_docs: 0,
             effort_memory: flashagent_core::EffortMemory::load(),
         })
+    }
+
+    #[test]
+    fn a_failed_cost_probe_frees_the_model_it_was_for() {
+        let mut app = test_app();
+        app.image_cost_probe = Some("a-vision-model".into());
+        app.image_cost_failed("another-model");
+        assert_eq!(app.image_cost_probe.as_deref(), Some("a-vision-model"), "a stale failure freed the current probe");
+        app.image_cost_failed("a-vision-model");
+        assert!(app.image_cost_probe.is_none(), "the model stays in flight and is never measured again");
     }
 
     /// A finished goal takes the autonomous prompt with it. The flag that says

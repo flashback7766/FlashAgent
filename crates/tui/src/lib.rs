@@ -108,6 +108,9 @@ pub enum UiEvent {
     /// Settings → "Run Tool Test".
     ToolTestResult(String),
     ImageCost { model: String, per_pixel: f32, fixed: f32 },
+    /// A probe that did not answer. The model is free to be tried again later:
+    /// a slot left marked in flight never retried for the whole run.
+    ImageCostFailed { model: String },
     /// Or why it could not be written.
     MemorySummary(Result<memory_view::MemorySummary, String>),
     BackgroundRecap {
@@ -465,9 +468,13 @@ fn render_compaction_card(card: &CompactionCard, width: usize, now_ms: u64) -> V
         let footer = match card.state {
             CompactionState::Failed => crate::i18n::tr("Session compaction failed").to_string(),
             _ => match (card.input_tokens, card.output_tokens) {
-                (Some(input), Some(output)) => {
-                    format!("Session compacted · {} in · {} out", ContextUsage::format_tokens(input), ContextUsage::format_tokens(output))
-                }
+                (Some(input), Some(output)) => crate::i18n::tr_fill(
+                    "Session compacted · {input} in · {output} out",
+                    &[
+                        ("input", &ContextUsage::format_tokens(input)),
+                        ("output", &ContextUsage::format_tokens(output)),
+                    ],
+                ),
                 _ => crate::i18n::tr("Session compacted").to_string(),
             },
         };

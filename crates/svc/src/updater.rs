@@ -677,14 +677,20 @@ pub async fn check_and_apply_background_with_progress(
 
     let status = check_for_updates(channel, DEFAULT_RELEASES_API).await?;
     match status {
-        // Never silently roll back a newer beta (a local b233 while the feed says
-        // b218). Explicit switches to Stable still apply.
-        UpdateStatus::UpdateAvailable { is_downgrade: true, channel: UpdateChannel::Beta, .. } => Ok(None),
+        // Never silently roll back a newer build (a local b233 while the feed says
+        // b218). Only the explicit switch in the menu goes to a lower one.
+        UpdateStatus::UpdateAvailable { is_downgrade: true, .. } => Ok(None),
         UpdateStatus::UpdateAvailable { target, asset_name, download_url, checksums_url, .. } => {
             download_and_apply_with_progress(&download_url, &asset_name, checksums_url.as_deref(), |stage| {
                 on_progress(&target, stage)
             })
             .await?;
+            // What landed is the release just installed, not the build it
+            // replaced: the slot is read back as "an update to … is already on
+            // the disk".
+            if let Ok(mut installed) = INSTALLED_THIS_RUN.lock() {
+                *installed = Some(target.clone());
+            }
             Ok(Some(target))
         }
         UpdateStatus::UpToDate { .. } => Ok(None),

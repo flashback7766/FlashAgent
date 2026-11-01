@@ -86,6 +86,10 @@ pub(crate) fn maybe_measure_image_cost(
             .await
         {
             let _ = tx.send(UiEvent::ImageCost { model, per_pixel, fixed });
+        } else {
+            // A probe that failed must free the model, or the label never asks
+            // again for the rest of the run.
+            let _ = tx.send(UiEvent::ImageCostFailed { model });
         }
     });
 }

@@ -57,6 +57,18 @@ impl Outcome {
         }
     }
 
+    /// The same outcome, charged with what the run cost. A scenario that walks
+    /// the chain counted its seconds and tokens and then wrote zeros: the report
+    /// that says what a check costs understated those two rows.
+    fn with_usage(self, secs: f32, tokens: u32) -> Self {
+        match self {
+            Outcome::Pass { style, .. } => Outcome::Pass { style, secs, tokens },
+            Outcome::Partial { detail, .. } => Outcome::Partial { detail, secs, tokens },
+            Outcome::Fail { detail, .. } => Outcome::Fail { detail, secs, tokens },
+            Outcome::Unavailable { detail, .. } => Outcome::Unavailable { detail, secs, tokens },
+        }
+    }
+
     fn secs(&self) -> f32 {
         match self {
             Self::Pass { secs, .. }
@@ -981,8 +993,12 @@ pub async fn check_model(llm: &dyn LlmSource, model: &str, timeout: Duration) ->
     ];
     let mut steps = 0usize;
     let mut drift: Option<String> = None;
+    let mut secs = 0.0f32;
+    let mut tokens = 0u32;
     for _ in 0..TEN_STEPS {
         let turn = run_turn(llm, &chain, timeout).await;
+        secs += turn.secs;
+        tokens += turn.tokens;
         if let Some(e) = turn.error {
             steps += 1;
             drift = Some(e);
@@ -1038,7 +1054,8 @@ pub async fn check_model(llm: &dyn LlmSource, model: &str, timeout: Duration) ->
                 secs: 0.0,
                 tokens: 0,
             },
-        },
+        }
+        .with_usage(secs, tokens),
     ));
 
     // 12. A picture. A model that cannot see cannot review a screenshot, a
@@ -1090,8 +1107,12 @@ pub async fn check_model(llm: &dyn LlmSource, model: &str, timeout: Duration) ->
     ];
     let mut steps = 0usize;
     let mut stop: Option<String> = None;
+    let mut secs = 0.0f32;
+    let mut tokens = 0u32;
     for _ in 0..TEN_STEPS {
         let turn = run_turn(llm, &chain, timeout).await;
+        secs += turn.secs;
+        tokens += turn.tokens;
         if let Some(e) = turn.error {
             stop = Some(e);
             break;
@@ -1124,7 +1145,8 @@ pub async fn check_model(llm: &dyn LlmSource, model: &str, timeout: Duration) ->
             (None, s) if s >= TEN_STEPS => Outcome::Pass { style: CallStyle::Native, secs: 0.0, tokens: 0 },
             // A model that stopped here stopped right after the failed read.
             (None, s) => Outcome::Fail { detail: format!("gave up at step {s}, right after the read failed"), secs: 0.0, tokens: 0 },
-        },
+        }
+        .with_usage(secs, tokens),
     ));
 
     // 14. Change something in a file that has not been read. The prompt tells

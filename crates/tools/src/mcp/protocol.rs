@@ -159,6 +159,21 @@ pub struct ContentItem {
     pub data: Option<String>,
     #[serde(rename = "mimeType", default)]
     pub mime_type: Option<String>,
+    /// An embedded resource: a file or a page a server returns as content.
+    /// Ignored before, so such a result read as "executed successfully with no
+    /// output" while the text was right there.
+    #[serde(default)]
+    pub resource: Option<ResourceContent>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ResourceContent {
+    #[serde(default)]
+    pub uri: Option<String>,
+    #[serde(default)]
+    pub text: Option<String>,
+    #[serde(default)]
+    pub blob: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -183,6 +198,17 @@ impl CallToolResult {
                     out.push('\n');
                 }
                 out.push_str(&format!("[Binary data: {} bytes, mime: {:?}]", data.len(), item.mime_type));
+            } else if let Some(resource) = &item.resource {
+                if !out.is_empty() {
+                    out.push('\n');
+                }
+                if let Some(text) = &resource.text {
+                    out.push_str(text);
+                } else if let Some(blob) = &resource.blob {
+                    out.push_str(&format!("[Binary resource: {} bytes]", blob.len()));
+                } else if let Some(uri) = &resource.uri {
+                    out.push_str(uri);
+                }
             }
         }
         if out.is_empty() {
@@ -229,6 +255,13 @@ mod tests {
     }
 
     #[test]
+    fn a_resource_result_is_read_as_its_text() {
+        let raw = r#"{"content":[{"type":"resource","resource":{"uri":"file:///a.md","text":"the file body"}}]}"#;
+        let res: CallToolResult = serde_json::from_str(raw).expect("parse the result");
+        assert_eq!(res.plain_text(), "the file body");
+    }
+
+    #[test]
     fn test_call_tool_result_plain_text() {
         let res = CallToolResult {
             content: vec![
@@ -237,12 +270,14 @@ mod tests {
                     text: Some("First chunk".into()),
                     data: None,
                     mime_type: None,
+                    resource: None,
                 },
                 ContentItem {
                     content_type: "text".into(),
                     text: Some("Second chunk".into()),
                     data: None,
                     mime_type: None,
+                    resource: None,
                 },
             ],
             is_error: Some(false),
