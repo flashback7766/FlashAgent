@@ -162,8 +162,10 @@ if [ -f "${ROOT_DIR}/packaging/arch/PKGBUILD" ]; then
     sed -i "s/^pkgver=.*/pkgver=${NEW_TAG}/" "${ROOT_DIR}/packaging/arch/PKGBUILD"
 fi
 if [ -f "${ROOT_DIR}/README.md" ]; then
-    sed -i "s/> \*\*Status:\*\* Beta b[0-9]\+/> **Status:** Beta ${NEW_TAG}/" "${ROOT_DIR}/README.md"
-fi
+    # The status line names both channels, so match inside it. The old
+# pattern only matched a line that began with "Beta" and changed nothing.
+        sed -i "/^> \*\*Status:\*\*/s/Beta b[0-9]\{1,\}/Beta ${NEW_TAG}/" "${ROOT_DIR}/README.md"
+    fi
 
 SUMMARY="$(grep -m1 "^## ${NEW_TAG} " "${ROOT_DIR}/CHANGELOG.md" | sed "s/^## ${NEW_TAG} — //")"
 git -C "${ROOT_DIR}" add CHANGELOG.md README.md packaging/arch/PKGBUILD
