@@ -3601,6 +3601,25 @@ mod tests {
     }
 
     #[test]
+    fn a_message_takes_eight_pictures_and_no_more() {
+        let mut app = test_app();
+        let picture = |i: usize| crate::attachments::Attachment {
+            name: format!("p{i}"),
+            data_url: format!("data:image/png;base64,{i}"),
+            size: None,
+        };
+        for i in 0..8 {
+            assert!(app.attach(picture(i)));
+        }
+        assert!(!app.attach(picture(8)), "a ninth picture was accepted");
+        assert_eq!(app.attachments.len(), 8);
+        // The same picture twice is one picture.
+        app.attachments.clear();
+        assert!(app.attach(picture(1)));
+        assert!(!app.attach(picture(1)), "the same picture was attached twice");
+    }
+
+    #[test]
     fn a_failed_cost_probe_frees_the_model_it_was_for() {
         let mut app = test_app();
         app.image_cost_probe = Some("a-vision-model".into());

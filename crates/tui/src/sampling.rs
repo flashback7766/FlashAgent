@@ -29,7 +29,7 @@ pub struct SamplingView {
 impl SamplingView {
     pub fn new(config: &AppConfig) -> Self {
         let preset = config.sampling_preset;
-        let mut view = Self {
+        let view = Self {
             preset,
             selected_index: 0,
             temp_buf: format!("{:.2}", config.temperature),
@@ -41,10 +41,9 @@ impl SamplingView {
             max_tokens_buf: config.max_tokens.map(|n| n.to_string()).unwrap_or_default(),
             seed_buf: config.seed.map(|n| n.to_string()).unwrap_or_default(),
         };
-        // A named preset overwrites the buffers with its values.
-        if preset != SamplingPreset::Custom {
-            view.sync_buffers_to_preset(preset);
-        }
+        // The menu shows what runs, not what the preset's name says: a value
+        // changed by hand (or in the config) is what the model is sent, and a
+        // menu that showed the preset's number invited a second edit.
         view
     }
 
@@ -381,6 +380,15 @@ impl SamplingView {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_menu_shows_the_value_that_runs_even_under_a_preset_name() {
+        // A value changed by hand, or by a config edit, is what the model is
+        // sent; the menu used to show the preset's own number over it.
+        let cfg = AppConfig { sampling_preset: SamplingPreset::Coding, temperature: 0.11, ..Default::default() };
+        let view = SamplingView::new(&cfg);
+        assert_eq!(view.temp_buf, "0.11");
+    }
 
     #[test]
     fn test_sampling_preset_cycling() {

@@ -538,8 +538,8 @@ impl App {
                 }
                 match Attachment::from_dropped_path(word) {
                     Some(att) => {
-                        if !self.attachments.iter().any(|a| a.data_url == att.data_url) {
-                            self.attachments.push(att);
+                        if !self.attach(att) {
+                            all_pictures = false;
                         }
                     }
                     None => all_pictures = false,

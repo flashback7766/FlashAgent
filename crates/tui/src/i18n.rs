@@ -628,6 +628,7 @@ static RU: &[(&str, &str)] = &[
     ("Not switching while the context is being compacted", "Не переключаю: идёт сжатие контекста"),
     ("An answer is still being written · Esc stops it now", "Ответ ещё пишется · Esc остановит его сейчас"),
     ("Session compacted · {input} in · {output} out", "Сессия сжата · {input} вход · {output} выход"),
+    ("A message holds eight pictures at most", "В сообщении не больше восьми картинок"),
     ("No home directory to read sessions from", "Некуда читать сессии: нет домашней папки"),
     ("(no prompt)", "(без запроса)"),
     ("not executed:", "не выполнено:"),

@@ -261,6 +261,14 @@ pub fn image_media_type(path: &std::path::Path) -> Option<&'static str> {
 /// Through the platform tools rather than a decoder, so the file arrives
 /// exactly as copied.
 pub fn get_clipboard_image() -> Option<ClipboardImage> {
+    #[cfg(target_os = "windows")]
+    {
+        // Windows has no clipboard tool that writes the picture to stdout;
+        // PowerShell saves it to a file, and the file is read here.
+        if let Some(image) = windows_clipboard_image() {
+            return Some(image);
+        }
+    }
     let attempts: &[(&str, &[&str], &str)] = if cfg!(target_os = "macos") {
         &[("pngpaste", &["-"], "image/png")]
     } else if cfg!(target_os = "windows") {
@@ -287,6 +295,31 @@ pub fn get_clipboard_image() -> Option<ClipboardImage> {
         return Some(ClipboardImage { bytes: out.stdout, media_type: (*media_type).to_string() });
     }
     None
+}
+
+/// PowerShell saves the clipboard picture to a temporary file and it is read
+/// back: arboard would hand over raw RGBA, and encoding that to PNG needs a
+/// decoder of its own.
+#[cfg(target_os = "windows")]
+fn windows_clipboard_image() -> Option<ClipboardImage> {
+    let path = std::env::temp_dir().join(format!("flashagent-clip-{}.png", std::process::id()));
+    let quoted = path.display().to_string().replace('\'', "''");
+    let script = format!(
+        "Add-Type -AssemblyName System.Windows.Forms; \
+         $i=[Windows.Forms.Clipboard]::GetImage(); \
+         if ($i) {{ $i.Save('{quoted}', [System.Drawing.Imaging.ImageFormat]::Png) }}"
+    );
+    let status = Command::new("powershell")
+        .args(["-NoProfile", "-NonInteractive", "-Command", &script])
+        .stderr(Stdio::null())
+        .status()
+        .ok()?;
+    let bytes = std::fs::read(&path).unwrap_or_default();
+    let _ = std::fs::remove_file(&path);
+    if !status.success() || bytes.is_empty() {
+        return None;
+    }
+    Some(ClipboardImage { bytes, media_type: "image/png".to_string() })
 }
 
 #[cfg(test)]

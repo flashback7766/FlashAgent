@@ -1902,7 +1902,7 @@ impl ChatView {
                 // Wrapped, not cut: the end of an error often says what happened.
                 let plain = strip_ansi(&line.text);
                 if line.kind == LineKind::ToolError && visible_width(&plain) > width {
-                    let indent = plain.len() - plain.trim_start().len();
+                    let indent = plain.chars().count() - plain.trim_start().chars().count();
                     let pad = " ".repeat(indent);
                     for chunk in wrap(line.text.trim_start(), width.saturating_sub(indent).max(10)) {
                         target.push((line.kind, format!("{pad}{chunk}")));

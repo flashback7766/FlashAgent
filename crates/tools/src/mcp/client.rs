@@ -268,7 +268,11 @@ impl McpClient {
 
         let _ = self.notify("notifications/initialized", None);
 
-        let _ = self.refresh_tools(timeout).await;
+        if let Err(why) = self.refresh_tools(timeout).await {
+            // A server that answered initialize but cannot list its tools is not
+            // up: saying so beats an "Active" server with no tools and no reason.
+            return Err(format!("tools/list failed: {why}"));
+        }
 
         Ok(init_result)
     }

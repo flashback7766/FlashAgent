@@ -350,8 +350,6 @@ impl ThinkingProfile {
             TaskComplexity::Minimal => 0,
             TaskComplexity::Low => {
                 named(&["low", "minimal", "min", "fast", "on"])
-                    // A binary on/off model has no middle to find.
-                    .or_else(|| named(&["on"]))
                     .unwrap_or(last / 3)
             }
             TaskComplexity::Medium => {
@@ -389,6 +387,8 @@ impl ThinkingProfile {
             ThinkingProtocol::ReasoningObject => {
                 body["reasoning"] = serde_json::json!({ "effort": effort });
             }
+            // Kept: a stored config may name this protocol even though nothing
+            // selects it any more, and an unsent variant would break the match.
             ThinkingProtocol::ThinkingObject => {
                 if is_off {
                     body["thinking"] = serde_json::json!({ "type": "disabled" });

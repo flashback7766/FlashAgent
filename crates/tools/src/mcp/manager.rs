@@ -62,6 +62,10 @@ pub struct McpManager {
     /// The servers the owner allowed to start in this session. A server from
     /// a project is not in it until the owner says yes.
     allowed: RwLock<HashSet<String>>,
+    /// One start at a time per server: two callers that both find no live
+    /// client spawn two processes for the same server, and one is never shut
+    /// down. Per name, not one lock for all: several servers start side by side.
+    start_gates: std::sync::Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
 }
 
 impl McpManager {
@@ -75,6 +79,7 @@ impl McpManager {
             loaded_paths: RwLock::new(loaded_paths),
             from_project: RwLock::new(from_project),
             allowed: RwLock::new(HashSet::new()),
+            start_gates: std::sync::Mutex::new(HashMap::new()),
         })
     }
 
@@ -133,6 +138,9 @@ impl McpManager {
         if !self.may_start(name) {
             return Err(format!("MCP server '{name}' was not allowed to run"));
         }
+        // Two starts of one server must not both get past the client check.
+        let gate = self.start_gate(name);
+        let _one = gate.lock().await;
         let res = self.try_start_server(name).await;
         match &res {
             Ok(_) => {
@@ -143,6 +151,12 @@ impl McpManager {
             }
         }
         res
+    }
+
+    /// The gate for one server, made on first use.
+    fn start_gate(&self, name: &str) -> Arc<tokio::sync::Mutex<()>> {
+        let mut gates = self.start_gates.lock().unwrap_or_else(|p| p.into_inner());
+        gates.entry(name.to_string()).or_insert_with(|| Arc::new(tokio::sync::Mutex::new(()))).clone()
     }
 
     async fn try_start_server(&self, name: &str) -> Result<Arc<McpClient>, String> {
