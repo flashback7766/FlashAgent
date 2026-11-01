@@ -520,6 +520,21 @@ impl AutocompletePopup {
 #[cfg(test)]
 mod skill_tests {
     #[test]
+    fn the_repository_ships_its_unslop_skill() {
+        // The file is part of the repository: moving it, or dropping its
+        // `description:` line, would quietly take it out of the popup.
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let items = super::load_skills(&root);
+        let unslop = items.iter().find(|i| i.trigger.ends_with("unslop")).expect("unslop is listed");
+        assert!(unslop.description.contains("AI generation"), "{}", unslop.description);
+        // The rules point at these files; a move without them leaves the skill
+        // telling the model to read something that is not there.
+        for file in ["references/blacklist.md", "references/prose-benchmarks.md", "references/style-profile-template.md"] {
+            assert!(root.join(".agents/skills/unslop").join(file).is_file(), "{file} is missing");
+        }
+    }
+
+    #[test]
     fn a_skill_is_listed_by_its_own_description() {
         let dir = tempfile::tempdir().unwrap();
         let skills = dir.path().join(".agents/skills");
