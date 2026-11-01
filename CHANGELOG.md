@@ -1,5 +1,65 @@
 # Changelog
 
+## b670 — The audit's last holes, and a repository that reads like a person wrote it
+
+- **Session files stop carrying what a tool was given.** A `write_file` call
+  names the path and the text, and the redaction covered results only, so the
+  arguments went into the file on disk. Both are redacted now.
+- **A compaction belongs to the session it was started in.** A summary that
+  finishes after a session switch is dropped instead of landing in the new
+  file, and a switch waits while the context is being compacted.
+- **Two questions get two answers.** Approvals and questions queue instead of
+  sharing one slot, so two subagents each get their own card and their own
+  verdict.
+- **A global memory write no longer arms the project's `MEMORY.md` for
+  deletion.** Snapshots resolve the scope of a write before keeping a file, and
+  a path that does not exist is not armed; a rewind could delete a file the
+  turn had never touched.
+- **A saved turn that was cut in flight says so on resume.** `CutShort::
+  Interrupted` is marked in the history, so the model does not read a half
+  sentence as a finished answer.
+- **A child agent cannot ask the user.** Every role's child lost `ask_user`:
+  the coder had it through the empty list that means "the parent's whole
+  toolset", and a child has nobody to answer.
+- **One MCP server starts once.** A per-server gate stops two starts from
+  spawning two processes; `initialize` fails when `tools/list` fails instead of
+  reporting an active server with no tools; and a marketplace install is
+  allowed for this session rather than the next launch.
+- **Memory has one writer at a time.** Two saves in one turn rewrote
+  `MEMORY.md` from their own listing, and one entry was lost.
+- **The bearer is remembered per key.** An Anthropic key that replaces the old
+  one is tried the way it needs, instead of inheriting the old one's answer.
+- **`/sampling` shows the values that run**, not the numbers of the preset they
+  are named after, and what is saved there reaches Anthropic and Gemini.
+- **Eight pictures, on every path.** The limit and the duplicate check apply to
+  a paste and a drop, not only to a message of paths.
+- **The welcome card is drawn again on resize**, once the conversation has
+  started, and a click on it cannot start a second turn.
+- **A number inside an error body is not a status code.** "got 4032" was
+  explained as a rejected key, and a bare 429 as rate limiting.
+- **A provider name never carries the password** from a `user:pass@` URL.
+- **An unreadable config is kept**, as `config.json.broken`, before the default
+  replaces it, and a `MEMORY.md` that cannot be read is not rewritten as one
+  fact.
+- **Planning resolves `cut`, `tree` and `find` operands**, and a standing
+  "Always" rule no longer outranks planning, the blacklist or `/goal`.
+- **The updater never rolls the binary back.** It remembers the build it
+  installed, a background tick checks before writing, and the write probe is
+  closed before it is removed.
+- **Smaller repairs.** The F4 menu filters and pages as its hint promises; a
+  Brave search with no hits says "no results"; Gemini reports a repeated usage
+  frame once; a fenced JSON object is an example, not a call; an unclosed code
+  fence is closed at the end and a long language tag no longer pushes the
+  border past the window; a tool error wraps by cells, not bytes; a context
+  limit Anthropic named is remembered for the next turn.
+- **The repository ships a skill: `unslop`.** `/skill:unslop` takes English
+  text that reads like a model assembled it and works on three levels:
+  typography, vocabulary, and structure. It is vendored under MIT with its
+  reference lists, and a test fails when the skill or one of them goes missing.
+- **The prose went through it.** Docs, comments and this file lost the em
+  dashes that only paused a sentence; label separators, table placeholders,
+  numeric ranges and the Russian translations keep theirs.
+
 ## b660 — The same fixes as b659, built by a green test suite
 
 - **Nothing user-visible changed.** b659 was never published: one TUI test
