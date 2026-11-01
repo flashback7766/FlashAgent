@@ -34,7 +34,20 @@ static STALE: LazyLock<Mutex<HashSet<u64>>> = LazyLock::new(Default::default);
 /// Output caps a server named when it refused a request, per address and model.
 static CAPS: LazyLock<Mutex<HashMap<String, u32>>> = LazyLock::new(Default::default);
 /// Gateways that refused `x-api-key` and took the key as a bearer token.
-static BEARER: LazyLock<Mutex<HashSet<String>>> = LazyLock::new(Default::default);
+static BEARER: LazyLock<Mutex<HashSet<(String, u64)>>> = LazyLock::new(Default::default);
+
+/// Which key learned that this gateway wants a bearer. A hash, not the key: the
+/// set outlives a key change, and a new key must be tried its own way.
+fn key_mark(api_key: Option<&str>) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    api_key.unwrap_or_default().hash(&mut hasher);
+    hasher.finish()
+}
+
+fn learned(base: &str, mark: u64) -> bool {
+    BEARER.lock().iter().any(|(b, m)| b == base && *m == mark)
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Mode {
@@ -314,7 +327,8 @@ fn auth(key: Option<&str>, bearer: bool) -> HeaderMap {
 }
 
 pub(crate) fn headers(client: &Client) -> HeaderMap {
-    let mut headers = auth(client.api_key().as_deref(), BEARER.lock().contains(&client.base_url()));
+    let mark = key_mark(client.api_key().as_deref());
+    let mut headers = auth(client.api_key().as_deref(), learned(&client.base_url(), mark));
     if let Some(session) = client.opencode_session_header() {
         headers.insert("x-opencode-session", session);
     }
@@ -340,7 +354,7 @@ pub(crate) async fn stream(
     let mut plan = plan(client, &model, messages, options);
     let url = format!("{}/v1/messages", root(&base));
     let key = cap_key(&base, &model);
-    let mut may_try_bearer = !is_official(&base) && client.api_key().is_some() && !BEARER.lock().contains(&base);
+    let mut may_try_bearer = !is_official(&base) && client.api_key().is_some() && !learned(&base, key_mark(client.api_key().as_deref()));
     let mut refused_key: Option<LlmError> = None;
     let mut attempts = 0;
     loop {
@@ -356,12 +370,12 @@ pub(crate) async fn stream(
             // Some gateways take the key only as a bearer token.
             if may_try_bearer {
                 may_try_bearer = false;
-                BEARER.lock().insert(base.clone());
+                BEARER.lock().insert((base.clone(), key_mark(client.api_key().as_deref())));
                 refused_key = Some(LlmError::Status { status, body: text });
                 continue;
             }
             if let Some(first) = refused_key {
-                BEARER.lock().remove(&base);
+                BEARER.lock().remove(&(base.clone(), key_mark(client.api_key().as_deref())));
                 return Err(first);
             }
         }
@@ -1079,11 +1093,11 @@ async fn models_page(client: &Client, base: &str, url: &str) -> Option<Value> {
     if let Some(page) = client.get_json(url, &headers(client), timeout).await {
         return Some(page);
     }
-    if is_official(base) || BEARER.lock().contains(base) {
+    if is_official(base) || learned(base, key_mark(client.api_key().as_deref())) {
         return None;
     }
     let page = client.get_json(url, &auth(client.api_key().as_deref(), true), timeout).await?;
-    BEARER.lock().insert(base.to_string());
+    BEARER.lock().insert((base.to_string(), key_mark(client.api_key().as_deref())));
     Some(page)
 }
 
@@ -1426,6 +1440,17 @@ mod tests {
         let body = request("claude-opus-5", &[ChatMessage::user("q"), cut, ChatMessage::user("again")], &[], &TurnOptions::default());
         assert_eq!(body["messages"].as_array().unwrap().len(), 1, "no assistant message holding only thinking");
         assert_eq!(kinds(&body["messages"][0]["content"]), ["text", "text"]);
+    }
+
+    #[test]
+    fn a_bearer_learned_with_one_key_is_not_forced_on_the_next() {
+        let base = "http://bearer.test";
+        let first = key_mark(Some("key-one"));
+        BEARER.lock().insert((base.to_string(), first));
+        assert!(learned(base, first));
+        assert!(!learned(base, key_mark(Some("key-two"))), "a new key inherited the old one's bearer");
+        assert!(!learned(base, key_mark(None)));
+        BEARER.lock().remove(&(base.to_string(), first));
     }
 
     #[test]

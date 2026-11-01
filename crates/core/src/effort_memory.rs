@@ -28,7 +28,6 @@ pub struct TurnOutcome {
     pub answer_chars: usize,
     pub tool_calls: usize,
     pub failed_tools: usize,
-    pub interrupted_while_thinking: bool,
     /// The user asked for the answer again.
     pub regenerated: bool,
     /// Wall-clock seconds the turn took, once the model had a token to measure
@@ -45,9 +44,6 @@ impl TurnOutcome {
     pub fn signal(&self) -> f32 {
         if self.failed_tools > 0 || self.regenerated {
             return 1.0;
-        }
-        if self.interrupted_while_thinking {
-            return -1.0;
         }
         // Overthinking: a lot of reasoning, a short answer, no tool calls.
         let long_reasoning = self.reasoning_chars > 2_000;

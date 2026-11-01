@@ -61,8 +61,15 @@ impl App {
             UiEvent::Resize(cols, rows) => {
                 let term_resized = (cols, rows) != self.last_term_size;
                 self.last_term_size = (cols, rows);
-                if !self.chat.has_user_message() && term_resized {
-                    self.animate_welcome(cx.source, cx.mascot_mood, Some(cols as usize), None);
+                if term_resized {
+                    if self.chat.has_user_message() {
+                        // The card is part of the transcript once the conversation
+                        // started: its buttons moved with the width, and the rows
+                        // recorded at the old one no longer match.
+                        self.refresh_welcome_state(cx.source, cx.mascot_mood);
+                    } else {
+                        self.animate_welcome(cx.source, cx.mascot_mood, Some(cols as usize), None);
+                    }
                 }
                 self.renderer.request_reprint();
             }
@@ -757,6 +764,16 @@ impl App {
         self.renderer.request_reprint();
     }
 
+    /// Adds a picture unless the message already holds eight or this exact one.
+    /// Whether it was added.
+    pub(crate) fn attach(&mut self, att: Attachment) -> bool {
+        if self.attachments.len() >= 8 || self.attachments.iter().any(|a| a.data_url == att.data_url) {
+            return false;
+        }
+        self.attachments.push(att);
+        true
+    }
+
     /// What Ctrl+V does, and what a click on "Ctrl+V paste image" does: a
     /// screenshot on the clipboard first, then text.
     pub(crate) fn paste_clipboard(&mut self, cx: &LoopCtx<'_>) {
@@ -766,7 +783,12 @@ impl App {
             maybe_measure_image_cost(&self.image_costs, &mut self.image_cost_probe, &self.current_model, cx.source, cx.tx);
             let att = Attachment::from_clipboard(image);
             let label = att.label();
-            self.attachments.push(att);
+            // The limit is the same on every path: a paste was the one that
+            // could exceed it and send a request the server refuses.
+            if !self.attach(att) {
+                self.say(BackgroundNotice::sticky(tr("A message holds eight pictures at most")).warning());
+                return;
+            }
             self.suggested_prompt = None;
             if !model_sees_images(cx.source, &self.current_model) {
                 self.say(
@@ -1084,7 +1106,10 @@ impl App {
         } else if let Some(att) = Attachment::from_dropped_path(pasted) {
             // A dropped picture's path means the picture.
             let label = att.label();
-            self.attachments.push(att);
+            if !self.attach(att) {
+                self.say(BackgroundNotice::sticky(tr("A message holds eight pictures at most")).warning());
+                return;
+            }
             self.suggested_prompt = None;
             self.say(BackgroundNotice::fading(
                 tr_fill("{label} attached · Ctrl+Z removes it", &[("label", &label)]),

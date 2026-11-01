@@ -185,7 +185,16 @@ impl SubagentToolFactory for BuiltinSubagentFactory {
         // hides them from the child's specs and refuses them if the child
         // calls one anyway, which is what makes "a researcher cannot write" a
         // boundary instead of a request in a prompt.
-        let subset = ToolSubset::new(self.tools.clone(), tools);
+        //
+        // `ask_user` is dropped for every role: the child has no user on the
+        // other end of its question, and an empty list used to hand it the
+        // parent's own tool.
+        let allowed: Vec<String> = if tools.is_empty() {
+            self.tools.specs().into_iter().map(|s| s.name).filter(|n| n != "ask_user").collect()
+        } else {
+            tools.iter().filter(|n| n.as_str() != "ask_user").cloned().collect()
+        };
+        let subset = ToolSubset::new(self.tools.clone(), &allowed);
         // A child can only be given the tool to write to the others when it was
         // built with their mailbox; without one it works alone, which is still
         // a valid way to run a task.
@@ -290,6 +299,24 @@ mod tests {
             .execute(&ToolCall { id: "t".into(), name: "write_file".into(), args_json: "{}".into() })
             .await;
         assert!(!out.is_error);
+    }
+
+    #[test]
+    fn a_child_is_never_given_the_tool_that_asks_the_user() {
+        let tools = Arc::new(
+            crate::BuiltinTools::new(crate::BuiltinToolsConfig { cwd: crate::testing::tempdir(), ..Default::default() })
+                .expect("tools"),
+        );
+        let state = Arc::new(PermissionState::new(
+            flashagent_core::PermissionMode::Bypass,
+            Arc::new(flashagent_core::DenyAllGate),
+        ));
+        let factory = BuiltinSubagentFactory::new(tools, state);
+        let role = flashagent_core::AgentRole { name: "coder".into(), system_prompt: String::new(), tools: Vec::new() };
+        let child = factory.build("sub1", &role, &[]);
+        let names: Vec<String> = child.specs().into_iter().map(|s| s.name).collect();
+        assert!(!names.iter().any(|n| n == "ask_user"), "a child was given ask_user: {names:?}");
+        assert!(names.iter().any(|n| n == "read_file"), "the rest of the parent's tools are missing: {names:?}");
     }
 
     #[tokio::test]

@@ -4,6 +4,7 @@
 //! appended file grew without bound and had no dates.
 
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 
 /// Anything outside these markers is the user's own text and is never touched.
 /// The block the index is written into. Read by `memory.rs` to tell the
@@ -173,6 +174,10 @@ pub struct Store {
     root: PathBuf,
 }
 
+/// One writer at a time: two saves in the same turn list the folder before
+/// either writes, and the index loses one of the two entries.
+static SAVE_LOCK: Mutex<()> = Mutex::new(());
+
 impl Store {
     /// `root` is the project directory, or `~/.flashagent`.
     pub fn new(root: impl Into<PathBuf>) -> Self {
@@ -234,6 +239,7 @@ impl Store {
 
     /// Writing over an existing name is how a fact is corrected.
     pub fn save(&self, entry: &Entry) -> std::io::Result<PathBuf> {
+        let _one = SAVE_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         std::fs::create_dir_all(self.dir())?;
         let path = self.dir().join(format!("{}.md", entry.name));
         crate::paths::write_atomic(&path, entry.to_markdown().as_bytes())?;
@@ -243,6 +249,7 @@ impl Store {
 
     /// `false` when there was nothing by that name.
     pub fn remove(&self, name: &str) -> std::io::Result<bool> {
+        let _one = SAVE_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         let Some((_, path)) = self.existing(name) else {
             return Ok(false);
         };
