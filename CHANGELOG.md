@@ -1,5 +1,48 @@
 # Changelog
 
+## b659 — Compaction tells the truth, and an Azure replay refusal has a way through
+
+- **The context gauge moves when compaction ends, not on the next prompt.**
+  The prompt count the server reported for the previous request stayed as a
+  floor, so after a summary landed the gauge still showed the old total until
+  the user typed again; the transcript baseline lagged the same way. A real
+  summary now retires both at once on all three paths — manual, between turns
+  and mid-turn — so the number describes the rewritten history immediately.
+- **A compaction that keeps nothing changes nothing.** A zero `saved` count is
+  a success only when a report came back with it; a failed or empty summary
+  leaves the transcript, the count, the archive and the baseline as they were.
+- **One card, one result.** The standing yellow line that repeated the card's
+  own footer is gone, so an automatic compaction adds the card and nothing
+  else.
+- **The waiting card has a clock.** It shows elapsed time and a moving shimmer
+  while the summary is being written — one line, wrapped to the terminal width
+  — so a slow compaction looks alive instead of frozen.
+- **A mid-turn compaction keeps its archive and its shortened history.** The
+  event fires after the loop syncs the history it will save, so the card
+  describes the new transcript rather than the old one, and the exact archive
+  is written on this path too.
+- **An Azure replay refusal gets exactly one safe retry.** When the first
+  request fails before any stream with HTTP 400 saying the item was created
+  under a different Azure OpenAI resource (trace-id suffix included) and the
+  request carries bound reasoning, FlashAgent retries once with visible-only
+  replay: opaque reasoning items are dropped, while messages, images, tools,
+  call ids, limits and `store: false` stay unchanged. Readable reasoning in the
+  replay becomes one clearly marked thought; ciphertext stays opaque. A generic
+  400, an auth error or a stream that was already accepted is not retried.
+- **The accepted mode is remembered per model, not forever.** The lesson is
+  keyed to the endpoint and model with a generation counter, so a late answer
+  from a configuration the user has left teaches nothing, and a switch resets
+  it.
+- **Supported Responses models ask for a readable summary at default effort.**
+  `reasoning.summary: "auto"` is sent whenever the model supports reasoning
+  and the effort is left to the provider; an explicit off is never raised, and
+  no effort level is invented.
+
+Verified with the workspace suite, including the real-terminal compaction and
+session scenarios, Clippy with `-D warnings` and a release build. The Azure
+refusal is reproduced by HTTP fixtures rather than a live request: the opaque
+item that the service rejects cannot be built locally.
+
 ## b649 — Custom themes, and Responses reasoning you can see
 
 - **Named JSON palettes inherit a built-in theme.** `theme_palettes` in
