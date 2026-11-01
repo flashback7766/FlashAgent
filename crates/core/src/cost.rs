@@ -30,6 +30,11 @@ pub struct CostLedger {
     /// difference from the total is what the gateway added for itself.
     upstream_total: f64,
     upstream_turns: u64,
+    /// What a plan counted against its monthly allowance, when the account
+    /// bills by quota rather than per turn: OpenCode's gateway sends this on
+    /// every response and no per-turn price, so it is the only figure there.
+    allowance_total: f64,
+    allowance_turns: u64,
 }
 
 impl CostLedger {
@@ -64,6 +69,20 @@ impl CostLedger {
     /// What the providers behind the gateways charged, when they said.
     pub fn upstream_total(&self) -> Option<f64> {
         (self.upstream_turns > 0).then_some(self.upstream_total)
+    }
+
+    /// A turn counted against a plan's monthly allowance: the provider's own
+    /// prices, spent from a quota instead of billed.
+    pub fn record_allowance(&mut self, counted: Option<f64>) {
+        let Some(counted) = counted.filter(|c| c.is_finite() && *c >= 0.0) else { return };
+        self.allowance_total += counted;
+        self.allowance_turns += 1;
+    }
+
+    /// `None` until a plan counted something: a gateway that bills per turn
+    /// sends nothing here, and a zero would read as an unused plan.
+    pub fn allowance(&self) -> Option<(f64, u64)> {
+        (self.allowance_turns > 0).then_some((self.allowance_total, self.allowance_turns))
     }
 
     pub fn upstream_turns(&self) -> u64 {
@@ -126,6 +145,20 @@ impl CostLedger {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_allowance_is_kept_apart_from_the_bill() {
+        let mut ledger = CostLedger::default();
+        ledger.record_allowance(None);
+        assert_eq!(ledger.allowance(), None, "nothing counted is not zero counted");
+        ledger.record_allowance(Some(0.0042));
+        ledger.record_allowance(Some(0.0001));
+        ledger.record_allowance(Some(-3.0));
+        let (counted, turns) = ledger.allowance().unwrap();
+        assert!((counted - 0.0043).abs() < 1e-9);
+        assert_eq!(turns, 2, "a negative count is not a turn");
+        assert_eq!(ledger.total(), None, "a quota is not a bill");
+    }
 
     #[test]
     fn a_backend_that_prices_nothing_leaves_the_total_unknown() {

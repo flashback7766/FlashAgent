@@ -752,6 +752,18 @@ impl App {
     /// backend prices nothing, rather than reporting a confident zero.
     fn show_cost(&mut self) {
         use flashagent_core::CostLedger;
+        // A plan that bills by quota sends no per-turn price: what it counted
+        // against the monthly allowance is the only figure it gave, and
+        // calling that "free" would be a lie.
+        let allowance = self.cost.allowance();
+        let billed = self.cost.total().filter(|total| *total > 0.0);
+        if let (Some((counted, turns)), None) = (allowance, billed) {
+            self.chat.push_system(&tr_fill(
+                "This session: ${amount} of the monthly allowance over {turns}",
+                &[("amount", &CostLedger::format_amount(counted)), ("turns", &CostLedger::turns_phrase(turns))],
+            ));
+            return;
+        }
         let Some(total) = self.cost.total() else {
             self.chat.push_system(&tr_fill(
                 "No backend in this session reported a price \u{b7} {name} is running free on your own hardware, or its API does not say what a turn costs",
@@ -794,6 +806,12 @@ impl App {
                 )
             };
             self.chat.push_system(&line);
+        }
+        if let Some((counted, turns)) = allowance {
+            self.chat.push_system(&tr_fill(
+                "  the monthly allowance: ${amount} over {turns}",
+                &[("amount", &CostLedger::format_amount(counted)), ("turns", &CostLedger::turns_phrase(turns))],
+            ));
         }
     }
 

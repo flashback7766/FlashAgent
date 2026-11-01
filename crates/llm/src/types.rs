@@ -144,6 +144,10 @@ pub struct Usage {
     pub cost: Option<f64>,
     /// What the provider behind the gateway charged, when it says.
     pub cost_details: Option<CostDetails>,
+    /// What OpenCode's gateway counted this turn against the plan's monthly
+    /// allowance, in dollars at official prices. A subscription bills no
+    /// per-turn cost, so this is the figure that says what was spent.
+    pub allowance: Option<f64>,
 }
 
 /// What a gateway says the provider behind it charged: the turn's own price,

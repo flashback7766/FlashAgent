@@ -351,6 +351,11 @@ impl ChunkParser {
                 let upstream_cost = d.get("upstream_inference_cost").and_then(Value::as_f64);
                 upstream_cost.is_some().then_some(crate::types::CostDetails { upstream_cost })
             });
+            // OpenCode's gateway counts every request against the plan's
+            // monthly allowance and says how much, in dollars at official
+            // prices: a subscription sends no per-turn cost, so this is the
+            // figure that was spent.
+            let allowance = usage.pointer("/opencode/allowance").and_then(Value::as_f64).filter(|v| v.is_finite() && *v >= 0.0);
             events.push(LlmEvent::Usage(crate::types::Usage {
                 prompt,
                 completion,
@@ -358,6 +363,7 @@ impl ChunkParser {
                 mtp,
                 cost,
                 cost_details,
+                allowance,
                 ..Default::default()
             }));
         } else if let Some((prompt, cached)) = timings {
@@ -1629,6 +1635,19 @@ mod tests {
                 _ => None,
             })
             .expect("a usage event")
+    }
+
+    #[test]
+    fn a_gateways_allowance_is_read_beside_its_price() {
+        // OpenCode's plans bill by monthly allowance and send no per-turn
+        // price: this is the figure that says what a turn spent.
+        let u = usage_of(r#"{"choices":[],"usage":{"prompt_tokens":10,"completion_tokens":2,"cost":0,"opencode":{"allowance":0.0042}}}"#);
+        assert_eq!(u.cost, Some(0.0));
+        assert_eq!(u.allowance, Some(0.0042));
+        let u = usage_of(r#"{"choices":[],"usage":{"prompt_tokens":10,"opencode":{"allowance":"lots"}}}"#);
+        assert_eq!(u.allowance, None, "a count that is not a number is not counted");
+        let u = usage_of(r#"{"choices":[],"usage":{"prompt_tokens":10,"opencode":{"allowance":-2}}}"#);
+        assert_eq!(u.allowance, None, "a negative count is a bug, not a credit");
     }
 
     #[test]
