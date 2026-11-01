@@ -304,7 +304,7 @@ pub(crate) fn work_box(
 
 /// Every row the box holds is work that is under way: a child leaves the box when
 /// it ends, and a command is listed only while it runs. So the whole box sweeps,
-/// at the period and between the colours the call in flight uses — one movement
+/// at the period and between the colours the call in flight uses: one movement
 /// across the interface rather than a second one invented here. Animations off
 /// leaves it still, which is the setting's promise and not a special case here.
 fn live_row(plain: &str, t: u64) -> String {
@@ -318,7 +318,7 @@ fn live_row(plain: &str, t: u64) -> String {
 ///
 /// The mark turns while the command runs. A `▸` says a command was started and
 /// reads the same for a server that is still serving and for a build that died
-/// four minutes ago, and this box only ever lists the running ones — so the mark
+/// four minutes ago, and this box only ever lists the running ones. So the mark
 /// is the only place the difference between "just started" and "been at it a
 /// while" can be told apart from.
 pub(crate) fn background_row(command: &str, elapsed: &str, box_inner: usize, mark: &str) -> String {
@@ -570,7 +570,7 @@ impl Renderer {
     /// view is: at the top of the track while the view is scrolled all the
     /// way back, at its end while anchored. It shows itself only to a hand
     /// near the right edge of the transcript, or one already holding the
-    /// thumb — bolted over the last column, always on, it was furniture
+    /// thumb. Bolted over the last column, always on, it was furniture
     /// nobody asked for.
     pub(crate) fn scrollbar(&self) -> Option<Scrollbar> {
         if !self.scrollbar_visible() {
@@ -662,7 +662,7 @@ impl Renderer {
 
     /// A fold or an open of a block moved the transcript by the pointer's own
     /// hand; the view follows it, so the header the pointer is on stays where
-    /// it was — pinned or not. The frame's own rule for new rows under a
+    /// it was, pinned or not. The frame's own rule for new rows under a
     /// scrolled view is told the change is already counted, so the two do not
     /// add up.
     pub(crate) fn anchor_block(&mut self, delta: isize) {
@@ -1741,8 +1741,8 @@ impl Renderer {
     self.chat_rows_on_screen = chat_rows.saturating_sub(cut);
     self.screen_width = width;
     // Where the open overlay's card begins on screen, for clicks. The rows
-    // on screen are the chat first — which already holds everything of the
-    // tail up to `card_start`, the blank separator included — and the bottom
+    // on screen are the chat first (which already holds everything of the
+    // tail up to `card_start`, the blank separator included) and the bottom
     // block after it, so the card's first line sits at the chat's end, moved
     // down by whatever the work box above it took, and up by whatever the
     // screen cut from the top. Measured against a real screen, a row that
@@ -1760,7 +1760,7 @@ impl Renderer {
         .zip(self.overlay_row)
         .map(|(col, row)| (row, col));
     // The transcript's own hover: the row under the pointer, when a click
-    // there would reach a thought or a tool call, takes a quiet background —
+    // there would reach a thought or a tool call, takes a quiet background:
     // the same hint the card rows give theirs.
     if let Some((row, col)) = hover_chat {
         let r = row as usize;
@@ -1799,7 +1799,7 @@ impl Renderer {
     }
     // The drag selection, while the button is held: reverse video over the
     // cells it covers, the way a terminal paints its own. It covers the
-    // transcript's rows only — the card and the footer are not selectable.
+    // transcript's rows only. The card and the footer are not selectable.
     if let Some(((ar, ac), (hr, hc))) = selection {
         let (top, left, bottom, right) = if (ar, ac) <= (hr, hc) { (ar, ac, hr, hc) } else { (hr, hc, ar, ac) };
         let last = self.chat_rows_on_screen.saturating_sub(1);
@@ -1858,7 +1858,7 @@ impl Renderer {
     self.screen.paint(&rows, cursor);
     }
 
-    /// A press on the context gauge at the end of the status line — the bar
+    /// A press on the context gauge at the end of the status line: the bar
     /// and the numbers beside it. It opens what F1 opens.
     pub(crate) fn gauge_press(&self, row: u16, column: u16) -> bool {
         match self.status_gauge {
@@ -2156,7 +2156,7 @@ fn scroll_max(chat_len: usize, chat_room: usize) -> usize {
 
 /// Overwrites the last cell of a row with `cell`, whatever the row holds: the
 /// row is clipped one column short and padded, and the cell goes where the
-/// clipping made room. The scrollbar never widens a line — a wider line would
+/// clipping made room. The scrollbar never widens a line; a wider line would
 /// wrap and push everything under it down.
 fn with_right_cell(line: &str, width: usize, cell: &str) -> String {
     let room = width.saturating_sub(1).max(1);
@@ -2173,7 +2173,7 @@ mod scrollbar_tests {
     use super::*;
 
     /// A renderer with a conversation of 1000 lines behind a screen of 40
-    /// transcript rows — enough to scroll, small enough to do the sums by.
+    /// transcript rows: enough to scroll, small enough to do the sums by.
     fn scrolled_renderer() -> Renderer {
         let mut r = Renderer::new();
         r.total_lines = 1000;
@@ -2399,8 +2399,8 @@ mod footer_tests {
         // The reported width is the row's tail: exactly the gauge's cells.
         let tail: String = plain.chars().skip(plain.chars().count() - gauge_vis).collect();
         assert_eq!(tail, "1% · 9.5K/1M", "{plain:?}");
-        // Too narrow for both: the left side gives way first — the gauge is
-        // what stops a turn from fitting — but the gauge itself stays.
+        // Too narrow for both: the left side gives way first (the gauge is
+        // what stops a turn from fitting), but the gauge itself stays.
         let (narrow, gauge_vis) = fit_status_row(20, &left, &provider, "1% · 9.5K/1M");
         assert_eq!(gauge_vis, 12);
         assert!(flashagent_tui::strip_ansi(&narrow).ends_with("1% · 9.5K/1M"));

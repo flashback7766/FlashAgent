@@ -507,7 +507,7 @@ fn the_recap_waits_until_the_user_has_gone_quiet() {
     // The quiet period is generous because this file runs every scenario in
     // parallel and each one starts a real binary in a pseudo-terminal: on a
     // loaded runner the pauses in this test stretch too, and at eight seconds
-    // they crossed the quiet period, so the app — rightly — thought the user
+    // they crossed the quiet period, so the app (rightly) thought the user
     // had stopped typing. Typing here has to outlast the period by a clear
     // margin, and the pause between keys has to sit far inside it.
     let term = Term::start_with_env(&home, &["-y"], COLS, ROWS, &[("FLASHAGENT_RECAP_IDLE_SECS", "20")]);
@@ -4642,7 +4642,7 @@ fn a_question_card_under_the_work_box_does_not_open_a_second_box() {
     // Wait for the card's own row, not for the question text: the turn says
     // "Asking user: Which port?" into the transcript first, and on a slow
     // runner that line is on screen several frames before the card replaces the
-    // composer. Not the card's title either — joined under the work box the
+    // composer. Not the card's title either: joined under the work box the
     // card draws no top edge, so its title is not on the screen at all, which
     // is the point of this test.
     let screen = term.wait_for("1. 8080", WAIT);

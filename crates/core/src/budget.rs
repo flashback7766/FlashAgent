@@ -66,7 +66,7 @@ impl Budget {
     /// happens to have configured, the built-in ones are the product.
     ///
     /// The reserve is never spent: the total is a ceiling, not a target. What
-    /// the prompt did not take is the built-in schemas' — they are what the
+    /// the prompt did not take is the built-in schemas': they are what the
     /// rest of the budget is for.
     pub fn tool_allowance(&self, prompt_tokens: usize) -> usize {
         // What the prompt really took, up to its own ceiling.

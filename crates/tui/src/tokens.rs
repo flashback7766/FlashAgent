@@ -40,7 +40,7 @@ pub(crate) struct TokenTracker {
     /// What the server last said it read for a whole request. It is the one
     /// honest size of the prompt: a proxy in front of the model (flashmodeld)
     /// prepends a system prompt, tools and memory of its own, and the chat
-    /// template wraps what both wrote — none of it visible to the app's own
+    /// template wraps what both wrote, none of it visible to the app's own
     /// counting. The context bar takes this as a floor; it describes the
     /// request it was reported for, so a new turn starts without it.
     pub(crate) server_prompt: Option<usize>,
@@ -99,7 +99,7 @@ impl TokenTracker {
         // nothing. The first request of a turn used to inherit it: only the
         // second step on cleared the buffer, so a regenerate measured its
         // answer against the answer it replaced and the ratio came out
-        // impossible — which is what walked the learned counts off.
+        // impossible, which is what walked the learned counts off.
         self.request_text.clear();
         self.request_had_tool = false;
         self.server_prompt = None;
@@ -601,7 +601,7 @@ mod tests {
     #[test]
     fn a_new_turn_does_not_measure_its_prefill_with_the_last_turns_cache_share() {
         // The learned prefill stats are what the MTP presets are tuned by, and
-        // they are written from the first token of a turn — before the server has
+        // they are written from the first token of a turn, before the server has
         // reported this turn's cache hit. Carrying the previous turn's share
         // into it recorded a 90%-cached sample for a cold prompt, and a cold
         // prompt's real figure (every token evaluated) only corrected it
@@ -765,8 +765,8 @@ mod tests {
     fn a_new_turn_does_not_inherit_the_answer_it_replaces() {
         // The first request of a turn never used to clear the text buffer:
         // only the second step on did. A regenerate therefore measured its
-        // answer against a text that still held the answer it was replacing —
-        // the ratio came out impossible, and the learned correction moved the
+        // answer against a text that still held the answer it was replacing.
+        // The ratio came out impossible, and the learned correction moved the
         // count with every retry.
         let mut t = TokenTracker::new("m".into());
         t.on_turn_start("m".into(), 0);
@@ -783,8 +783,8 @@ mod tests {
     #[test]
     fn the_server_s_prompt_count_stands_until_the_next_turn() {
         // The floor the context bar stands on is the prompt of the request it
-        // was reported for: a new turn — a regenerate above all, which just
-        // cut the history — estimates fresh until the server speaks again.
+        // was reported for: a new turn (a regenerate above all, which just
+        // cut the history) estimates fresh until the server speaks again.
         let mut t = TokenTracker::new("m".into());
         t.on_turn_start("m".into(), 0);
         assert_eq!(t.server_prompt, None);

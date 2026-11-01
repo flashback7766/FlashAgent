@@ -223,8 +223,8 @@ impl ProviderProfile {
     ///
     /// By scheme and host, not by the whole address, the way a preset is
     /// found: an address says what speaks there, so `http://localhost:11434`
-    /// and `http://localhost:11434/v1` are one Ollama — the first its own
-    /// dialect, the second the OpenAI-compatible side — and saving it twice
+    /// and `http://localhost:11434/v1` are one Ollama (the first its own
+    /// dialect, the second the OpenAI-compatible side) and saving it twice
     /// must not leave two providers behind. Everything after the host must
     /// then match too, apart from that pair: a gateway that routes by path
     /// (`/v1/team-a`, `/v1/team-b`) is several providers on one host, and a
@@ -931,7 +931,7 @@ impl AppConfig {
     }
 
     /// Whether the run can already start on its own: a server to talk to and a
-    /// model named. Used to skip the setup wizard — someone who passed
+    /// model named. Used to skip the setup wizard: someone who passed
     /// `--url` and `--model`, or who has both in the environment, has already
     /// answered every question the wizard would ask, and being asked them again
     /// is the wizard insisting on being noticed rather than on being needed.

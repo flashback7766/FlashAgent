@@ -240,7 +240,7 @@ const MEMORY_TYPE: Param = one_of(
 
 const MEMORY_SCOPE: Param = one_of(
     "scope",
-    "Use 'global' for anything about the USER — how they work, what they prefer, corrections they gave you — so it follows them into every project. Use 'project' only for facts about this codebase. A sentence that starts with 'I' or 'the user' is global.",
+    "Use 'global' for anything about the USER (how they work, what they prefer, corrections they gave you), so it follows them into every project. Use 'project' only for facts about this codebase. A sentence that starts with 'I' or 'the user' is global.",
     &["project", "global"],
 );
 
@@ -347,7 +347,7 @@ pub static TOOLS: &[ToolDef] = &[
     ToolDef {
         name: "run_shell",
         description: "Run a command in the working directory. Two forms, and the arguments say which: give `command` to run something, or `task_id` to read or stop a background task. \n\
-             - A server, a watcher, a build or anything that runs for minutes: background:true, which returns a task_id at once. When the result says the work is now a background task, the turn is over — say what you started and stop; a notice arrives when it exits.\n\
+             - A server, a watcher, a build or anything that runs for minutes: background:true, which returns a task_id at once. When the result says the work is now a background task, the turn is over: say what you started and stop; a notice arrives when it exits.\n\
              - A foreground command is killed after timeout_ms (default 120000, ceiling 600000) and reports that it was, with the note that it may already have changed something. A turn waiting on a shell cannot steer or be interrupted, so a long job in the foreground is a turn that cannot answer.\n\
              - Output comes back as the result, capped and marked where it was cut: a long log is a tail, not the whole thing.\n\
              - A refused call is the permission layer or the user, not a mistake in the command: changing the command is what gets it through.",
@@ -532,7 +532,7 @@ pub static TOOLS: &[ToolDef] = &[
     },
     ToolDef {
         name: "view_image",
-        description: "Look at an image in the project — a diagram, a screenshot, a mockup. The picture itself comes back, so describe what you see rather than guessing from the file name.",
+        description: "Look at an image in the project: a diagram, a screenshot, a mockup. The picture itself comes back, so describe what you see rather than guessing from the file name.",
         params: &[s("path", "Path to the image inside the project (png, jpg, gif, webp, bmp).")],
         required: &["path"],
         has_header: true,
@@ -608,7 +608,7 @@ pub static TOOLS: &[ToolDef] = &[
     },
     ToolDef {
         name: "review_agent",
-        description: "Record what you made of a subagent's report, once you have checked it yourself. Required before you act on a report: read the files it names, or run what it suggests, then pass the verdict — verified, refuted, or partial — and say in one line what you checked. This is how a wrong reading is caught rather than passed on.",
+        description: "Record what you made of a subagent's report, once you have checked it yourself. Required before you act on a report: read the files it names, or run what it suggests, then pass the verdict (verified, refuted, or partial) and say in one line what you checked. This is how a wrong reading is caught rather than passed on.",
         params: &[
             s("agent", "The agent_id of the subagent whose report you are reviewing."),
             one_of(
@@ -960,7 +960,7 @@ mod tests {
     }
 
     /// `run_shell` spent a release carrying `content`, pasted whole from
-    /// `write_file` — the handler has no such field, so a model that filled it
+    /// `write_file`: the handler has no such field, so a model that filled it
     /// in had it dropped without a word. The check above cannot see that, being
     /// in the crate that declares the schemas rather than the one that reads
     /// them, so the argument list is pinned here instead.

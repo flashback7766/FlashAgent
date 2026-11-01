@@ -300,7 +300,7 @@ impl Store {
             // The block runs from BEGIN to the END after it, or to the end of
             // the file when the closing marker never arrived. The reader reads
             // it the same way, so the two cannot disagree; and an END in the
-            // owner's own text before the block closes nothing — searching
+            // owner's own text before the block closes nothing: searching
             // from the start used to take it for the block's own and append a
             // second block beside the first.
             Some(start) => {
@@ -366,8 +366,8 @@ mod tests {
 
     #[test]
     fn rewriting_does_not_append_a_second_block_to_a_mangled_index() {
-        // The owner's own text can hold the closing marker — a paste from
-        // these docs, say — before the block begins. The writer used to take
+        // The owner's own text can hold the closing marker (a paste from
+        // these docs, say) before the block begins. The writer used to take
         // that for the block's own end and append a whole second block beside
         // the first; its entries then read as the owner's instructions.
         let (store, _d) = temp_store();

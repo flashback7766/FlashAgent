@@ -43,8 +43,8 @@ pub fn repair_json(input: &str) -> Option<String> {
 /// Whether the body is a whole JSON value: every string closed and every
 /// structure closed, so that reading it invents nothing.
 ///
-/// The cosmetics may be wrong — smart quotes, Python literals, a trailing
-/// comma — and are fixed the way [`repair_json`] fixes them. A body cut
+/// The cosmetics may be wrong (smart quotes, Python literals, a trailing
+/// comma) and are fixed the way [`repair_json`] fixes them. A body cut
 /// off in the middle is not whole: completing it would write something the
 /// model never wrote, and a call made of it would run with arguments the
 /// model did not mean.
@@ -252,7 +252,7 @@ pub fn coerced_args(args_json: &str, tool: &str, schema: &serde_json::Value) -> 
 
 /// Undoes the one corruption a valid JSON parse commits on its own. A model
 /// writing a Windows path unescaped puts `\t`, `\f`, `\b`, `\n` and `\r`
-/// where a backslash and a letter were meant — all of them legal escapes, so
+/// where a backslash and a letter were meant: all of them legal escapes, so
 /// the JSON parses and `C:\temp` arrives as `C:` + a tab + `emp`. Only a
 /// value that starts like a drive path is touched, and only when it holds one
 /// of those controls: prose with real tabs in it does not begin `C:`.
@@ -801,7 +801,7 @@ mod tests {
             coerced_args(r#"{"path":"C:\temp\folder"}"#, "read_file", &schema).as_deref(),
             Some(r#"{"path":"C:\\temp\\folder"}"#)
         );
-        // Half-escaped — the doubled backslash survived, the single one did not.
+        // Half-escaped: the doubled backslash survived, the single one did not.
         assert_eq!(
             coerced_args(r#"{"path":"C:\\tools\run"}"#, "read_file", &schema).as_deref(),
             Some(r#"{"path":"C:\\tools\\run"}"#)

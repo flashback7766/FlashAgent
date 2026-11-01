@@ -463,7 +463,7 @@ impl CheckReport {
     ///
     /// A single run of this check does not decide anything. Measured on the same
     /// model and the same code, three runs of twelve scenarios came out 9, 11
-    /// and 9 — so a number from one run is worth about as much as a coin. What
+    /// and 9, so a number from one run is worth about as much as a coin. What
     /// separates a real weakness from a coin flip is whether it survives the
     /// repeats, and that is what this is for.
     pub fn stability(runs: &[&CheckReport]) -> (Vec<String>, Vec<String>) {
@@ -530,7 +530,7 @@ impl CheckReport {
         match (passed, total) {
             (p, t) if p == t => "drives tools reliably",
             (p, t) if p + 1 == t => "usable, with one rough edge",
-            (p, t) if p * 2 >= t => "unreliable — expect to babysit it",
+            (p, t) if p * 2 >= t => "unreliable: expect to babysit it",
             (0, _) => "cannot drive tools",
             _ => "mostly fails to drive tools",
         }
@@ -633,7 +633,7 @@ pub fn is_chat_model(id: &str) -> bool {
 /// prompt exists to fix: a model that answers in prose instead of making the
 /// call, and one that stops after the first step of a chain. Both scored the
 /// same with and without it, which is what made the instrument worth trusting
-/// enough to look at — and worth checking against the real thing.
+/// enough to look at, and worth checking against the real thing.
 fn system(task: &str) -> ChatMessage {
     static PROMPT: std::sync::OnceLock<String> = std::sync::OnceLock::new();
     let prompt = PROMPT.get_or_init(|| {
@@ -646,7 +646,7 @@ fn system(task: &str) -> ChatMessage {
 
 /// The same, for the delegation scenarios. [`system`] builds the prompt the
 /// agent runs with in a session with no subagents, which leaves out every rule
-/// about handing work over — so a check on delegation built that way would be
+/// about handing work over, so a check on delegation built that way would be
 /// grading a model on rules it was never told.
 fn system_delegating(task: &str) -> ChatMessage {
     static PROMPT: std::sync::OnceLock<String> = std::sync::OnceLock::new();
@@ -870,7 +870,7 @@ pub async fn check_model(llm: &dyn LlmSource, model: &str, timeout: Duration) ->
                 secs: turn.secs, tokens: turn.tokens,
             },
             (None, 1) => Outcome::Partial {
-                detail: "one call for two files — the loop will need a second turn".to_string(),
+                detail: "one call for two files: the loop will need a second turn".to_string(),
                 secs: turn.secs, tokens: turn.tokens,
             },
             (None, _) => Outcome::Pass {
@@ -1017,7 +1017,7 @@ pub async fn check_model(llm: &dyn LlmSource, model: &str, timeout: Duration) ->
             args_json: args,
         }];
         // What a real loop hands back: this file's imports, which is what makes
-        // The last result names none, which is the end the task defines — and it has
+        // The last result names none, which is the end the task defines, and it has
         // to be the tenth, or a model that follows the chain perfectly is failed
         // for stopping one step early.
         let next = match TEN_STEPS.saturating_sub(steps) {
@@ -1128,7 +1128,7 @@ pub async fn check_model(llm: &dyn LlmSource, model: &str, timeout: Duration) ->
             0 => "no imports".to_string(),
             left => format!("use crate::step_{left};"),
         };
-        // One read fails. It is not a dead end — the chain is still walkable —
+        // One read fails. It is not a dead end (the chain is still walkable)
         // and abandoning a long job because one read failed is the thing worth
         // knowing about.
         let body = if steps == TEN_STEPS / 2 {
@@ -1673,7 +1673,7 @@ mod tests {
             // 17. Does not run the search it handed over; agent is running.
             //     Model receives history with spawn_agent + still_running, responds with text.
             text("agent-1 is still searching. I will wait for its report."),
-            // 18. Nothing back yet, user asks — model invents nothing.
+            // 18. Nothing back yet, user asks; model invents nothing.
             //     Model receives history with spawn_agent + still_running + user question.
             text("agent-1 is still running. I have no file to name yet."),
             // 19. Child reported a finding; model reads that file.

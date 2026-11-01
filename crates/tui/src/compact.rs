@@ -119,7 +119,7 @@ const CHUNK_SHARE: usize = 80;
 /// The room one request may carry: the window minus what every request
 /// carries whatever the conversation is.
 ///
-/// The window minus the prompt, the memory and the schemas — once. What the
+/// The window minus the prompt, the memory and the schemas (once). What the
 /// turn already holds is the conversation itself, and it is what gets
 /// summarized, so subtracting it here would count it twice: the room would
 /// come out far smaller than the window, and a conversation that fits would
@@ -218,7 +218,7 @@ impl flashagent_core::Compactor for TurnCompactor {
         // The window filled up in the middle of a task, so the summary is
         // exhaustive: this is the model's only memory of what it already did.
         // The room one request may carry: the window minus the prompt, the
-        // memory and the schemas — once. What the turn has used so far is the
+        // memory and the schemas (once). What the turn has used so far is the
         // conversation itself, and it is what gets summarized.
         let room = room_for(self.capacity, self.fixed);
         match compact_running_turn_with_sink(
@@ -697,7 +697,7 @@ async fn summarize_in_parts(
     let msgs = reduce_request(&parts, prior_summary, focus_prompt, detail);
     let answer = ask_for_summary(source, msgs, opts, sink).await?;
     // Every call counts: the parts and the reduction that put them together.
-    // The card says what the compaction cost, and it cost all of them — the
+    // The card says what the compaction cost, and it cost all of them; the
     // reduction alone is a fraction of the price.
     let usage = Some(add_usage(usage.take(), answer.usage));
     Some((answer.text.trim().to_string(), usage))
@@ -763,7 +763,7 @@ fn add_opt(a: Option<i64>, b: Option<i64>) -> Option<i64> {
 /// It used to be a fresh system prompt with the whole transcript flattened into
 /// one user message. That shares no tokens at all with what the model received
 /// during the turn, so prompt caching could not touch it and every compaction
-/// prefilled the entire conversation from zero — measured at two and a half
+/// prefilled the entire conversation from zero: measured at two and a half
 /// minutes for 80k tokens, on a route that does tens of thousands a second when
 /// it is warm. Sending the conversation as it stands, and the instruction after
 /// it, lets the cached prefix carry the cost and leaves only the summary to be
@@ -771,8 +771,8 @@ fn add_opt(a: Option<i64>, b: Option<i64>) -> Option<i64> {
 /// How much of the conversation the summary has to carry.
 ///
 /// A `/compact` the person asked for can be short: they will read the archive
-/// if they need the rest. A compaction the window forced is a different thing —
-/// the model has to finish a task with the summary as its only memory of what
+/// if they need the rest. A compaction the window forced is a different thing.
+/// The model has to finish a task with the summary as its only memory of what
 /// it already did, so anything dropped is dropped for good, mid-task.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Detail {
@@ -1071,7 +1071,7 @@ mod tests {
         );
     }
 
-    /// The room is the window minus the fixed part — once. What the turn
+    /// The room is the window minus the fixed part (once). What the turn
     /// already holds is the conversation itself, and it is what gets
     /// summarized: subtracting it counted the same tokens twice and left a
     /// room far smaller than the window, or none at all.

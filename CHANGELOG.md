@@ -13,8 +13,8 @@
   The prompt count the server reported for the previous request stayed as a
   floor, so after a summary landed the gauge still showed the old total until
   the user typed again; the transcript baseline lagged the same way. A real
-  summary now retires both at once on all three paths — manual, between turns
-  and mid-turn — so the number describes the rewritten history immediately.
+  summary now retires both at once on all three paths (manual, between turns
+  and mid-turn), so the number describes the rewritten history immediately.
 - **A compaction that keeps nothing changes nothing.** A zero `saved` count is
   a success only when a report came back with it; a failed or empty summary
   leaves the transcript, the count, the archive and the baseline as they were.
@@ -22,8 +22,8 @@
   own footer is gone, so an automatic compaction adds the card and nothing
   else.
 - **The waiting card has a clock.** It shows elapsed time and a moving shimmer
-  while the summary is being written — one line, wrapped to the terminal width
-  — so a slow compaction looks alive instead of frozen.
+  while the summary is being written (one line, wrapped to the terminal width),
+  so a slow compaction looks alive instead of frozen.
 - **A mid-turn compaction keeps its archive and its shortened history.** The
   event fires after the loop syncs the history it will save, so the card
   describes the new transcript rather than the old one, and the exact archive
@@ -116,7 +116,7 @@ its result on the next Responses request, and the final `responses-ok` answer.
 ## b629 — the AgentRouter preset works, and its protocol can change
 
 - **The preset presents itself.** The AgentRouter gateway refuses every
-  client it does not know before reading a key — but the preset now carries
+  client it does not know before reading a key, but the preset now carries
   the User-Agent of a client it does, so picking it in the wizard lists
   models and talks. The editor's User-Agent field changes it.
 - **Editing only the User-Agent reconnects.** The save path compared the
@@ -131,7 +131,7 @@ its result on the next Responses request, and the final `responses-ok` answer.
 ## b628 — the agent can name itself what the gateway accepts
 
 Seen live: AgentRouter ([agentrouter.org](https://agentrouter.org)) refused
-every request with "unauthorized client detected" — it serves the coding
+every request with "unauthorized client detected": it serves the coding
 agents it knows (Claude Code, Codex, OpenCode) and reads no key from any
 other client, so the provider looked dead before a key was ever sent.
 
@@ -139,34 +139,34 @@ other client, so the provider looked dead before a key was ever sent.
   for every provider; a provider's own **User-Agent** field in the editor
   names it for that one alone, and rides every request as a header. Without
   either, the agent keeps its own honest name.
-- **AgentRouter is a preset** — `https://agentrouter.org/v1`,
-  `AGENTROUTER_API_KEY` — second in the cloud list, with the README saying
+- **AgentRouter is a preset** (`https://agentrouter.org/v1`,
+  `AGENTROUTER_API_KEY`), second in the cloud list, with the README saying
   what its gate demands.
 
 ## b627 — a compaction that freed nothing says nothing
 
 Seen live: "/compact" on a two-message conversation answered with "Context
-compacted: 2 messages became a summary, about 0 tokens freed" — a line that
+compacted: 2 messages became a summary, about 0 tokens freed": a line that
 read as a bug report about a compaction that never had anything to chew.
 
 - **The standing line is earned, not owed.** The summary card is the result;
   the line about what went and what it freed appears only when the
   compaction actually freed something worth naming (256 tokens). A small
   one leaves the card and nothing else.
-- A single exchange can still be compacted by hand — that stands. Only the
+- A single exchange can still be compacted by hand; that stands. Only the
   line that said nothing went.
 
 ## b626 — every clickable thing answers, and every card closes
 
 - **Menus light their rows.** The command palette and the model, effort,
-  provider and session menus mark the row under the pointer — a quiet ·
-  where the selection's › would be — and a clicked row keeps a pressed look
+  provider and session menus mark the row under the pointer (a quiet ·
+  where the selection's › would be), and a clicked row keeps a pressed look
   for a moment, the same treatment the other screens' rows already had. The
   whole item answers its hover: label, description and the hidden-match row
   are one row to the pointer.
 - **Every card closes from its own corner.** The top border's last dash
-  becomes an amber ✕ — the card keeps its width, one cell of the run now
-  says close — and a click there closes what Esc closes, on every menu,
+  becomes an amber ✕ (the card keeps its width, one cell of the run now
+  says close), and a click there closes what Esc closes, on every menu,
   screen and modal.
 - **The welcome card's buttons light exactly their own cells** under the
   pointer, and flash where they were clicked; the context gauge and the
@@ -175,12 +175,12 @@ read as a bug report about a compaction that never had anything to chew.
 
 ## b625 — the mouse reaches everything on the screen
 
-The mouse had the transcript and the settings screen; everything else —
-menus, the welcome card, the status line — kept answering keys only. Seen
+The mouse had the transcript and the settings screen; everything else
+(menus, the welcome card, the status line) kept answering keys only. Seen
 live: Ctrl+K's command palette ignored clicks entirely.
 
 - **Every menu answers the mouse now.** The command palette and the model,
-  effort, provider and session menus — one widget under all of them — move
+  effort, provider and session menus (one widget under all of them) move
   their selection with the wheel (stopping at the ends, not wrapping), and a
   click on a row selects it and runs it, the way Enter does; a click on the
   row the selection already sits on confirms it, so the second click is the
@@ -195,7 +195,7 @@ live: Ctrl+K's command palette ignored clicks entirely.
   deliberately not a button.
 - **The context gauge at the end of the status line opens what F1 opens.**
 - **The scrollbar shows itself only to a hand near the right edge of the
-  transcript** — or one already holding the thumb. Bolted over the last
+  transcript**, or one already holding the thumb. Bolted over the last
   column, always on, it was furniture nobody asked for.
 - **The "↓ N more lines below" marker is clickable**: it returns to the
   bottom, as End does.
@@ -212,7 +212,7 @@ layers of JSON, and the transcript printed the dump.
 
 - **The provider's own sentence is dug out of any shape.** `error.message`, a
   bare `error` string, `detail` (FastAPI's validation list included),
-  `errors[].message`, a `message` two levels deep — the first readable one
+  `errors[].message`, a `message` two levels deep: the first readable one
   wins, and a gateway's "Upstream request failed:" wrapper is stripped. The
   sentence becomes the headline; the raw body keeps its dim line under it,
   for the transcript and the bug report.
@@ -226,12 +226,12 @@ layers of JSON, and the transcript printed the dump.
 ## b619 — the voice example is no longer a turn the model goes on about
 
 Seen live: every model, on the first message of a fresh conversation, offered
-to continue about `git stash` — a topic nobody had raised. The cause was the
+to continue about `git stash`: a topic nobody had raised. The cause was the
 voice system itself: to teach a chosen personality, FlashAgent sent a fake
 earlier exchange in that voice (user: "what does `git stash` do?"; assistant:
 a sample answer) ahead of the real history, and never showed it anywhere. The
-model read it as its own previous turn, and a greeting — a message with
-nothing else to hold on to — got an answer acknowledging "the previous
+model read it as its own previous turn, and a greeting (a message with
+nothing else to hold on to) got an answer acknowledging "the previous
 topic".
 
 - **The sample reply is quoted inside the system prompt now, not sent as
@@ -246,20 +246,20 @@ topic".
 
 ## b618 — OpenCode Go, first among the cloud APIs
 
-OpenCode's Go plan ([opencode.ai/go](https://opencode.ai/go)) — a $10/month
+OpenCode's Go plan ([opencode.ai/go](https://opencode.ai/go)), a $10/month
 subscription for a curated set of coding models: Kimi, GLM, DeepSeek, MiniMax,
-Claude Haiku and more behind one key — is now the first cloud preset in the
+Claude Haiku and more behind one key, is now the first cloud preset in the
 wizard and the provider table, with its set-up steps written out in the README.
 
 - **The preset speaks the gateway's language.** Its Go routes refuse a request
-  that carries no `x-opencode-session` header — the id their routing and
+  that carries no `x-opencode-session` header: the id their routing and
   prompt caching key on. FlashAgent now sends one: a fresh id per
   conversation, the session's own id on resume (a resumed conversation keeps
   its route and its cache), and it survives a provider switch, because the
   endpoint moves while the conversation does not. The header goes to
   `opencode.ai` hosts only.
-- **The agent names itself.** Requests carry `User-Agent: flashagent/<version>`
-  — the Go API asks outside agents to say who is speaking, and reqwest sends
+- **The agent names itself.** Requests carry `User-Agent: flashagent/<version>`:
+  the Go API asks outside agents to say who is speaking, and reqwest sends
   no User-Agent of its own.
 - **Their model list is read whole.** The window (`limit.context`), tool
   support (`capabilities.tools.supported`), vision (`modalities.input`) and
@@ -276,8 +276,8 @@ wizard and the provider table, with its set-up steps written out in the README.
 
 ## b617 — the border keeps its own colour past a title
 
-The dashes of a titled card's top border — the model menu, the effort
-menu, settings, tools, notices, the narrow welcome — carried no colour of
+The dashes of a titled card's top border (the model menu, the effort
+menu, settings, tools, notices, the narrow welcome) carried no colour of
 their own and inherited the row's after the title's reset: on an amber
 theme the border turned amber from the title to the corner while the
 walls stayed grey. The border colour now runs the whole top rail,
@@ -286,7 +286,7 @@ exactly as it already did on the memory, MCP and approval cards.
 ## b616 — a thought answers its header, and a long one opens to a glance
 
 - **A block folds from its header alone.** Every row of an open thought
-  or tool call used to be a click target — a stray press in the middle of
+  or tool call used to be a click target: a stray press in the middle of
   a page of thinking folded it away. The body of an open block is text to
   read now; the header is the control, and the hover marks exactly what a
   click reaches.
@@ -297,7 +297,7 @@ exactly as it already did on the memory, MCP and approval cards.
   request, so a fresh open is a glance again.
 - **The header holds still while a block opens or folds.** The rows the
   block gained or lost shift the view by the same amount, so the thing the
-  pointer is on stays under it — the box grows downward, not into space.
+  pointer is on stays under it: the box grows downward, not into space.
 
 ## b615 — the second update in one sitting no longer shoots itself
 
@@ -306,7 +306,7 @@ with "could not move the current binary aside: No such file or directory".
 
 - **A process that has updated once installs beside its parked copy, not
   into it.** After an in-app update the running process lives under the
-  parked backup name — `/proc/self/exe` follows the rename — so the next
+  parked backup name (`/proc/self/exe` follows the rename) so the next
   update resolved its target to that backup and aimed at the copy the
   rollback exists for. The install now lands where the last update
   placed it, beside the parked copy.
@@ -322,7 +322,7 @@ with "could not move the current binary aside: No such file or directory".
 ## b614 — the transcript answers the hover too
 
 The cards marked the row the pointer was on; the transcript's own
-clickable rows — the thoughts, the tool calls — stayed silent under the
+clickable rows (the thoughts, the tool calls) stayed silent under the
 mouse, though a click there folds them. They take the same quiet
 background now, and only those: an answer beside a thought gives no hint,
 because a click on it has nothing to do.
@@ -332,8 +332,8 @@ because a click on it has nothing to do.
 Three live failures of b612's mouse, seen against a real terminal:
 
 - **The copy happens when the button comes up, not on every motion.** The
-  drag used to write the clipboard on each event it was given — a new
-  connection to the clipboard manager per movement — and the highlight
+  drag used to write the clipboard on each event it was given (a new
+  connection to the clipboard manager per movement), and the highlight
   crawled screens behind the hand. The drag paints; the release copies,
   once.
 - **A press on a card no longer starts an invisible selection.** The
@@ -341,8 +341,8 @@ Three live failures of b612's mouse, seen against a real terminal:
   screen copied its text on release while painting nothing. Only a press
   that reaches the transcript starts a selection now.
 - **The card answers the row the pointer is on, not the row beneath.**
-  The screen row where an open card begins was computed one line low —
-  the blank separator between conversation and card was counted twice —
+  The screen row where an open card begins was computed one line low
+  (the blank separator between conversation and card was counted twice),
   so every hover, click and flash landed one row below the pointer, and
   the card was driven with the mouse held a line too high.
 
@@ -352,14 +352,14 @@ The first phase of the interface rework. The mouse used to work on the
 transcript alone; now it works on everything the screen shows.
 
 - **The wheel scrolls every screen.** Menus, settings, tools, rules,
-  notices, providers, sampling, memory, MCP, tasks — each moves its own
+  notices, providers, sampling, memory, MCP, tasks: each moves its own
   list, and stops at its ends instead of wrapping. A screen that cannot
   scroll leaves the wheel unspent rather than passing it to the
   conversation behind it.
 - **Clicks do what the keys do.** A settings row is focused by the first
   click and acts on the second, as Enter would; the tabs line switches
   tabs by where the label sits. A tool row focuses, then toggles. Rules
-  and notices select — taking one back stays with the keys, because a
+  and notices select: taking one back stays with the keys, because a
   click is a poor place for a destructive surprise.
 - **A scrollbar for the transcript.** A thumb at the right edge shows
   where the view sits and follows the hand as it is dragged; a press on
@@ -376,19 +376,19 @@ transcript alone; now it works on everything the screen shows.
   The app measures each model against its answers: the server says how many
   tokens it wrote, the app has the text, and the two are a correction the
   count is scaled by. The first request of a turn never cleared the text it
-  measures with — only the second step on did — so a regenerate measured its
+  measures with (only the second step on did), so a regenerate measured its
   answer against a buffer that still held the answer it was replacing, and
   the ratio came out impossible. Each request then moved the correction half
   way to an impossible figure, and the saved factors show where that went:
   one model's Cyrillic factor at 4.1, another's Latin at 0.24. A sample no
   real tokenizer could be the cause of is now refused whole, and factors
-  saved outside the credible band are not loaded back — the file's poison
+  saved outside the credible band are not loaded back: the file's poison
   does not outlive the fix.
 - **The context bar stands on what the server actually read.** A "yo" behind
   flashmodeld read as 9755 tokens on the server and 2.7k on the bar: the
   proxy prepends a system prompt, tools and memory of its own, and the chat
   template wraps what both wrote, none of it visible to the app's counting.
-  The server's own prompt count is now the floor of the bar — it describes
+  The server's own prompt count is now the floor of the bar: it describes
   the request it was reported for, so it clears when a turn starts and when
   another session takes the screen, and a smaller report never lowers the
   bar.
@@ -397,10 +397,10 @@ transcript alone; now it works on everything the screen shows.
 
 The same build as b610, cut stable: the rolling beta held up. The last three
 releases closed nineteen quiet failures, each with a test that fails without
-it — b606's audit, b609's four data-loss holes, b610's crash-safe writes —
+it (b606's audit, b609's four data-loss holes, b610's crash-safe writes),
 and every one of them went through CI on Linux, macOS and Windows. Sessions,
 memory and snapshots now survive what used to eat them: half-written files,
-full disks, clean quits — and the welcome header fits its column whatever a
+full disks, clean quits. And the welcome header fits its column whatever a
 version tag says. From here the releases slow down and grow up.
 
 ## b610 — every written file survives a crash, and the session keeps its own history
@@ -408,7 +408,7 @@ version tag says. From here the releases slow down and grow up.
 - **Memory notes, snapshots and session files are written atomically.** A
   save now goes through a temporary beside the final name and renames into
   place, so a crash, a full disk or a read-only folder leaves the previous
-  file instead of half of the new one — the note, the session or the
+  file instead of half of the new one: the note, the session or the
   snapshot manifest that was on disk stays usable. Permissions survive the
   rename: a deliberately private note does not suddenly become world-
   readable.
@@ -421,7 +421,7 @@ version tag says. From here the releases slow down and grow up.
   the default umask before.
 - **A clean quit no longer erases the turns a compaction took out of the
   history.** The autosave always wrote the archive of the earlier turns,
-  but the last save on exit passed an empty one — a session you left
+  but the last save on exit passed an empty one: a session you left
   cleanly came back with its oldest messages gone.
 
 ## b609 — the turn keeps what the screen showed, and paths survive their own escapes
@@ -432,13 +432,13 @@ The four holes left open by the b606 audit, closed.
   nudge was holding back.** The "answer with a call, not an apology" nudges
   hide the model's bad answer from the next request by holding it out of the
   history; when the turn ended or turned before that request was answered,
-  the held answer went with it — the screen had shown words that reached
+  the held answer went with it: the screen had shown words that reached
   neither the model nor the session file. It goes back on every such exit:
   before the steer that answers it, into the summary a compaction keeps, and
   into whatever a cancelled or failed turn hands back.
 - **Rewriting the memory index no longer appends a second block to a mangled
-  one.** An END marker in the owner's own text above the block — a paste from
-  these docs, say — was taken for the block's own, and every later write left
+  one.** An END marker in the owner's own text above the block (a paste from
+  these docs, say) was taken for the block's own, and every later write left
   two blocks, the older of which read as the owner's instructions. The writer
   now reads the file the way the reader does: from BEGIN to the END after it,
   or to the end of the file when the closing marker never arrived.
@@ -453,14 +453,14 @@ The four holes left open by the b606 audit, closed.
 
 ## b606 — nine quiet failures found by a fresh audit, each closed with a test
 
-Everything since the b600 audit was re-read against it — five zones by fresh
+Everything since the b600 audit was re-read against it: five zones by fresh
 review, the delta of the rest in one pass. What follows is what that found.
 
 - **Two tool calls without an index are two calls again.** A server that
   numbers nothing and sends the first call with empty arguments (or none)
   had it swallowed by the second: one call ran, the other vanished without
-  an error. A call that never received arguments is done, not being written
-  — a different name after it begins its own call, the same name is still
+  an error. A call that never received arguments is done, not being written:
+  a different name after it begins its own call, the same name is still
   the fragment repeat it always was.
 - **A recap that lands after a switch of sessions no longer names the one on
   screen.** Aborting the task cannot recall an answer already sent; it
@@ -484,14 +484,14 @@ review, the delta of the rest in one pass. What follows is what that found.
   from the root-and-`/v1` pair of one server speaking two dialects.
 - **`--tool-test --scenario` checks every key it is given.** A typo in the
   second key passed, widened the run to every scenario, and the report then
-  dropped it — minutes of model time for a check that showed nothing.
+  dropped it: minutes of model time for a check that showed nothing.
 - **A git command that times out stops the whole tree.** Git spawns what
   the repository configures (textconv, external diff); the timeout killed
   only git and left the driver running as an orphan while the error said
   everything was stopped.
 - **The atomic write refuses a dangling symlink instead of replacing it.**
   A link to a file that does not exist yet was quietly overwritten with a
-  regular file — the link itself is the owner's setup. And a file with a
+  regular file: the link itself is the owner's setup. And a file with a
   very long name is writable again: the temporary sibling's name is cut to
   a hint, since the process and the counter already make it unique.
 - **Memory: a block that was opened and never closed is the model's, not
@@ -502,12 +502,12 @@ review, the delta of the rest in one pass. What follows is what that found.
 - **A report reminder the compaction ate is owed again.** The once-per-turn
   reminder was counted as sent and then cleared without ever reaching the
   model; the counter is re-armed so the turn still gets its one reminder.
-- **The README grows a comparison table** — the structural differences
-  against the other terminal agents, checked and dated — and the test
+- **The README grows a comparison table** (the structural differences
+  against the other terminal agents, checked and dated), and the test
   counts in `docs/numbers.md` are re-counted (1,673 tests, 141 scenarios).
 - **A11 is closed** (owner decision): the OpenAI-compatible presets are one
-  client and are checked as one — re-confirmed live on OpenRouter's free
-  model, 17/20 on the twenty-scenario tool-calling check — and a preset
+  client and are checked as one (re-confirmed live on OpenRouter's free
+  model, 17/20 on the twenty-scenario tool-calling check), and a preset
   that turns out broken is fixed when reported. Every Track A milestone is
   done.
 
@@ -516,7 +516,7 @@ review, the delta of the rest in one pass. What follows is what that found.
 - **A session gets its name from the model.** The picker listed every
   conversation under its first prompt, which is often "hi", a pasted error or
   a greeting that says nothing about the work that followed. The recap
-  request — the one already made when the user goes quiet after a turn — now
+  request (the one already made when the user goes quiet after a turn) now
   also asks for a short name, and the session file keeps it. The picker lists
   the conversation under the name, and a resumed one keeps it. The first
   prompt stays the fallback, for a session that ended before the question was
@@ -530,8 +530,8 @@ review, the delta of the rest in one pass. What follows is what that found.
 ## b604 — a directory that was deleted stops killing the app
 
 - **A deleted folder no longer stops the start.** FlashAgent reads the folder
-  it was started in before anything else; when that folder is gone — a
-  removed worktree, a deleted directory under a still-open shell — it started
+  it was started in before anything else; when that folder is gone (a
+  removed worktree, a deleted directory under a still-open shell), it started
   in the home folder and says so, instead of dying with an operating-system
   error that said nothing useful.
 
@@ -602,8 +602,8 @@ below now.
   capped at 10k, the schemas get what is left, and a small window no longer
   trims the toolset. The schemas are still cut from the optional end if they
   ever outgrow the room, and what did not fit is reported rather than missing.
-- **The model is told where it is.** A short plan of the project — what is
-  where — rides in the prompt, marked as a plan and not as the truth of the
+- **The model is told where it is.** A short plan of the project (what is
+  where) rides in the prompt, marked as a plan and not as the truth of the
   project: it says to read a file before relying on it.
 - **Memory the model wrote is a record, not an order.** `MEMORY.md` held both
   the owner's text and the index the model writes; all of it was sent as
@@ -632,7 +632,7 @@ below now.
 
 - **One counter for every number the app shows.** The context bar divided
   bytes by four, the budget used a second rule, and the status line used a
-  tokenizer — three answers for one text. Everything now goes through
+  tokenizer: three answers for one text. Everything now goes through
   `flashagent_llm::count_tokens(model, text)`.
 - **The tokenizer is the closer one, and it learns.** For everything that is
   not OpenAI the app used `cl100k_base`, a table that was not the model's:
@@ -657,7 +657,7 @@ below now.
   request.
 - **The room is counted once.** The free space was "window minus prompt and
   schemas" and then minus "what is already used", which already included the
-  prompt and the schemas — and the conversation, which is what is being
+  prompt and the schemas, and the conversation, which is what is being
   compacted, was subtracted a third time. At 64k with 40k used the room came
   out zero, so nothing was cut and the request was refused. Three places that
   counted their own way now call `room_for`.
@@ -688,7 +688,7 @@ below now.
   applied by descending offset, which is also what the planner assumed.
 - **A write is atomic, and a failed batch is put back.** Files are written to
   a temporary file in the same folder, synced and renamed; when one file in a
-  batch fails, the files already written — including the one that failed —
+  batch fails, the files already written (including the one that failed)
   are restored from the bytes read before the first change. The message no
   longer promises a rollback that did not happen.
 - **`view_image` checks the size before it reads**, not after loading a
@@ -718,15 +718,15 @@ below now.
   call's arguments are whole, and the check for that is the same one the
   closing path uses.
 - **A truncated call is not executed.** The feeding path repaired a half
-  written argument object and ran it — a `write_file` landing with the tail
+  written argument object and ran it: a `write_file` landing with the tail
   missing. Both paths now use one rule for "the body is whole": a body that is
   not is handed over as text, whether or not the closing tag arrived.
 - **JSON repair understands `\d`, `\w`, `\s` and Windows paths.** A backslash
   before a character JSON does not allow is escaped instead of making the
   whole repair fail, and a backslash lost outside a string stays a backslash.
 - **Usage is read field by field.** A non-numeric `cached_tokens` no longer
-  cuts the chain short, and `cache_creation_input_tokens` — input the provider
-  wrote to its cache, and bills as input — is added to the prompt count.
+  cuts the chain short, and `cache_creation_input_tokens` (input the provider
+  wrote to its cache, and bills as input) is added to the prompt count.
 - **Text calls are not dropped when a native call is present.** One native
   call used to discard every text call in the same answer without running it
   or telling the model. Both now run, with the echoed duplicate of a native
@@ -754,8 +754,8 @@ below now.
   in one step.
 - **A base64 blob piped into an interpreter counts as a side effect.**
   `echo <blob> | base64 -d | sh` hid the command from every word-level check.
-- **Safe mode**: reading and editing inside the project, and nothing else —
-  the shell, the web and the subagents are off. It is a mode on top of the
+- **Safe mode**: reading and editing inside the project, and nothing else.
+  The shell, the web and the subagents are off. It is a mode on top of the
   permission mode, not instead of it, and the footer says when it is on.
 - **The updater verifies the checksum or refuses the file.** A release without
   a `sha256` in its manifest used to be accepted without a check, and on unix
@@ -802,8 +802,8 @@ below now.
 - **`/export md ~/notes/chat.md` writes where the person said**, makes the
   folders, adds the format's ending when it is left out, and quotes a path with
   spaces.
-- **A name one letter away from a real one is offered** — a model, a provider
-  or a skill — while a prefix is left alone, because it is not a typo.
+- **A name one letter away from a real one is offered** (a model, a provider
+  or a skill) while a prefix is left alone, because it is not a typo.
 - **A model or provider change is one line in the conversation**, attached to
   the message whose request it changes.
 - **The input field keeps its Shift and Caps Lock** on terminals that report
@@ -814,7 +814,7 @@ below now.
 1,658 tests across the workspace, 140 of them the real binary in a
 pseudo-terminal, clippy clean across the workspace. A stripped binary is
 19.0 MB; the app holds 57.5 MB of memory when idle, and about 47 MB of that
-is the tokenizer table the one counter loads — the price of counting the way
+is the tokenizer table the one counter loads: the price of counting the way
 the model counts.
 
 ## b573 — the question test waits for the card, not for the line about it
@@ -843,19 +843,19 @@ the model counts.
 
 ### The frame
 
-- **The work box is part of the input field, and cannot be scrolled away.** `card_start` was taken *after* the box was appended, so the box fell inside the chat slice: scrolling the conversation moved the subagent rows off screen while the composer stayed put, with nothing explaining the gap. It is now taken before, and the five places derived from it — the chat length, the unfold animation, the tall-card trim, the cursor row and the click-to-child mapping — are re-derived against the new boundary.
+- **The work box is part of the input field, and cannot be scrolled away.** `card_start` was taken *after* the box was appended, so the box fell inside the chat slice: scrolling the conversation moved the subagent rows off screen while the composer stayed put, with nothing explaining the gap. It is now taken before, and the five places derived from it (the chat length, the unfold animation, the tall-card trim, the cursor row and the click-to-child mapping) are re-derived against the new boundary.
 - **A card under the box no longer opens a second box.** The `joined` flag reached only the composer, so an approval, channel or question card each drew its own `╭─…─╮` underneath the `├─┤` seam, inside a frame that was never closed. A question is asked precisely while a child is running, so this was the common case and not a rare overlap.
 - **The scrolled marker sits directly above the work box**, and `scroll_max` returns zero when there is no room for it, so an accepted scroll offset always has a marker saying how much is below.
 - **The box is exactly as wide as the composer.** It was drawn two columns narrower, so the right-hand wall stepped at the seam. Subagent rows were also two columns short of the room inside the box, which is why a phase label read as `thinkin`; both are now measured against the same room, and the background-task row stopped counting an indent that is added outside its budget.
 
 ### The bar
 
-- **A child's output stopped being counted the moment the app carried its report to the model.** `deliver_task_notices` starts a turn to hand a finished child's answer to the parent, and `on_turn_start` resets the children's total — so every child that finished wiped the bar down to the parent's own output. A turn with three children behind it could read a fraction of what they had actually generated. The count is now put back around that turn; a prompt the user typed still starts the bar over.
+- **A child's output stopped being counted the moment the app carried its report to the model.** `deliver_task_notices` starts a turn to hand a finished child's answer to the parent, and `on_turn_start` resets the children's total, so every child that finished wiped the bar down to the parent's own output. A turn with three children behind it could read a fraction of what they had actually generated. The count is now put back around that turn; a prompt the user typed still starts the bar over.
 - Counts past 1000k are shown in millions rather than as thousands of thousands.
 
 ### The stream
 
-- **A frame lost mid-stream can no longer end a turn as a clean stop.** Two unreadable frames in a row were dropped for tolerance, and if one of them carried the finish reason the stream still reported `Stop`. The guard that refuses to run a possibly-truncated tool call therefore never fired, `repair_json` closed the half-written arguments, and the call ran — a file landing with its tail missing and no error anywhere. The parser now records the loss, and `[DONE]` inferred after one no longer emits a terminal event. The text that did arrive is still delivered, and a gateway's keep-alive noise followed by more real frames still finishes cleanly. The OpenAI reader parses payloads itself and sets the same flag; without that, the fix would not have applied to OpenRouter.
+- **A frame lost mid-stream can no longer end a turn as a clean stop.** Two unreadable frames in a row were dropped for tolerance, and if one of them carried the finish reason the stream still reported `Stop`. The guard that refuses to run a possibly-truncated tool call therefore never fired, `repair_json` closed the half-written arguments, and the call ran: a file landing with its tail missing and no error anywhere. The parser now records the loss, and `[DONE]` inferred after one no longer emits a terminal event. The text that did arrive is still delivered, and a gateway's keep-alive noise followed by more real frames still finishes cleanly. The OpenAI reader parses payloads itself and sets the same flag; without that, the fix would not have applied to OpenRouter.
 - **A failed mid-turn compaction is reported.** It announced itself as "writing a full summary of this task" and then, on failure, only set a retry delay. The user was told something was happening that was not.
 - **A turn that answers nothing twice is reported as a failure** instead of completing, and no empty assistant message is left in the history where a strict template would reject it on the next request.
 - **Gemini no longer drops a usage frame** that arrives after the finish reason, which understated a step's tokens and so the compaction threshold. The holdback kept for a continuation now survives the error, cancel and incomplete-call paths too.
@@ -863,7 +863,7 @@ the model counts.
 ### Trust
 
 - **The read-only shell allowlist resolves symlinks**, the way the file tools already did. A link pointing out of the project no longer reads outside it without asking.
-- **The destructive git list covers the worktree discards** — `checkout .`, `restore .`, `switch --discard-changes`, `stash drop`, `stash clear` — and a plain `push`. These reach beyond what `/rewind` can restore, since rewind records only file tools.
+- **The destructive git list covers the worktree discards** (`checkout .`, `restore .`, `switch --discard-changes`, `stash drop`, `stash clear`) and a plain `push`. These reach beyond what `/rewind` can restore, since rewind records only file tools.
 - **An unrecognised subagent role is refused** rather than falling through to the full toolset. A near miss like `"reviewer "` used to hand a child the right to write files and run commands while every surface still echoed the name the user believed was in force. The catch-all is now fenced to read-only as well.
 
 ### Sessions
@@ -881,13 +881,13 @@ the model counts.
 
 ### Trust
 
-- **A subagent's report reached the model as the user's own words.** `is_task_notice` knew one kind of notice — the shell's, by its `"[Background task "` prefix — so the other three (`[Subagent …`, `[Message from …`, `[Review of subagent …]`) fell through to the steering framing that opens with *"This is the user's own message, sent while you were working."* That line sat directly above the report's own *"not a message from the user"*: in one message the model was told both. Worse for siblings — `notice_from_agent` delivers one agent's untrusted text to another, and that text was wearing the user's name. All four kinds are told apart now. Both halves of the guard stay: a notice must open like one *and* claim to be one, so text quoted from a tool or a sibling cannot opt out of the framing.
-- **The top thinking level was one rung below the top.** `max_effort()` probed `"xhigh", "extra-high", "high", "max"` — in that order, so on a model offering both `xhigh` and `max` it returned `high` and never reached `max`. A user who asked for the most thinking got the top of nothing.
-- **Two tool schemas lied.** `run_shell` advertised a `content` parameter, copied whole from `write_file`, that its handler never reads, so a model filling it in had it dropped in silence. `edit_file` required `path` and `edits` while its own description said to pass `files` instead — following its own instruction was a schema violation that strict providers reject. Two guards now cover the class.
+- **A subagent's report reached the model as the user's own words.** `is_task_notice` knew one kind of notice (the shell's, by its `"[Background task "` prefix), so the other three (`[Subagent …`, `[Message from …`, `[Review of subagent …]`) fell through to the steering framing that opens with *"This is the user's own message, sent while you were working."* That line sat directly above the report's own *"not a message from the user"*: in one message the model was told both. Worse for siblings: `notice_from_agent` delivers one agent's untrusted text to another, and that text was wearing the user's name. All four kinds are told apart now. Both halves of the guard stay: a notice must open like one *and* claim to be one, so text quoted from a tool or a sibling cannot opt out of the framing.
+- **The top thinking level was one rung below the top.** `max_effort()` probed `"xhigh", "extra-high", "high", "max"` (in that order), so on a model offering both `xhigh` and `max` it returned `high` and never reached `max`. A user who asked for the most thinking got the top of nothing.
+- **Two tool schemas lied.** `run_shell` advertised a `content` parameter, copied whole from `write_file`, that its handler never reads, so a model filling it in had it dropped in silence. `edit_file` required `path` and `edits` while its own description said to pass `files` instead. Following its own instruction was a schema violation that strict providers reject. Two guards now cover the class.
 
 ### Crashes and background work
 
-- **A crash mid-turn lost the whole turn, not the last five seconds.** The loop was handed a clone of the history and the app kept its own copy, only replaced when the turn ended, so the save taken every five seconds during a turn rewrote the same pre-turn bytes. A test written alongside it checked that a session file *existed* and that it held the prompt — which was written before the turn started anyway — so it was green with the feature broken. The loop now publishes its growing history through a shared handle and a save mid-turn writes what the turn has actually done.
+- **A crash mid-turn lost the whole turn, not the last five seconds.** The loop was handed a clone of the history and the app kept its own copy, only replaced when the turn ended, so the save taken every five seconds during a turn rewrote the same pre-turn bytes. A test written alongside it checked that a session file *existed* and that it held the prompt (which was written before the turn started anyway), so it was green with the feature broken. The loop now publishes its growing history through a shared handle and a save mid-turn writes what the turn has actually done.
 - **A turn that failed or was abandoned never saved at all.** The cut-short note that tells the next turn to verify side effects was the exact message most worth keeping, and it never reached disk.
 - **Finished background tasks were never dropped.** Every finished task kept its command and up to 16 KB of output for the life of the process, and `/tasks` grew without bound. The newest 32 stay readable; a running task is never a candidate however old.
 - **A second subscriber silently orphaned the first**, and with no subscriber the notice was dropped entirely.
@@ -895,7 +895,7 @@ the model counts.
 ### Network
 
 - **A server sending heartbeats could hang a turn for ever.** `reqwest`'s `read_timeout` is per read and resets after each one; Anthropic sends `ping` events during long thinking blocks. There is now a real deadline over the whole response.
-- **A subagent that panicked, was aborted, or lost its connection left a row pinned for ever** and never told the parent, which had already been promised its answer would arrive. A guard armed before anything that can fail now closes the row and reports, and a run cut short says what the cause was in the backend's own words — the only thing that distinguishes "wait" from "try again" — along with the partial work that used to be thrown away.
+- **A subagent that panicked, was aborted, or lost its connection left a row pinned for ever** and never told the parent, which had already been promised its answer would arrive. A guard armed before anything that can fail now closes the row and reports, and a run cut short says what the cause was in the backend's own words (the only thing that distinguishes "wait" from "try again"), along with the partial work that used to be thrown away.
 - **A connection that dropped mid-answer was committed to history as a finished one.** A TCP FIN with no error is indistinguishable from a completed reply, so the model wrote half a sentence down as though it were whole. Every decoder now says whether it ever saw a terminal frame, and a stream that ends without one is an error rather than a confident stop. What did arrive is still delivered first, so the screen shows both.
 - **Malformed frames vanished silently.** A run of frames that are not JSON passed as a clean stream, because the frames carrying `finish_reason` could be the ones that failed to parse. Three bad frames in a row ends the stream; one is still dropped, which is what real noise looks like.
 - **The turn that failed on a network cut did not say so.** The screen now states that the answer is cut off rather than finished, and how much of it arrived, because "it failed" reads as though nothing was written and the text above it looks whole.
@@ -903,7 +903,7 @@ the model counts.
 
 ### Recaps
 
-- **A recap was written while work was still in flight** — with subagents running, with a background task running, or as the model was about to answer, each of which makes it wrong and spends a whole extra request. It waits for all of that now, and postpones rather than cancels: the old code cleared the timer on anything but "no turn running", and since only the end of a turn re-armed it, one moment of work cost the recap for the rest of the session.
+- **A recap was written while work was still in flight**: with subagents running, with a background task running, or as the model was about to answer, each of which makes it wrong and spends a whole extra request. It waits for all of that now, and postpones rather than cancels: the old code cleared the timer on anything but "no turn running", and since only the end of a turn re-armed it, one moment of work cost the recap for the rest of the session.
 
 ### Counting
 
@@ -913,64 +913,64 @@ the model counts.
 
 ### What you can see
 
-- **A subagent's answer could not be read anywhere.** When a child finished, the screen showed that it finished and nothing else: the full report went to the model and was thrown away from the transcript. It is now a folded card — who answered, steps, tokens, time — with the report behind a click and a first line as the preview. It never reads as something the user said, which is the whole reason the card exists.
+- **A subagent's answer could not be read anywhere.** When a child finished, the screen showed that it finished and nothing else: the full report went to the model and was thrown away from the transcript. It is now a folded card (who answered, steps, tokens, time) with the report behind a click and a first line as the preview. It never reads as something the user said, which is the whole reason the card exists.
 - **The work box had no sides.** Its top and bottom edges were closed and every row between them was bare text, so the frame appeared on two rows and vanished on all the others. The rows are framed and clipped like every other box in the app now.
 - **Its rows were built against the terminal, not against the box,** so a long phase description painted straight through the right-hand edge of the frame and into the last column of the window.
-- **The box and the input field were two boxes in a row.** There was never a blank line between them — the seam you saw was two separate frames meeting. They are one block now: the box ends on a rule the field's sides continue from.
+- **The box and the input field were two boxes in a row.** There was never a blank line between them: the seam you saw was two separate frames meeting. They are one block now: the box ends on a rule the field's sides continue from.
 - **The box's top edge was wider than its bottom below eleven columns,** where the truncated title was built one cell wider than the room it had. Every width from 4 to 32 is now checked, and the two edges are asserted equal rather than merely inside the window.
 
 ## b530 — the model stops waiting for work it already made asynchronous, and a free model says so
 
-- **A backgrounded command was waited for anyway.** The plumbing was right: the model was told plainly, "a notice will arrive when it exits, so there is no need to poll it", and it did it anyway — calling a second tool that blocked on the first, so the turn sat there exactly as long as the long build it had just made asynchronous. Moving the command to the background by hand did not help either, because the system prompt said nothing at all about work in the background: the rule existed only on the tool that starts it, and behaviour between calls is decided by the prompt. There is a section there now, and it covers the case where the user does the moving.
+- **A backgrounded command was waited for anyway.** The plumbing was right: the model was told plainly, "a notice will arrive when it exits, so there is no need to poll it", and it did it anyway, calling a second tool that blocked on the first, so the turn sat there exactly as long as the long build it had just made asynchronous. Moving the command to the background by hand did not help either, because the system prompt said nothing at all about work in the background: the rule existed only on the tool that starts it, and behaviour between calls is decided by the prompt. There is a section there now, and it covers the case where the user does the moving.
 - **A free model was shown as `$0.00 · 64 turns`.** The server priced every turn at nothing, which is a fact about the model, and writing it as an amount with a turn count beside it reads as a bill that came out empty rather than as one that does not exist. The status bar says `free`, `/cost` says `free` per provider, and `/goal` says the backend prices every turn at nothing. A server that reports *no* price is still left silent: that is unknown, not free.
 
 ## b525 — a session that survives the machine, and a subagent you can actually talk to
 
-- **A turn that never finished was gone entirely.** The session file was written only after a turn ended, so a machine that lost power mid-turn kept nothing: not the prompt, not the work the model had already done with it, and `--resume` had nothing to resume. The prompt now goes to disk the moment the turn starts, and again as each tool reports — throttled to five seconds, because a turn writes the whole conversation and writing it per step would be quadratic. What a crash takes is now the last few seconds rather than the whole conversation. Reported live: this was found the hard way, by the power going off.
-- **A message to a running subagent was refused as "no subagent is running".** The host built a mailbox of its own, so children registered in one and the parent's `send_message` looked in another. Every message between agents was dead — parent to child and child to child alike — while the agents themselves ran fine, which is why it read as a quirk of naming. One mailbox is now shared, and the test reproduces the exact refusal before the fix.
+- **A turn that never finished was gone entirely.** The session file was written only after a turn ended, so a machine that lost power mid-turn kept nothing: not the prompt, not the work the model had already done with it, and `--resume` had nothing to resume. The prompt now goes to disk the moment the turn starts, and again as each tool reports (throttled to five seconds, because a turn writes the whole conversation and writing it per step would be quadratic). What a crash takes is now the last few seconds rather than the whole conversation. Reported live: this was found the hard way, by the power going off.
+- **A message to a running subagent was refused as "no subagent is running".** The host built a mailbox of its own, so children registered in one and the parent's `send_message` looked in another. Every message between agents was dead (parent to child and child to child alike) while the agents themselves ran fine, which is why it read as a quirk of naming. One mailbox is now shared, and the test reproduces the exact refusal before the fix.
 - **The server was called dead while it was answering.** The mascot took "did not list its models" for "did not answer": a cloud listing that arrives late, or is refused, left it shut-eyed for the rest of the session over a server that was answering every question. Startup now waits for a remote listing as long as the listing itself takes, the notice says what actually happened ("could not read the model list") instead of telling someone to start a server that is already running, and any completed turn clears it.
 - **Your own prompts are a block now.** A prompt opened with a `›` in the same plain rows as the answer, which in a long transcript is genuinely hard to pick out. It carries a bar down its side on every row and air beneath it. Deliberately not the filled `▌`: that is the caret on a line the model is writing *this second*, and a prompt wearing it reads as an answer still being typed.
 - **A wheel throw never came to rest.** The decay divided by three in integer arithmetic, and a third of one is zero, so a single notch decayed to itself and the view glided for ever, taking the conversation off the screen with nobody touching anything.
-- **What a turn generated counted only its last step.** The server counts a request, not a turn, and a turn that calls tools is many requests; each figure overwrote the last, so a long turn reported only its final step. It is now summed over every request, and includes what the children of the turn wrote — a turn that spent three agents and reports only its own text hides most of what it cost.
+- **What a turn generated counted only its last step.** The server counts a request, not a turn, and a turn that calls tools is many requests; each figure overwrote the last, so a long turn reported only its final step. It is now summed over every request, and includes what the children of the turn wrote: a turn that spent three agents and reports only its own text hides most of what it cost.
 - **Subagents and background commands share one box above the composer**, drawn with edges and a title, because without them both read as part of the conversation. A child that has ended leaves the box instead of filling it with work that finished minutes ago, and its clock stops where it finished rather than counting on for ever.
-- **Limits that were not limits.** Twenty steps was a number picked before anything had run: a child that reads a few files takes six, and one that audits a repository takes hundreds. It is 500 now, and the last step is spent asking the model to wrap up and report rather than cutting it off holding an unfinished thought. The tool description still promised "up to 3 may run at once" after that ceiling was removed — the model was being told a rule the code did not have.
+- **Limits that were not limits.** Twenty steps was a number picked before anything had run: a child that reads a few files takes six, and one that audits a repository takes hundreds. It is 500 now, and the last step is spent asking the model to wrap up and report rather than cutting it off holding an unfinished thought. The tool description still promised "up to 3 may run at once" after that ceiling was removed. The model was being told a rule the code did not have.
 - **`--tool-test` grew.** Four scenarios that were missing entirely: a model that invents tool calls that were never offered, one that cannot hold a long stream, one that falls over past ten steps, and one that cannot see a picture. Per-scenario time and tokens, `--scenario <key>` to run one, and `--json` in place of an environment variable.
 
 ## b505 — the window stops lying about itself, and a steer is actually a steer
 
 Hotfix on b500. Three things the release got wrong, all found by using it.
 
-- **A million-token window was treated as 128k, so compaction fired at a third of the window.** A model whose window had not been looked up fell back to a fixed `131_072`, and the only code that could correct it ran when the server named an *active* model. A cloud list never names one — OpenRouter names only the models it has — so on the largest provider the number stayed at 128k for the whole session and the turn summarized itself against a window four times larger than the one it had. A discovery is now resolved by name as well as by active model, so the real size lands as soon as the list arrives.
-- **A steer told the model it was allowed to drop it.** The note carried an unconditional "finish what you are doing first" and then a licence: if the directive contradicted the work in hand, *say where the conflict is instead of silently dropping either side*. That last clause is the whole bug — the model was permitted to name a conflict and move on, which is exactly what it did. The deferral is now scoped to a call actually still running, the deadline is bounded, and the note obliges the model to act rather than to acknowledge. What survives is the original request: a tool call in flight is still allowed to finish first.
-- **Every child is pinned above the composer, and its row is a status rather than a summary.** The rows lived in the transcript, so they scrolled away with the answer, F2 reprinted them along with everything else, and the row repeated a prose summary of the child's own thoughts — which read like the parent talking about itself. They are now drawn above the prompt, below any steering, saying `thinking` / `writing` / `tooling <call>` in the same words the composer uses for the parent. The prose a phase replaced is one mouse click away and F2 does not reach it, because these rows are a status and not a line of the transcript.
-- **A screenshot sent as steering never left the composer.** The steer channel carried a bare `String`, so the text went and the picture stayed behind — and a steer that was *only* a picture matched no branch at all, so Enter did nothing and the image quietly rode along with the next unrelated prompt. Steering now carries the pictures with the words, a picture alone is a steer, and a steer that loses the race with the end of the turn goes back into the composer with its image intact rather than losing it.
-- **No ceiling on children out of the box.** Three at once was a judgement about what a model tends to ask for, not a limit the work needs, and refusing a child the user asked for is worse than what running it costs. The rule is still there — `SubagentHost::with_max_live` sets a ceiling — for anyone who wants one, and a refusal still names itself.
-- **Scrolling follows a finger, and a selection copies itself.** A wheel notch moved three lines, so a trackpad's two-finger flick jumped straight down the transcript; a notch is now one line and the rest of the throw is spent out over the following frames, decaying, so the flick glides to where it was aimed. Text selected with the mouse — by finger or trackpad — is copied as it is made: a TUI has no `Ctrl+C` for text the terminal never held, and that includes anything inside a tool result or a child's report.
-- **What a turn generated is on the line that is already reporting its speed.** The count was only in `/goal`, so the ordinary case — watching one turn cost something — had nowhere to be read. It sits beside the rate while the turn runs, and says nothing at zero.
+- **A million-token window was treated as 128k, so compaction fired at a third of the window.** A model whose window had not been looked up fell back to a fixed `131_072`, and the only code that could correct it ran when the server named an *active* model. A cloud list never names one (OpenRouter names only the models it has), so on the largest provider the number stayed at 128k for the whole session and the turn summarized itself against a window four times larger than the one it had. A discovery is now resolved by name as well as by active model, so the real size lands as soon as the list arrives.
+- **A steer told the model it was allowed to drop it.** The note carried an unconditional "finish what you are doing first" and then a licence: if the directive contradicted the work in hand, *say where the conflict is instead of silently dropping either side*. That last clause is the whole bug: the model was permitted to name a conflict and move on, which is exactly what it did. The deferral is now scoped to a call actually still running, the deadline is bounded, and the note obliges the model to act rather than to acknowledge. What survives is the original request: a tool call in flight is still allowed to finish first.
+- **Every child is pinned above the composer, and its row is a status rather than a summary.** The rows lived in the transcript, so they scrolled away with the answer, F2 reprinted them along with everything else, and the row repeated a prose summary of the child's own thoughts, which read like the parent talking about itself. They are now drawn above the prompt, below any steering, saying `thinking` / `writing` / `tooling <call>` in the same words the composer uses for the parent. The prose a phase replaced is one mouse click away and F2 does not reach it, because these rows are a status and not a line of the transcript.
+- **A screenshot sent as steering never left the composer.** The steer channel carried a bare `String`, so the text went and the picture stayed behind, and a steer that was *only* a picture matched no branch at all, so Enter did nothing and the image quietly rode along with the next unrelated prompt. Steering now carries the pictures with the words, a picture alone is a steer, and a steer that loses the race with the end of the turn goes back into the composer with its image intact rather than losing it.
+- **No ceiling on children out of the box.** Three at once was a judgement about what a model tends to ask for, not a limit the work needs, and refusing a child the user asked for is worse than what running it costs. The rule is still there (`SubagentHost::with_max_live` sets a ceiling) for anyone who wants one, and a refusal still names itself.
+- **Scrolling follows a finger, and a selection copies itself.** A wheel notch moved three lines, so a trackpad's two-finger flick jumped straight down the transcript; a notch is now one line and the rest of the throw is spent out over the following frames, decaying, so the flick glides to where it was aimed. Text selected with the mouse (by finger or trackpad) is copied as it is made: a TUI has no `Ctrl+C` for text the terminal never held, and that includes anything inside a tool result or a child's report.
+- **What a turn generated is on the line that is already reporting its speed.** The count was only in `/goal`, so the ordinary case (watching one turn cost something) had nowhere to be read. It sits beside the rate while the turn runs, and says nothing at zero.
 
 Each of the three was checked by breaking it: reverting the name lookup, the note, and the image transfer each fails the test that names it.
 
 ## b500 — a live subagent tree, an effort ladder the model wrote, and a bill
 
-- **Subagents are a tree you can watch, not a claim you have to take on trust.** `spawn_agent` runs up to three children at once, each with its own token count and its own live cost; the sidebar grows as they start, shows what each is doing, and folds away when it finishes. Children talk to each other through a mailbox (`send_message`) and can be asked to check one another's work (`review_agent`), which returns *verified*, *refuted* or *partial* rather than an opinion. Roles are enforced at the tool layer, not in the prompt: a child cannot spawn its own children, and a message cannot be sent to an agent that is not running. Checked live: two children at once, the parent recomputing the result and finding a real disagreement — 48 against 49 — and saying so rather than reporting success.
-- **A saved thinking level is now only applied where the model actually has it.** Two separate lies, both found by running it. The request carried `custom_effort` through untouched, so `xhigh` saved against a model listing `[high, low, none]` still asked for `xhigh` — a level the gateway drops or refuses, leaving the setting reading as applied while nothing was thinking. And even with the request right, the banner went on saying `xhigh`. Both follow the same rule now: only a list the server actually sent may correct the setting, and an endpoint that said nothing keeps it.
-- **Auto effort is a ladder the model wrote, not a fixed four steps.** The levels come from the model's own advertised presets, so a model offering `max, xhigh, high, medium, low` gets all five and a two-level model is never handed a middle it does not have. OpenRouter's own `supported_efforts` list is read rather than guessed at, which is what made `xhigh` reachable in the first place. Auto nudges one step when a model keeps overthinking or fumbling tools, measured against that model's own usual rather than a fixed time — and a baseline learns only from turns that went normally, so a slow streak cannot drag the yardstick with it.
+- **Subagents are a tree you can watch, not a claim you have to take on trust.** `spawn_agent` runs up to three children at once, each with its own token count and its own live cost; the sidebar grows as they start, shows what each is doing, and folds away when it finishes. Children talk to each other through a mailbox (`send_message`) and can be asked to check one another's work (`review_agent`), which returns *verified*, *refuted* or *partial* rather than an opinion. Roles are enforced at the tool layer, not in the prompt: a child cannot spawn its own children, and a message cannot be sent to an agent that is not running. Checked live: two children at once, the parent recomputing the result and finding a real disagreement (48 against 49) and saying so rather than reporting success.
+- **A saved thinking level is now only applied where the model actually has it.** Two separate lies, both found by running it. The request carried `custom_effort` through untouched, so `xhigh` saved against a model listing `[high, low, none]` still asked for `xhigh`: a level the gateway drops or refuses, leaving the setting reading as applied while nothing was thinking. And even with the request right, the banner went on saying `xhigh`. Both follow the same rule now: only a list the server actually sent may correct the setting, and an endpoint that said nothing keeps it.
+- **Auto effort is a ladder the model wrote, not a fixed four steps.** The levels come from the model's own advertised presets, so a model offering `max, xhigh, high, medium, low` gets all five and a two-level model is never handed a middle it does not have. OpenRouter's own `supported_efforts` list is read rather than guessed at, which is what made `xhigh` reachable in the first place. Auto nudges one step when a model keeps overthinking or fumbling tools, measured against that model's own usual rather than a fixed time, and a baseline learns only from turns that went normally, so a slow streak cannot drag the yardstick with it.
 - **A turn's duration was never actually recorded.** `finish_turn` cleared the clock and thirty lines later the outcome read it to work out how long the turn had run, so the value was always `None`: no baseline ever formed, and nothing learned from a slow turn, live. Every test passed a duration in by hand, which is exactly how a feature only synthetic input ever reaches looks. It is now one operation, so the time cannot be read after the thing holding it is gone. Verified on a live turn: `avg_secs 2.73`, where before it was `null` at any count.
-- **The bill is counted where the server states it, and nowhere else.** A new ledger reads `usage.cost` from the response and splits it by provider. A price that was not reported is not counted as zero — an unknown is shown as unknown, because a session that looks free is worse than one that looks expensive. It reaches the status bar when there is room, drops the gauge rather than the figure when there is not, and `/cost` and the `/goal` report give the per-provider breakdown.
-- **An edit lands when the model loses an indentation.** Measured, not guessed: every past session was searched for `old_string not found` and each attempt compared against the line the file really had. The recurring cause is leading whitespace — `if media:` sent at 4 spaces for a line the file indents by 8. Indentation no longer blocks a match, and a match found loosely hands back the file's own indentation so the result is written with it; reindenting to the model's guess would be worse than failing, since in Python or YAML it silently changes what the code means. Two lines differing only by indentation are still two, and the count still asks for more context. What tolerance cannot absorb is named instead: `pub plan:` sent against a field declared without `pub` now says which word is wrong.
-- **Compaction works on a model that does not follow the shape.** The first ask lists nine sections and lets the model drop the ones it considers empty; dropping 7 and 8 was then a summary this build refused, so the window stayed full behind a message that said nothing about why. Asked once more with the shape stated as the first words to write, it produces one — and a second refusal is still a refusal. A failed compaction now also says which failure it was: refused, or a summary that freed nothing. Verified on a 128k window: 72k before, 56k after, 16k saved, gauge reading 43% — so the three numbers agree with each other and with the window, which is the arithmetic the old `150K saved` claim contradicted.
-- **Plans work in any session and read at a glance.** The plan tool is no longer gated behind an autonomous run, and the plan is drawn where the work is rather than buried in the transcript: `√` done, `▸` in progress, `·` pending, with a finished line dimmed through. The model is told to plan when it judges a task long, not on every task — a rule that required a plan always had the model writing "Plan: 1) 2) 3)" in prose instead of calling the tool.
-- **A message typed while the model is working is not taken out from under it.** A steer is queued behind the work in flight: the model finishes what it started, then picks the steer up. The rule about speaking between tool calls changed with it — it speaks when there is genuinely something to say, not on every step, and a serious problem or a real surprise is where it is allowed to be blunt.
+- **The bill is counted where the server states it, and nowhere else.** A new ledger reads `usage.cost` from the response and splits it by provider. A price that was not reported is not counted as zero. An unknown is shown as unknown, because a session that looks free is worse than one that looks expensive. It reaches the status bar when there is room, drops the gauge rather than the figure when there is not, and `/cost` and the `/goal` report give the per-provider breakdown.
+- **An edit lands when the model loses an indentation.** Measured, not guessed: every past session was searched for `old_string not found` and each attempt compared against the line the file really had. The recurring cause is leading whitespace: `if media:` sent at 4 spaces for a line the file indents by 8. Indentation no longer blocks a match, and a match found loosely hands back the file's own indentation so the result is written with it; reindenting to the model's guess would be worse than failing, since in Python or YAML it silently changes what the code means. Two lines differing only by indentation are still two, and the count still asks for more context. What tolerance cannot absorb is named instead: `pub plan:` sent against a field declared without `pub` now says which word is wrong.
+- **Compaction works on a model that does not follow the shape.** The first ask lists nine sections and lets the model drop the ones it considers empty; dropping 7 and 8 was then a summary this build refused, so the window stayed full behind a message that said nothing about why. Asked once more with the shape stated as the first words to write, it produces one, and a second refusal is still a refusal. A failed compaction now also says which failure it was: refused, or a summary that freed nothing. Verified on a 128k window: 72k before, 56k after, 16k saved, gauge reading 43%, so the three numbers agree with each other and with the window, which is the arithmetic the old `150K saved` claim contradicted.
+- **Plans work in any session and read at a glance.** The plan tool is no longer gated behind an autonomous run, and the plan is drawn where the work is rather than buried in the transcript: `√` done, `▸` in progress, `·` pending, with a finished line dimmed through. The model is told to plan when it judges a task long, not on every task. A rule that required a plan always had the model writing "Plan: 1) 2) 3)" in prose instead of calling the tool.
+- **A message typed while the model is working is not taken out from under it.** A steer is queued behind the work in flight: the model finishes what it started, then picks the steer up. The rule about speaking between tool calls changed with it. It speaks when there is genuinely something to say, not on every step, and a serious problem or a real surprise is where it is allowed to be blunt.
 - **A slow model list is not a dead server.** Any HTTP answer counts as an answer, so an endpoint that took too long to enumerate no longer reads as unreachable. A server that says nothing about a model's presets is treated as unknown rather than as having none, which is the difference between keeping a working setting and replacing it with a guess.
 - **Setup is skipped when there is nothing to set up.** With a model, an endpoint and a key already saved, the wizard no longer opens on a working install. A local server still needs no key, only a model named.
 - **A tool the model is offered is a tool a test really calls.** The coverage guard used to compare the registry against itself, so it would have passed with an empty file. All 24 are now invoked for real, and the check was verified by removing one: it failed and named it.
-- **Smaller things.** `1 turn`, not `1 turns`. A missing `usage` field no longer breaks parsing. The two audit findings that were numbers rather than behaviour — the test count in `docs/numbers.md` and the scenario count in `docs/demo.md` — now match what the commands print.
+- **Smaller things.** `1 turn`, not `1 turns`. A missing `usage` field no longer breaks parsing. The two audit findings that were numbers rather than behaviour (the test count in `docs/numbers.md` and the scenario count in `docs/demo.md`) now match what the commands print.
 
 ## b477 — a finished compaction gives the row back, and the cache stops lying
 
-- **The compaction line silenced the tips for the rest of the session.** `/compact` reports what it saved in the row under the prompt, and the row it borrows is the one the tips rotate through. Nothing ever handed the row back, so a single compaction meant no tip ever came round again — the line sat there, still, until the session ended. The finished line now keeps the row for as long as a tip would, ten seconds, and then the tips resume. The line written *while* `/compact` is still writing the summary has no deadline: that can take minutes, and a status that expired half-way would be hiding the very thing it reports.
+- **The compaction line silenced the tips for the rest of the session.** `/compact` reports what it saved in the row under the prompt, and the row it borrows is the one the tips rotate through. Nothing ever handed the row back, so a single compaction meant no tip ever came round again. The line sat there, still, until the session ended. The finished line now keeps the row for as long as a tip would, ten seconds, and then the tips resume. The line written *while* `/compact` is still writing the summary has no deadline: that can take minutes, and a status that expired half-way would be hiding the very thing it reports.
 - **Sending a prompt no longer waits for a warm-up that was already running.** The prefix is warmed while you type, but the warm-up was only ever dropped on a change of provider. Pressing Enter mid-warm-up left the server prefilling a prefix the turn was about to prefill again: two requests, and on a server with one slot a wait twice as long. A turn now ends the warm-up on its way out.
-- **The face in the status line stopped copying the model list several times a second.** It asked the server whether it had answered by taking a full copy of what the server had answered with — every model, every field — and a cloud API's list is about 750 KB. It ran on every idle tick and on every piece the model streams, so a long session spent its memory making and dropping copies of a list it never read a field of. The face, the prefill line and the warm-up now read the one thing they want without the copy. Measured on a session resumed and left running 35 s: 2,640,722 calls into the allocator before, 422,409 after.
+- **The face in the status line stopped copying the model list several times a second.** It asked the server whether it had answered by taking a full copy of what the server had answered with (every model, every field), and a cloud API's list is about 750 KB. It ran on every idle tick and on every piece the model streams, so a long session spent its memory making and dropping copies of a list it never read a field of. The face, the prefill line and the warm-up now read the one thing they want without the copy. Measured on a session resumed and left running 35 s: 2,640,722 calls into the allocator before, 422,409 after.
 - **A hosted API is asked what the prefix cost, not how long it took.** The status line showed a predicted time to first token and a read speed, and both were built on the *previous* turn's cache share, because the server reports the real one only when the turn is over. That is an assumption in the clothes of a measurement, and a remote model's time to first token is a queue and a network besides. On a hosted API the line now reads `cache 96%` once the turn ends, and says nothing on the first message, where there is nothing to have cached. A local server is a machine whose rate holds, so it keeps both, and gains the cache share beside them. Settings → Prefill speed is now Prefill / cache.
 
 ## b472 — the counters stop guessing, and compaction stops waiting
@@ -1172,12 +1172,12 @@ b350 was tagged with these changes and stopped by a test that tripped over a ran
 
 ## b313 — paths with ~, working web search, colour themes and a readable transcript
 
-- **A path written with `~` means the home folder.** A tool call has no shell behind it, so nothing expanded the tilde: `~/FlashAgent/src/main.rs` was looked for inside the project and reported missing. The permission layer made the same mistake in the other direction — because `~/.ssh/id_rsa` looked relative, it looked like an ordinary project file and nothing was asked before opening it. What a `~` means is now decided once and used by every tool and by the check that guards them.
-- **Web search works again.** It had been answering "no results" to every query: the DuckDuckGo parser looked for markup the site no longer serves, and its last fallback searched for the start of a result from that result's own position. It now anchors on the class names both the full and the lite pages kept, unwraps DuckDuckGo's redirect and decodes numbered HTML entities. A page that is not a results page — a bot check, an unknown redesign — is an error saying so, instead of an empty answer. `BRAVE_API_KEY` in the environment switches to key-based search, and a rejected key falls back to the free one.
+- **A path written with `~` means the home folder.** A tool call has no shell behind it, so nothing expanded the tilde: `~/FlashAgent/src/main.rs` was looked for inside the project and reported missing. The permission layer made the same mistake in the other direction: because `~/.ssh/id_rsa` looked relative, it looked like an ordinary project file and nothing was asked before opening it. What a `~` means is now decided once and used by every tool and by the check that guards them.
+- **Web search works again.** It had been answering "no results" to every query: the DuckDuckGo parser looked for markup the site no longer serves, and its last fallback searched for the start of a result from that result's own position. It now anchors on the class names both the full and the lite pages kept, unwraps DuckDuckGo's redirect and decodes numbered HTML entities. A page that is not a results page (a bot check, an unknown redesign) is an error saying so, instead of an empty answer. `BRAVE_API_KEY` in the environment switches to key-based search, and a rejected key falls back to the free one.
 - **Colour themes.** Settings → Aesthetics → Colour Theme: Dark, Midnight, High contrast, Monochrome, and Terminal 16 colours, which hands the picture back to the palette the terminal itself uses and makes FlashAgent readable without 24-bit colour. A theme is applied to the finished frame, so every card is themed without knowing about it.
-- **A transcript that reads as three things.** A blank row where the chat moves from the question to the work to the answer; `✻` marks thinking and `▸` marks a tool call, in the place a spinner takes while either runs; the answer stays at the left edge and the work sits in from it. What a running tool is doing is no longer written twice — it used to appear inside the composer as well, where it looked like text the user had typed.
+- **A transcript that reads as three things.** A blank row where the chat moves from the question to the work to the answer; `✻` marks thinking and `▸` marks a tool call, in the place a spinner takes while either runs; the answer stays at the left edge and the work sits in from it. What a running tool is doing is no longer written twice. It used to appear inside the composer as well, where it looked like text the user had typed.
 - **Small terminals.** The welcome card was taller than the room under it below about 18 rows, so the terminal scrolled and its top was gone before it was seen. It now fits what is left after the composer, the hints, the tip and the status line, trying five shapes from two columns down to a single line. The tip takes a second row only in a window at least 20 rows tall.
-- **Text that used to overflow the terminal.** A heading longer than the window was never wrapped, and a word with nowhere to break — a long URL, or writing without spaces such as Chinese — was printed whole. Both made the renderer's row count wrong, which is what erases the wrong rows on the next frame.
+- **Text that used to overflow the terminal.** A heading longer than the window was never wrapped, and a word with nowhere to break (a long URL, or writing without spaces such as Chinese) was printed whole. Both made the renderer's row count wrong, which is what erases the wrong rows on the next frame.
 - **Reading files.** `read_file` reads a line at a time instead of loading the whole file to hand back twenty lines of it, and a file that is not text says so and says what to use instead, rather than reporting invalid UTF-8.
 - **Settings that did nothing are gone.** `show_reasoning_accordion`, `approval_mode`, `git_diff_preview`, `git_smart_commit` and a per-preset `default_port` were written into `config.json` and read by nobody. Old config files still load; the keys are simply ignored.
 - **Every built-in tool is now run for real by the tests**, by name and through the dispatcher, with the list checked against what the app offers so a tool cannot arrive unchecked. The two that need the internet run on a schedule instead of on every push, so a search engine changing its markup is a day's notice rather than a bug report months later.
@@ -1247,12 +1247,12 @@ Every finished answer now prints a status line underneath:
 
 ## b282 — the prompt cache works again
 
-This release changes nothing for you to use — it only fixes a bug, but one
+This release changes nothing for you to use. It only fixes a bug, but one
 you will feel: on a local server every reply after the first can start
 many times sooner.
 
 - **Every turn re-read the whole conversation.** On LM Studio and llama.cpp
-  each new message was processed from the first token again — thousands of
+  each new message was processed from the first token again: thousands of
   tokens and tens of seconds before the first word, with the cache reuse
   (f_keep) in the status line near zero. The cause was FlashAgent itself: it
   rewrote the start of the system prompt whenever thinking was switched on or
@@ -1270,8 +1270,8 @@ many times sooner.
 ### Uninstalling
 
 - **`flashagent --uninstall`** removes FlashAgent. It first shows what it
-  will remove — every copy of the program, the PATH lines the installer
-  added — then asks, part by part and with sizes, which data in
+  will remove (every copy of the program, the PATH lines the installer
+  added), then asks, part by part and with sizes, which data in
   `~/.flashagent` to delete. Caches and `/rewind` copies are ticked by
   default; settings, saved sessions, memory, MCP servers and skills are not.
   Nothing is touched until you confirm. `--uninstall -y` takes the defaults
@@ -1290,7 +1290,7 @@ many times sooner.
   touched. The fish universal path and the Windows user PATH are cleaned the
   same way.
 - **Package installs** (pacman, dpkg, xbps) are removed through the package
-  manager — `sudo pacman -R flashagent-bin` and the like — so its database
+  manager (`sudo pacman -R flashagent-bin` and the like), so its database
   never lists files that are gone.
 - A build from source refuses to uninstall itself: delete the checkout.
 - The README has an Uninstall section.
@@ -1299,14 +1299,14 @@ many times sooner.
 
 - **Sending the next prompt stops the recap still being written.** The recap
   and suggestion for the previous turn used to keep generating after you had
-  already sent another prompt — on a local server that made your new turn
+  already sent another prompt. On a local server that made your new turn
   wait behind it. Now the request is dropped the moment the next turn starts
   (a prompt, `/goal`, or regenerate), and the server stops generating it.
 
 ## b280 — how FlashAgent is meant to behave, written down and enforced
 
 A full audit against a written spec of expected behaviour. This release
-changes how several everyday things work — read the list before updating.
+changes how several everyday things work: read the list before updating.
 
 ### Quitting and starting
 
@@ -1319,7 +1319,7 @@ changes how several everyday things work — read the list before updating.
   now say "Esc Esc quit".
 - **FlashAgent starts in the mode you left it in.** The very first run starts
   in Accept Edits; after that, Shift+Tab, `/mode` and Settings all save the
-  mode as the one to start in next time — Accept All included. The Accept
+  mode as the one to start in next time (Accept All included). The Accept
   All that `/goal` switches on for itself is never remembered; the mode it
   hands back is.
 
@@ -1328,7 +1328,7 @@ changes how several everyday things work — read the list before updating.
 - **`flashagent --continue`** (or `-c`) opens the most recent session saved
   in the current folder.
 - **`flashagent --resume`** (or `-r`) without an id opens a list of this
-  folder's saved sessions — first prompt, how long ago, how many messages —
+  folder's saved sessions (first prompt, how long ago, how many messages)
   to pick from. `--resume <id>` still opens one directly.
 - **`/resume`** inside the app opens the same list. Picking a session saves
   the one that was open first, then swaps the conversation on screen, the
@@ -1343,8 +1343,8 @@ changes how several everyday things work — read the list before updating.
 ### Permissions
 
 - **Files outside the project are asked about in every mode.** Reading or
-  writing a file outside the folder FlashAgent was started in — `~/.bashrc`,
-  `~/.ssh/id_rsa`, `../other-project` — now shows an approval card even in
+  writing a file outside the folder FlashAgent was started in (`~/.bashrc`,
+  `~/.ssh/id_rsa`, `../other-project`) now shows an approval card even in
   Accept Edits and Accept All, and is refused in Planning and during `/goal`,
   where nobody is there to answer. `..` and symlinks are resolved first, so
   a link inside the project that points at `~/.ssh` counts as outside. An
@@ -1359,8 +1359,8 @@ changes how several everyday things work — read the list before updating.
 - **Planning runs commands that only read.** `ls`, `cat`, `head`, `grep`,
   `rg`, `find`, `wc`, `diff`, `git status/log/diff/show/blame`, the listing
   forms of `git branch/tag/remote` and similar run without asking. Anything
-  that could write or run other code — redirections, `find -delete`/`-exec`,
-  `sort -o`, `rg --pre`, `git -c`, builds such as `cargo check` — is still
+  that could write or run other code (redirections, `find -delete`/`-exec`,
+  `sort -o`, `rg --pre`, `git -c`, builds such as `cargo check`) is still
   refused, and so is any argument that leaves the project (`/etc`, `~`, `..`,
   `$HOME`).
 
@@ -1371,7 +1371,7 @@ changes how several everyday things work — read the list before updating.
   Tools. An old config's `free_search: false` no longer keeps them off.
 - **Local addresses are asked about.** Fetching `localhost`, your local
   network, a router, or a cloud metadata address (`169.254.169.254`) shows a
-  card in every mode and is refused in Planning and during `/goal` — a page on
+  card in every mode and is refused in Planning and during `/goal`: a page on
   the internet can talk the model into such a fetch.
 - A local address hidden some other way is always refused: a name that
   resolves to a local IP, an IP spelled oddly (`127.1`, `0x7f.0.0.1`), or a
@@ -1427,7 +1427,7 @@ changes how several everyday things work — read the list before updating.
 
 ## b275 — suggestions that stop asking you back
 
-This release changes nothing for you to use — it only fixes a bug.
+This release changes nothing for you to use. It only fixes a bug.
 
 - The grey suggestion above the input box is meant to be your likely next
   message, but models kept filling it with the assistant's own question to
@@ -1443,42 +1443,42 @@ This release changes nothing for you to use — it only fixes a bug.
 
 ## b274 — thinking that forgot to say so
 
-This release changes nothing for you to use — it only fixes a bug.
+This release changes nothing for you to use. It only fixes a bug.
 
 - A model with no native "reasoning" channel is asked to narrate its
   thinking as plain bold stage titles (`**Understanding the Request**`,
   `**Planning Implementation**`, ...) so it can still be collapsed like real
   reasoning. The code that collapses it, though, only recognized that
   narration when it opened with a literal lead-in line ("Thinking
-  Process:", "Thinking:") — a lead-in the prompt never actually asked the
+  Process:", "Thinking:"), a lead-in the prompt never actually asked the
   model to write. A model that jumped straight to its first bold title
   (as instructed) had its whole multi-stage narration printed as the
   answer instead of collapsing under a "Thought: ..." line. It is now
-  recognized by the stage titles themselves — at least two in a row,
+  recognized by the stage titles themselves (at least two in a row,
   matched against the same short list of stage words FlashAgent's own
-  prompt asks for — so a real answer that happens to open with its own
+  prompt asks for), so a real answer that happens to open with its own
   heading (`**Summary**`) is left alone.
 
 ## b273 — /rewind asks first, and a floor under /goal
 
 - `/rewind <n>` no longer takes turns back the moment you press Enter. The
-  composer turns into a confirmation card — the same treatment the model,
-  effort, and settings pickers get — listing every file that would change,
+  composer turns into a confirmation card (the same treatment the model,
+  effort, and settings pickers get), listing every file that would change,
   each with its own `+added -removed` count, and flagging a file the turn
   created for removal. Nothing happens until "Yes, rewind" is confirmed;
   "No, cancel" (or Esc) leaves the files and the conversation exactly as
   they are.
 - The plain "Rewound to before turn N · ..." line that used to print
-  afterward is gone — the confirmation card already says what is about to
+  afterward is gone. The confirmation card already says what is about to
   happen, so a second, static echo of it after the fact was just noise.
 - `/goal` now refuses a short list of shell patterns even though it normally
   runs everything without asking: `rm -rf`, `sudo`, `git push --force`,
   `git reset --hard`, `git clean -f`, `git branch -D`, `dd`, `mkfs`,
   `shutdown`/`reboot`. Hitting one of these pauses the run and asks you,
-  the same as Manual mode would — even if you had earlier said "Always
-  allow" to that exact command in a normal session.
+  the same as Manual mode would (even if you had earlier said "Always
+  allow" to that exact command in a normal session).
 - Every 10 completed steps, `/goal` checkpoints what it has written or
-  edited so far as a git commit — only inside a project that is already a
+  edited so far as a git commit: only inside a project that is already a
   git repository, and only the files it actually touched. It sits next to
   the file snapshots `/rewind` already used, so a long run leaves commits
   to diff against along the way, not just "before it started" and "now".
@@ -1489,10 +1489,10 @@ This release changes nothing for you to use — it only fixes a bug.
 
 ## b271 — a suggestion that only told you to make one
 
-This release changes nothing for you to use — it only fixes a bug.
+This release changes nothing for you to use. It only fixes a bug.
 
 - The follow-up suggestion above the input box sometimes named a *category*
-  instead of an actual prompt — "Укажи тему для анализа или задай конкретный
+  instead of an actual prompt: "Укажи тему для анализа или задай конкретный
   вопрос по проекту" ("Specify a topic for analysis or ask a specific
   question about the project"). Pressing → sent that sentence itself to the
   assistant, which made no sense. It is the same failure already fixed once
@@ -1524,9 +1524,9 @@ One thing you might notice: fewer steps when the work touches several files.
 
 One thing you might notice: long answers no longer stop mid-sentence.
 
-- When the server stops an answer at its output limit — cloud APIs often cap
+- When the server stops an answer at its output limit (cloud APIs often cap
   a reply at a few thousand tokens, and a local server does when its context
-  fills up — FlashAgent asks the model to go on from where it stopped and
+  fills up), FlashAgent asks the model to go on from where it stopped and
   writes the rest into the same message, up to three times. If the model
   starts by repeating its last words, the repeat is dropped before it reaches
   the screen.
@@ -1542,9 +1542,9 @@ One thing you might notice: long answers no longer stop mid-sentence.
 One thing you might notice: fewer failed tool calls from models that learned
 another agent's way of calling tools.
 
-- A model that writes a call the way another agent wants it — `filePath` or
+- A model that writes a call the way another agent wants it (`filePath` or
   `file_path` for `path`, `oldString` or `TargetContent` for `old_string`,
-  `cmd` for `command`, one edit given on its own instead of in a list — no
+  `cmd` for `command`, one edit given on its own instead of in a list) no
   longer gets "bad arguments" back and gives up or retries. The names are
   converted before anything reads the call, so the command on the approval
   card, the one the permission rules judge and the one that runs are still
@@ -1582,7 +1582,7 @@ Two things you might notice, one fix, and the rest is internal.
 - FlashAgent no longer decides a model can reason because its name contains
   "qwen", "deepseek", "gemma-4" or "think". It goes by what the server says:
   LM Studio lists the reasoning settings of every model that has them, and a
-  model the server says nothing about is left to its own default — thinking
+  model the server says nothing about is left to its own default: thinking
   is not switched off for it, and no settings are invented for it. The
   thinking menu for such a model offers Auto and Off, the only two it is
   known to take.
@@ -1598,14 +1598,14 @@ Two things you might notice, one fix, and the rest is internal.
   or a preset the server named, is already in force from the first message.
 - The setup wizard tells LM Studio apart from other servers by what the
   server's own listing says, once it has answered, instead of guessing from
-  the URL (`1234`, `lmstudio`) — the guess is still there for the moment
+  the URL (`1234`, `lmstudio`). The guess is still there for the moment
   before that. Mostly invisible; it matters for an LM Studio reachable
   through a hostname the guess would have missed, or a server that merely
   happened to sit on port 1234.
 - Two more scenario tests, checked by breaking what they guard: one drives a
   turn right after startup and confirms the regression above cannot come
   back, the other confirms that a model the server lists without saying
-  anything about its reasoning gets no reasoning fields on its turns at all —
+  anything about its reasoning gets no reasoning fields on its turns at all:
   silence is not "off". Sixteen scenarios now run on Linux, Windows and
   macOS.
 
@@ -1631,16 +1631,16 @@ Nothing changes for you in this release. It is about stability: the parts
 of FlashAgent you rely on most are now checked with every change, so a
 beta that breaks them does not get released.
 
-- Five more scenario tests — the real app in a terminal, against a stand-in
+- Five more scenario tests: the real app in a terminal, against a stand-in
   model server. They cover allowing a command (it runs, and its output goes
   back to the model), denying one (it never runs, and the model is told),
   Esc during an answer (it stops, and what was already written is kept),
   `/compact` (the conversation so far becomes a summary the model is sent
   instead), and `--resume` (a saved conversation comes back, on screen and
   for the model).
-- Each was checked by breaking what it guards — commands no longer asking,
+- Each was checked by breaking what it guards (commands no longer asking,
   Esc no longer stopping, the summary dropped, a resumed conversation shown
-  but not sent — and watching it fail. Ten scenarios now run on Linux,
+  but not sent) and watching it fail. Ten scenarios now run on Linux,
   Windows and macOS.
 
 ## b263 — a quieter server, and the app tested the way you use it
@@ -1648,7 +1648,7 @@ beta that breaks them does not get released.
 Two things in this release. Only the first is something you might notice.
 
 - FlashAgent asks your server which model is loaded far less often: every
-  15 seconds instead of every 3, and never while the model is working — not
+  15 seconds instead of every 3, and never while the model is working: not
   during a turn, and not while the recap after it is still being written. On
   a laptop that runs its own model, that is one thing fewer competing with the
   answer. Against a test server, 50 idle seconds went from 36 of these
@@ -1656,7 +1656,7 @@ Two things in this release. Only the first is something you might notice.
   switch in LM Studio still shows up, within 15 seconds.
 - Apart from that, nothing changes for you: the rest is about stability, so
   that bugs like the last few do not reach a beta. FlashAgent now has
-  scenario tests — the real app, started in a terminal, talking to a stand-in
+  scenario tests: the real app, started in a terminal, talking to a stand-in
   model server, checked by what is on the screen. The first five cover the
   setup wizard, quitting an empty session and one with a conversation, a turn
   that calls a tool, and the model list staying quiet while the model
@@ -1675,8 +1675,8 @@ Two things in this release. Only the first is something you might notice.
 ## b261 — the model you loaded
 
 - The setup wizard and the model list find the model LM Studio has loaded.
-  LM Studio's `/api/v1/models` can leave models out — on a real server it left
-  out the loaded `qwen3.6-35b-a3b-mtp` — and FlashAgent stopped at that list, so
+  LM Studio's `/api/v1/models` can leave models out (on a real server it left
+  out the loaded `qwen3.6-35b-a3b-mtp`), and FlashAgent stopped at that list, so
   step 3 offered three idle models and called them *3 models loaded*. It now
   fills the gaps from `/api/v0/models`, which lists every model with its state.
   Checked against LM Studio: step 3 shows *qwen3.6-35b-a3b-mtp · ● loaded ·
@@ -1737,7 +1737,7 @@ Still see slop? Open an issue and point at the line. That is worth more than
 
 - The auto-compaction threshold follows the window: 97% at a million tokens,
   95% at 512k, 90% at 256k, 85% at 128k, 80% at 64k, 75% at 32k and below. One
-  percentage cannot suit both ends — ten percent of a million tokens is a
+  percentage cannot suit both ends: ten percent of a million tokens is a
   hundred thousand left empty, while ten percent of 32k is not one answer.
   Settings says which one is in force: *Enabled (auto: 85% for this window)*.
   A threshold you set by hand is still yours; the old shipped default of 90 was
@@ -1768,7 +1768,7 @@ gets it, and fixed what that turned up.
 - The tool-calling check printed its verdict to a screen the app then
   cleared, so the one thing a new user needed to read was gone before they
   could read it. It is now the first line of the conversation: *Tool-calling
-  check: 6/8 — unreliable — expect to babysit it.*
+  check: 6/8 (unreliable), expect to babysit it.*
 - That check ran before the "do you trust this directory?" question, so the
   first thing a new user did was wait a minute and only then get asked where
   they were. The instant question comes first.
@@ -1800,19 +1800,19 @@ gets it, and fixed what that turned up.
   twelve seconds to arrive and five between chunks; a 35B writing at ten tokens
   a second never finished, so every compaction fell back to a list of truncated
   snippets. The budget now fits a real model, and the summary is asked for by
-  section — goal, decisions, files, facts, state, next — so what the next turn
+  section (goal, decisions, files, facts, state, next), so what the next turn
   needs cannot be summarised away. Checked end to end: after compaction the
   model still answered with a port number and a branch name that existed only
   in the part that was summarised.
 - The auto-compaction threshold looks at more than a percentage. It compacts
-  when the next turn would not fit — sized from what the last turn cost —
+  when the next turn would not fit (sized from what the last turn cost)
   rather than waiting for a line to be crossed and discovering the overflow
   mid-turn; and it does not compact a conversation whose bulk is the system
   prompt and tool schemas, where summarising frees nothing and costs the recent
   context.
 - The attachment row says what a picture will cost: `attached screenshot
   1440×900 · ~1.2k tokens`. The number is measured against the server once per
-  model, because it cannot be guessed — a Qwen charges by area (about a token
+  model, because it cannot be guessed: a Qwen charges by area (about a token
   per thousand pixels, measured), a Gemma a flat rate per image.
 - No emoji in the attachment row.
 - The what's-new screen shows the changelog's emphasis as emphasis. It printed
@@ -1820,7 +1820,7 @@ gets it, and fixed what that turned up.
 
 ## b249 — pictures
 
-- `view_image` — the model can open a picture in the project itself: a diagram
+- `view_image`. The model can open a picture in the project itself: a diagram
   in `docs/`, a screenshot in a bug report, a mockup to build from. The picture
   comes back as a picture, in a message of its own, because most servers take
   only text in a tool result. Offered only to models that can see,
@@ -1830,7 +1830,7 @@ gets it, and fixed what that turned up.
 - A file named in a sentence stays a mention; only a written-out path attaches
   itself. Otherwise asking "what is in diagram.png?" quietly sent a megabyte.
 - **Pictures.** `Ctrl+V` pastes a screenshot straight from the clipboard into
-  the message — the composer shows `📎 screenshot 1440×900`, `Ctrl+Z` takes it
+  the message: the composer shows `📎 screenshot 1440×900`, `Ctrl+Z` takes it
   back, and the model sees it. Dropping an image file on the window works too,
   as does naming one in the text. Verified end to end: a drawn digit pasted
   into a chat with qwen3.6-35b came back as "7".
@@ -1838,7 +1838,7 @@ gets it, and fixed what that turned up.
   you send into the dark, and pictures survive `--resume`.
 - Every tool call now explains itself, reads and searches included. The header
   was recommended but optional for them, and a capable 35B model wrote one
-  exactly never — so a search read `Searched "**/*.rs"` while an edit read like
+  exactly never, so a search read `Searched "**/*.rs"` while an edit read like
   a sentence. It is asked for on every call now: `Find all .rs files in the
   project · "**/*.rs"`, `Read main.rs contents`.
 - Paths inside the project are shown relative to it. A line reading `Read
@@ -1852,7 +1852,7 @@ what the server actually received.
   logged *"'minimal' reasoning effort is not directly supported"* on every
   turn. A profile belongs to a model, and is now re-derived when the model
   changes; a model discovery knows nothing about gets no thinking fields at all.
-- Fixed: a model switch also overwrote your effort setting — `auto` became
+- Fixed: a model switch also overwrote your effort setting: `auto` became
   `off` the moment the server loaded a model without reasoning, and stayed off
   for every model afterwards. The setting is yours; `/effort` now says "this
   model does not reason; kept for the next one" instead of silently changing it.
@@ -1880,7 +1880,7 @@ what the server actually received.
   per change, with `…` where there is more and `tab` to read it. Five
   paragraphs at once is a wall nobody reads.
 - Memory the model keeps for itself. One fact per file under `memory/`, with
-  `MEMORY.md` as an index of one line each — so what is remembered no longer
+  `MEMORY.md` as an index of one line each, so what is remembered no longer
   grows until it crowds out the conversation it was meant to help. Every fact
   carries its type (preference, decision, reference, work) and the date it was
   written, because a note that does not say when it was true quietly outlives
@@ -1888,17 +1888,17 @@ what the server actually received.
   project and every model; facts about the codebase stay with the project.
 - The model now writes memories without being asked. The tools existed before
   this, but nothing in the prompt said what was worth remembering, so it never
-  used them. It is told now — corrections you gave it, decisions and their
-  reasons, commands that are not discoverable — and told what is NOT worth it:
+  used them. It is told now (corrections you gave it, decisions and their
+  reasons, commands that are not discoverable), and told what is NOT worth it:
   anything the code, git history or README already says.
 - `/memory` shows everything remembered, in both scopes: `d` forgets one, and
-  `e` sends the model a note about the one under the cursor — "this is out of
-  date, I use just test now" — and it corrects the memory itself. Memory
+  `e` sends the model a note about the one under the cursor ("this is out of
+  date, I use just test now"), and it corrects the memory itself. Memory
   written without being asked has to be visible and reversible.
 - Writing a memory is announced on the line under the input, with a pointer to
   `/memory`.
 - Fixed: the what's-new screen did not appear for anyone updating into b245.
-  Nobody had a recorded version yet — that field ships in b245 — and an absent
+  Nobody had a recorded version yet (that field ships in b245), and an absent
   version was read as a first run. An existing config with no version is now
   read as what it is: someone who updated, and has news to read.
 
@@ -1910,38 +1910,38 @@ Stable versions start at `v1.0.0` and ship on the rolling `stable` release.
 - Auto effort learns from how the turns actually go. The guess about a task is
   made before the model has said a word, so it cannot know that *this* model
   thinks for two minutes about a one-line answer, or that it fumbles tool calls
-  unless given room. Now the turns are watched — a failed tool call or a
+  unless given room. Now the turns are watched (a failed tool call or a
   Ctrl+R asks for more thinking, a mountain of reasoning with a sentence of
   answer and nothing done asks for less, stopping it mid-thought counts as too
-  slow — and the level is nudged by at most one preset step, only after three
+  slow), and the level is nudged by at most one preset step, only after three
   consistent turns, fading back to neutral as soon as the turns stop
   complaining. Learned per model, kept in `~/.flashagent/effort.json`, and
   `/effort` says what it settled on: *Auto (per turn; learned one step down,
   after 7 turns)*. A preset you picked by hand is never second-guessed.
 - Fixed: the recap under a turn often never appeared. The request was capped at
-  512 tokens, and a model told not to think thinks anyway — one run spent 361
+  512 tokens, and a model told not to think thinks anyway: one run spent 361
   of them reasoning and was cut off before it closed its JSON, so nothing was
   shown. The budget now covers that, the recap is asked for first so it
   survives a cut-off, and a sentence that did finish is kept even when the
   brace after it never arrived.
-- Fixed: a Russian chat was labelled in English — `Thought: Analyzing Request`,
+- Fixed: a Russian chat was labelled in English: `Thought: Analyzing Request`,
   `Planning Implementation`. Those names are FlashAgent's own, and they now
   follow the conversation: `Разбираю запрос`, `Планирую реализацию`. A stage
   lifted out of the model's own reasoning is still shown exactly as it wrote
-  it — translating a quote would put words in its mouth.
+  it: translating a quote would put words in its mouth.
 - Fixed: listing the working directory read `Searched search`. It now reads
   `Searched the project`.
 
 - After an update, FlashAgent shows what arrived. One release per screen,
   entries appearing one at a time, `enter` to move on and `esc` to skip the
-  rest — read straight out of this file, so the screen cannot claim a feature
+  rest: read straight out of this file, so the screen cannot claim a feature
   that did not ship. It appears exactly once per version, never on a first
   run, and `/whatsnew` reopens it whenever you want. A fresh install is
   stamped silently, so nobody is greeted by a year of history.
 
 - Narrow terminals no longer cut text in half. Lines built from several facts
-  now drop whole facts when the width runs out — `gemma-4-e2b · auto · 64k`
-  becomes `gemma-4-e2b · auto`, not `gemma-4-e2b · auto [off` — the composer
+  now drop whole facts when the width runs out (`gemma-4-e2b · auto · 64k`
+  becomes `gemma-4-e2b · auto`, not `gemma-4-e2b · auto [off`) the composer
   shortens its prompt, and a tip too long for two lines ends on a word. A
   test renders the welcome card at six widths down to 30 columns and fails if
   any row overflows.
@@ -1957,7 +1957,7 @@ Stable versions start at `v1.0.0` and ship on the rolling `stable` release.
   at the server's own log. Anything unrecognised keeps its own words rather
   than being smoothed into a confident guess.
 - An unreachable model server says so when you start, not when you send your
-  first prompt — and takes it back by itself once the server answers.
+  first prompt, and takes it back by itself once the server answers.
 - Auto reasoning effort judges the task instead of the vocabulary: it used to
   match forty English keywords, so Russian prompts matched none of them, and
   it measured length in bytes, which made every Cyrillic sentence "long" and
@@ -1966,28 +1966,28 @@ Stable versions start at `v1.0.0` and ship on the rolling `stable` release.
 - The composer says what the turn is actually doing instead of "Working on
   task": waiting for the model, thinking, running the tool the model named,
   reading the result, writing the answer, stopping. Every one of those comes
-  from something the loop reported — there is deliberately no "almost done",
+  from something the loop reported. There is deliberately no "almost done",
   because the program does not know that.
 
 - Tool calls now carry a one-line explanation the model writes itself, and
   that line is what you read: `Add the missing null check to parser.rs`
   instead of `Editing parser.rs`. It is required for anything with
-  consequences — writes, patches, shell commands — and recommended for reads
+  consequences (writes, patches, shell commands) and recommended for reads
   and searches, so the cheap calls stay cheap. When a call fails, the same
   sentence says so: `Failed to add the missing null check to parser.rs`. The
   expanded card underneath is unchanged: the explanation is the model's
   stated intent, the card is what actually happened.
 
 - Changing the release channel now asks first. It replaces the binary with a
-  different line of builds, so the card says what that means — moving down to
-  stable can take features away and reset the settings they introduced — and
+  different line of builds, so the card says what that means (moving down to
+  stable can take features away and reset the settings they introduced), and
   names the version you would land on. Answering no puts back only the
   channel: everything else you changed in the same visit stays applied. If the
   channel you picked has nothing published on it yet, it says that instead of
   pretending there is a version waiting.
 
-- Messages that appear on their own — an update installing, the context being
-  compacted — now live on the line under the input rather than in the composer.
+- Messages that appear on their own (an update installing, the context being
+  compacted) now live on the line under the input rather than in the composer.
   The composer answers what you just did; something you did not ask for must
   not take that spot. They also share the line with the live token counters
   while a turn is running, instead of waiting for it to finish, and the ones
@@ -1996,7 +1996,7 @@ Stable versions start at `v1.0.0` and ship on the rolling `stable` release.
 - The recap and the follow-up suggestion now come back in the language of the
   conversation. "Write it in the language of the conversation" is not an
   instruction a small model follows; the language is now named outright,
-  detected by script — and a Russian conversation that quotes Python still
+  detected by script, and a Russian conversation that quotes Python still
   reads as Russian.
 
 - `flashagent --tool-test` scores your model on eight scenarios the agent loop
@@ -2010,7 +2010,7 @@ Stable versions start at `v1.0.0` and ship on the rolling `stable` release.
   `[No models discovered]`, `[Usage: /verbose …]`, `Update b238 · [███░░] 52%`
   and the rest are addressed to the person at the keyboard, not to the
   conversation, and a chat full of them is a chat you stop reading. Anything
-  with structure — a skills listing, a git diff, the `/goal` report — still
+  with structure (a skills listing, a git diff, the `/goal` report) still
   belongs in the transcript and stays there.
 - A finished update no longer says the same thing twice: the progress line
   disappears and the banner states the outcome.
@@ -2022,11 +2022,11 @@ Stable versions start at `v1.0.0` and ship on the rolling `stable` release.
   everything else is kept.
 - Stored values are read whatever their case. `"Beta"`, `"beta"`,
   `"Accept Edits"` (the label the app itself shows) and `"accept_edits"` all
-  mean what they look like — a config is edited by hand, and a capital letter
+  mean what they look like: a config is edited by hand, and a capital letter
   was costing people their settings.
 - CI keeps its build artifacts for three days instead of the default ninety.
   They only exist to hand binaries from the build jobs to the publish job in
-  the same run — the release assets are the lasting copy — and two days of
+  the same run (the release assets are the lasting copy), and two days of
   releases had filled the account's Actions storage with 2.3 GB of them.
 - The README recordings are redone against the current build, and two were
   added where a still picture explains nothing: `/goal` being stopped by its
@@ -2037,7 +2037,7 @@ Stable versions start at `v1.0.0` and ship on the rolling `stable` release.
 ## b238 — no emoji in the tool cards
 
 - Tool cards drop their emoji icons. `Edited notes.md +1 -0`, `Read
-  src/main.rs (120 lines)`, `Analyzed src/` — the extension already says what
+  src/main.rs (120 lines)`, `Analyzed src/`: the extension already says what
   a file is, so the icon carried nothing, and being two columns wide next to
   one-column glyphs it made listings fail to line up. Directories still end in
   `/`, the way `ls -F` marks them. A test keeps them out.
@@ -2045,7 +2045,7 @@ Stable versions start at `v1.0.0` and ship on the rolling `stable` release.
 ## b237 — no lightning left
 
 - The last two lightning bolts are gone: the welcome card says `FlashAgent
-  Engine` plainly, and a shell script is marked `$` rather than an emoji —
+  Engine` plainly, and a shell script is marked `$` rather than an emoji,
   which is also one column wide instead of two.
 
 ## b236 — updates you can watch
@@ -2060,17 +2060,17 @@ Stable versions start at `v1.0.0` and ship on the rolling `stable` release.
   stacking up, and a background update stays silent as before.
 - Fixed: an installed `flashagent` refused to update while you stood in the
   FlashAgent repository, claiming to be a dev build. What decides that is
-  where the binary lives, not where you are — and the repository is exactly
+  where the binary lives, not where you are, and the repository is exactly
   where you are when you notice there is a new build.
 - Fixed: opening FlashAgent and closing it without saying anything saved a
   session and offered a `--resume` id that restored nothing. The history is
-  never really empty — it opens with the system prompt — so the check now
+  never really empty (it opens with the system prompt), so the check now
   looks for an actual user message.
 
 ## b235 — budgets, a mascot that means something
 
-- While the model works, the mascot's face sits in the status line —
-  `(•_•) [Manual] · Generating response...` — blinking and winking on the
+- While the model works, the mascot's face sits in the status line,
+  `(•_•) [Manual] · Generating response...`, blinking and winking on the
   turn's own clock. The welcome card is gone by then, so this is the only
   place it can keep you company.
 - Fixed: `--resume` drew only the top border of the welcome card. The card is
@@ -2083,9 +2083,9 @@ Stable versions start at `v1.0.0` and ship on the rolling `stable` release.
   at you was worse than no suggestion at all; those are now dropped, and the
   analyzer is told plainly to write a message the assistant can answer on its
   own, in the language of the conversation. The giveaway is the object, not
-  the verb — "расскажи об архитектуре" still passes.
+  the verb: "расскажи об архитектуре" still passes.
 - The mascot is drawn properly. A terminal cell is twice as tall as it is
-  wide, so the old sprite — one pixel per cell — came out as a stretched,
+  wide, so the old sprite (one pixel per cell) came out as a stretched,
   spiky kite. It now draws two pixels per cell, which makes the pixels square
   and the shape round. It also breathes (the highlight rises and falls over
   about three seconds), and the welcome card draws itself in from the top over
@@ -2093,11 +2093,11 @@ Stable versions start at `v1.0.0` and ship on the rolling `stable` release.
 - The mascot's face reports whether the model server answered: eyes open and a
   smile when it did, eyes shut and drained colour when it did not, neutral
   while the first check is still running. Discovery reruns every few seconds,
-  so starting your server turns the face around by itself — on a first run
+  so starting your server turns the face around by itself. On a first run
   that is the difference between "nothing happens" and knowing why.
 - `/goal` takes budgets: `/goal [--steps N] [--time 30m] [--tokens 200k]
   <task>`, defaulting to 250 steps and one hour. `--tokens` counts generated
-  tokens only — with a prefix cache, a total-token budget mostly measures how
+  tokens only: with a prefix cache, a total-token budget mostly measures how
   long the conversation is. The status line shows the burn-down live
   (`step 12/250 · 4.2k tok · 3m05s/1h0m`), and the run ends with a report card
   built from loop events, not from the model's own account: steps, generated
@@ -2159,7 +2159,7 @@ test; the whole stack was also exercised live against LM Studio
   read arguments through one resolver, so the command that is approved is the
   command that runs (a stray `"arguments"` wrapper could make them differ).
 - The approval card always shows the command, path or MCP arguments being
-  approved — wrapped, never clipped, with whitespace padding made visible and
+  approved: wrapped, never clipped, with whitespace padding made visible and
   control characters neutralised.
 - MCP read-only annotations (`readOnlyHint`) and the `read_only` /
   `read_only_tools` settings in `.mcp.json` now actually skip approval cards.

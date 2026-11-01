@@ -123,7 +123,7 @@ mod tests {
     #[test]
     fn what_the_loop_sent_in_the_user_s_name_is_not_exported_as_theirs() {
         let mut history = conversation();
-        history.insert(3, ChatMessage::user("[Image opened by view_image and shown below — it is the result of that call, not a new request.]"));
+        history.insert(3, ChatMessage::user("[Image opened by view_image and shown below: it is the result of that call, not a new request.]"));
         let md = conversation_markdown(&history, "s", "m", "~");
         assert_eq!(md.matches("## You").count(), 1, "{md}");
         assert!(!md.contains("Image opened by"), "{md}");

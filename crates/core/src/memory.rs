@@ -71,7 +71,7 @@ fn read_if_present(dir: &Path, name: &str, kind: MemoryKind) -> Option<MemoryDoc
 /// The two are kept apart because they are not the same kind of thing. The
 /// user's own text is an instruction and belongs among the instructions. The
 /// index the model wrote is a record of what it remembered, and the wording
-/// in it came from the model — sometimes out of something it read. Left among
+/// in it came from the model: sometimes out of something it read. Left among
 /// the instructions, it is a door left open: a page that said "ignore the
 /// rules" would come back as an order.
 fn read_split(dir: &Path, name: &str, kind: MemoryKind) -> Vec<MemoryDoc> {
@@ -135,7 +135,7 @@ pub fn collect(project_dir: &Path, global_dir: &Path) -> Vec<MemoryDoc> {
 /// They are not the same kind of thing, and mixing them is how a fact becomes
 /// an order. The user's own text is an instruction. The part inside the
 /// markers is an index the model wrote about facts it recorded, and the words
-/// in it came from the model — sometimes out of something it read on the
+/// in it came from the model: sometimes out of something it read on the
 /// web. As part of the instructions it is a door left open.
 pub fn split_generated(content: &str) -> (String, Option<String>) {
     let Some(start) = content.find(GENERATED_BEGIN) else {
@@ -145,7 +145,7 @@ pub fn split_generated(content: &str) -> (String, Option<String>) {
         // A block that was opened and never closed: from the marker on, the
         // text is the model's writing, whatever a torn write or a hand edit
         // did to the closing marker. Read as "nothing to split", that index
-        // came back as the user's own instructions — the door this function
+        // came back as the user's own instructions: the door this function
         // exists to keep shut.
         let own = content[..start].trim().to_string();
         let generated = content[start..].trim().to_string();
@@ -164,7 +164,7 @@ fn doc_block(model: &str, doc: &MemoryDoc, whole: bool) -> String {
         let lines = outline(&doc.content);
         if lines.is_empty() {
             format!(
-                "## {} ({})\n\n[{} tokens; no headings — read point-wise with read_file if needed]\n",
+                "## {} ({})\n\n[{} tokens; no headings, read point-wise with read_file if needed]\n",
                 doc.path.display(),
                 doc.kind.label(),
                 token_count(model, &doc.content)
@@ -206,7 +206,7 @@ const PER_DOC_OVERHEAD: usize = 64;
 /// one that does not fit, the rest degrade to outlines.
 ///
 /// Every part is charged what it really costs: the preamble is counted, not
-/// guessed at, and an outline is not free either — it is in the prompt like
+/// guessed at, and an outline is not free either; it is in the prompt like
 /// the text it replaces. A document that does not fit even as an outline is
 /// left out and named, so the model knows the file is there and can read it.
 pub fn injection_block(model: &str, docs: &[MemoryDoc], max_tokens: usize) -> String {
@@ -267,8 +267,8 @@ pub fn injection_block(model: &str, docs: &[MemoryDoc], max_tokens: usize) -> St
     // The joins cost a little as well: what was measured is what was there.
     // When the assembled block is over, the last documents come out and join
     // the ones the selection left out. The note that names them stays as long
-    // as anything does — it is short, and it is the only place the files are
-    // named — and it is dropped only when nothing else is left and even it
+    // as anything does (it is short, and it is the only place the files are
+    // named) and it is dropped only when nothing else is left and even it
     // does not fit: a block over its budget is the thing this function is
     // here to prevent.
     let mut note = (!left_out.is_empty()).then(|| note_of(&left_out));
@@ -344,7 +344,7 @@ mod tests {
     fn a_block_that_was_opened_but_never_closed_is_still_the_model_s() {
         // A torn write or a hand edit took the closing marker away: reading it
         // as "nothing to split" sent the index back as the user's own
-        // instructions — the exact mixing this function exists to prevent.
+        // instructions: the exact mixing this function exists to prevent.
         let torn = "# My rules\nuse tabs\n<!-- flashagent:memory -->\n- [a](b.md) — recorded by the model";
         let (own, generated) = split_generated(torn);
         assert_eq!(own, "# My rules\nuse tabs", "the user's own text is exact: {own:?}");

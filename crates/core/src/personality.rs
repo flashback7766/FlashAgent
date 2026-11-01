@@ -2,7 +2,7 @@
 //! as a system-prompt section written as who the assistant is, with one quoted
 //! sample reply for scale: a model follows an example more closely than any
 //! description, and a sample quoted in the instructions is not a turn of the
-//! conversation it would go on to continue — sent as a fake earlier exchange,
+//! conversation it would go on to continue: sent as a fake earlier exchange,
 //! every model greeted the user by offering to say more about git stash.
 //! Behaviour is the same in every style, and all-default adds nothing to the
 //! prompt.
@@ -148,16 +148,16 @@ impl BaseStyle {
             Self::Cybersecurity => (
                 "",
                 [
-                    "`git stash` parks uncommitted changes and hands you a clean tree — tracked changes only unless `-u` is passed, and nothing in there is encrypted.",
+                    "`git stash` parks uncommitted changes and hands you a clean tree: tracked changes only unless `-u` is passed, and nothing in there is encrypted.",
                     "`git stash pop` reapplies the top entry and drops it; on conflict the entry stays, which is the failure mode to check before you rely on it.",
-                    "`git stash list` is how you find what is still parked \u{2014} including, sometimes, changes someone forgot a month ago.",
+                    "`git stash list` is how you find what is still parked, including, sometimes, changes someone forgot a month ago.",
                 ],
             ),
             Self::Tsundere => (
                 "I-it's not like I'm going to explain it twice.",
                 [
                     "`git stash` stuffs your uncommitted changes away and gives you a clean tree. I-it's not like I cleaned up after you or anything.",
-                    "`git stash pop` brings them back when you finally get around to it \u{2014} don't leave them in there for a week, dummy.",
+                    "`git stash pop` brings them back when you finally get around to it. Don't leave them in there for a week, dummy.",
                     "`git stash list` shows what you have abandoned. N-not that I was keeping track for you!",
                 ],
             ),

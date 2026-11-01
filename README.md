@@ -15,7 +15,7 @@
 
 </div>
 
-> **Status:** Stable v1.0.0 · Beta b660 — small changes roll out on the beta first and ride into the next stable release.
+> **Status:** Stable v1.0.0 · Beta b660. Small changes roll out on the beta first and ride into the next stable release.
 
 ## Quick start
 
@@ -60,11 +60,11 @@
 </tr>
 </table>
 
-<sub>Every recording on this page is a real session against MiniMax M3.1 Flash through OpenRouter — so the thoughts, timings and token counts are the ones it produced. Playback is sped up; nothing else is edited.</sub>
+<sub>Every recording on this page is a real session against MiniMax M3.1 Flash through OpenRouter, so the thoughts, timings and token counts are the ones it produced. Playback is sped up; nothing else is edited.</sub>
 
 ## How it compares
 
-The structural differences, not the feature checklists — those change faster
+The structural differences, not the feature checklists: those change faster
 than any table. Checked October 2026; where a cell says "docs", that project's
 own documentation is the truth, not this table.
 
@@ -73,7 +73,7 @@ own documentation is the truth, not this table.
 | Runs with no account, against a local server | ✓ LM Studio, Ollama, llama.cpp, vLLM | — needs an Anthropic plan | ~ OpenAI-compatible endpoints, incl. local | — needs a Google key | ✓ via LiteLLM | ✓ |
 | Cloud APIs | 19 presets, 4 native protocols | one vendor | one vendor + compatible endpoints | one vendor | many via LiteLLM | many |
 | What you install | one 19 MB static binary, ~58 MB idle | Node | binary | Node | Python | binary |
-| Telemetry | none — there is nothing to turn off | docs | docs | docs | docs | docs |
+| Telemetry | none: there is nothing to turn off | docs | docs | docs | docs | docs |
 | Checks the model can call tools (`--tool-test`) | ✓ 20 scenarios, scores in the README | — | — | — | — | — |
 | License | MIT, one repo, five crates | docs | Apache-2.0 | docs | Apache-2.0 | MIT |
 
@@ -121,13 +121,13 @@ else, on `stealth/space-bunny-alpha`:
 | `chain_survives_failure` | 2/3 | 7 of 9 runs |
 
 Identical, down to the same failure in the same place. Two of the three are also
-saturated — a scenario both prompts pass every time cannot tell them apart — so
+saturated (a scenario both prompts pass every time cannot tell them apart), so
 the honest reading is that this instrument has no resolution here, not that the
 prompts are equivalent.
 
 ### Delegation: measured for the first time
 
-The five delegation scenarios had never been measured before — the check sent a
+The five delegation scenarios had never been measured before: the check sent a
 system prompt without the delegation rules, so it could not grade what it did
 not describe. With the rules in place, on `stealth/space-bunny-alpha`:
 
@@ -199,7 +199,7 @@ Packages for Arch (`pacman -U`), Debian/Ubuntu (`dpkg -i`), Void, AppImage, macO
 <details>
 <summary>Uninstall</summary>
 
-`flashagent --uninstall` (or `/uninstall` inside the app) removes every copy of the program, the PATH lines the installer added (keeping a backup of each file it edits), and asks part by part which data in `~/.flashagent` to delete — caches and `/rewind` copies are ticked, settings, sessions and memory are not. An install from a package (pacman, dpkg, xbps) is removed through that package manager. If the binary is already gone or broken:
+`flashagent --uninstall` (or `/uninstall` inside the app) removes every copy of the program, the PATH lines the installer added (keeping a backup of each file it edits), and asks part by part which data in `~/.flashagent` to delete: caches and `/rewind` copies are ticked, settings, sessions and memory are not. An install from a package (pacman, dpkg, xbps) is removed through that package manager. If the binary is already gone or broken:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/flashback7766/FlashAgent/main/uninstall.sh | bash
@@ -229,13 +229,13 @@ Or install straight from the repository: `cargo install --git https://github.com
 
 Start your server, then run `flashagent` in your project directory. The first launch opens a setup wizard: pick a server from the list, or type any address as Custom. `flashagent --setup` runs it again, and whatever you pick there is saved as another provider beside the ones you have, or updates the one for that server.
 
-No server on the machine at all? **OpenCode Go** is a $10/month subscription ([opencode.ai/go](https://opencode.ai/go)) for a curated set of coding models — Kimi, GLM, DeepSeek, MiniMax, Claude Haiku and more — behind one API key.
+No server on the machine at all? **OpenCode Go** is a $10/month subscription ([opencode.ai/go](https://opencode.ai/go)) for a curated set of coding models: Kimi, GLM, DeepSeek, MiniMax, Claude Haiku and more, all behind one API key.
 
 1. Subscribe at [opencode.ai/go](https://opencode.ai/go) and copy an API key from the [console](https://opencode.ai/console).
-2. Run `flashagent`, pick **OpenCode Go** in the wizard, paste the key (or `export OPENCODE_API_KEY=...` first — the wizard notices it).
+2. Run `flashagent`, pick **OpenCode Go** in the wizard, paste the key (or `export OPENCODE_API_KEY=...` first; the wizard notices it).
 3. Pick a model; `kimi-k3.1-pro`, `glm-5.3-flash` and `deepseek-v4.1-flash` are the plan's strong coders.
 
-FlashAgent follows the Go API's rules for outside agents: it names itself `flashagent/<version>` and marks every request with an `x-opencode-session` header — one id per conversation, kept when a session is resumed, which is what their routing and prompt caching key on. The same key also serves pay-as-you-go console credit at `https://opencode.ai/inference/v1`; add that address as Custom for the full console model list.
+FlashAgent follows the Go API's rules for outside agents: it names itself `flashagent/<version>` and marks every request with an `x-opencode-session` header: one id per conversation, kept when a session is resumed, which is what their routing and prompt caching key on. The same key also serves pay-as-you-go console credit at `https://opencode.ai/inference/v1`; add that address as Custom for the full console model list.
 
 | Provider | Address | Protocol | Key |
 | :--- | :--- | :--- | :--- |
@@ -247,8 +247,8 @@ FlashAgent follows the Go API's rules for outside agents: it names itself `flash
 | **KoboldCpp** | `http://localhost:5001/v1` | OpenAI-compatible | none |
 | **text-generation-webui** | `http://localhost:5000/v1` | OpenAI-compatible | none; start it with `--api` |
 | **LocalAI** | `http://localhost:8080/v1` | OpenAI-compatible | none |
-| **OpenCode Go** | `https://opencode.ai/inference/go/v1` | OpenAI-compatible | `OPENCODE_API_KEY`; [subscription](https://opencode.ai/go), key from the [console](https://opencode.ai/console) — set-up steps above |
-| **AgentRouter** | `https://agentrouter.org/v1` | OpenAI-compatible | `AGENTROUTER_API_KEY`; serves known coding agents and refuses the rest before the key — the preset presents itself as one they accept, the editor's User-Agent field changes it |
+| **OpenCode Go** | `https://opencode.ai/inference/go/v1` | OpenAI-compatible | `OPENCODE_API_KEY`; [subscription](https://opencode.ai/go), key from the [console](https://opencode.ai/console); set-up steps above |
+| **AgentRouter** | `https://agentrouter.org/v1` | OpenAI-compatible | `AGENTROUTER_API_KEY`; serves known coding agents and refuses the rest before the key: the preset presents itself as one they accept, the editor's User-Agent field changes it |
 | **Anthropic** | `https://api.anthropic.com` | Anthropic | `ANTHROPIC_API_KEY` |
 | **OpenAI** | `https://api.openai.com/v1` | OpenAI-compatible | `OPENAI_API_KEY` |
 | **Gemini** | `https://generativelanguage.googleapis.com/v1beta` | Gemini | `GEMINI_API_KEY` or `GOOGLE_API_KEY` |
@@ -323,7 +323,7 @@ On Windows, `run_shell` uses Git Bash when Git for Windows is installed and `cmd
 | **Accept Edits** (first run) | run | ask | ask (`read_only` ones run) |
 | **Accept All** | run | run, except dangerous commands (`rm -rf`, `sudo`, `git push --force`, `git reset --hard`, ...), which ask | run |
 
-**Safe mode** (`/safe`) sits on top of the permission mode: reading and editing inside the project, and nothing else — the shell, the web and the subagents are off, and a project MCP server asks every time. The footer says when it is on.
+**Safe mode** (`/safe`) sits on top of the permission mode: reading and editing inside the project, and nothing else. The shell, the web and the subagents are off, and a project MCP server asks every time. The footer says when it is on.
 
 FlashAgent starts in the mode you left it in. Reads inside the project and web tools are always allowed. Reading or writing a file outside the project asks in Manual and Accept Edits, is allowed in Accept All (where the shell already reaches any file), and is refused in Planning and during `/goal`. Fetching a local address (`localhost`, your local network, a cloud metadata endpoint) asks in every mode and is refused in Planning and during `/goal`. Approval cards offer **Allow**, **Always** and **Deny**; "Always" on a shell command stores a narrow per-command rule in the config, it survives a restart, and `/rules` shows what stands and takes a rule back. There is no sandbox: commands and edits run with your user's rights, so the mode and the approval card are what stands between the model and your files.
 

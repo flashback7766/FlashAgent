@@ -63,8 +63,8 @@ pub struct MockServer {
 struct SideRequests {
     per_word: Mutex<Option<Duration>>,
     /// The body of every side request the app hung up on while it was writing.
-    /// The app abandons more than one kind of side request — a warm-up that a
-    /// turn overtook is dropped on purpose — so which one it was matters.
+    /// The app abandons more than one kind of side request (a warm-up that a
+    /// turn overtook is dropped on purpose), so which one it was matters.
     dropped: Mutex<Vec<String>>,
     /// Keyed by a substring anywhere in the request.
     answers: Mutex<Vec<(String, String)>>,

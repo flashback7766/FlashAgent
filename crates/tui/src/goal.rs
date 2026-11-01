@@ -322,7 +322,7 @@ impl GoalLedger {
                 crate::i18n::tr("The backend failed mid-run; work listed above already happened on disk.")
                     .to_string()
             }
-            _ => "The goal was cut short by a limit — it is not finished. Raise the limit in \
+            _ => "The goal was cut short by a limit: it is not finished. Raise the limit in \
                   Settings → Goal and re-run, or continue in the chat."
                 .to_string(),
         });

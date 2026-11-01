@@ -649,8 +649,8 @@ fn latin_key(code: KeyCode) -> Option<char> {
 /// The Russian layout: the letter on each key, and the letter on the same key
 /// of the Latin layout.
 ///
-/// One place for the whole interface. There were two tables for one job — one
-/// for the letters, one for the keys with a sign — and a fix to one did not
+/// One place for the whole interface. There were two tables for one job (one
+/// for the letters, one for the keys with a sign), and a fix to one did not
 /// reach the other. The letters are the ones that stay letters on both
 /// layouts; the signs are the keys the Russian layout turned into letters.
 const RU_LETTERS: &str = "йцукенгшщзфывапролдячсмить";

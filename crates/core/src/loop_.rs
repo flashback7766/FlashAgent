@@ -268,8 +268,8 @@ impl GrowingHistory {
         self.shared.replace_last(message);
     }
 
-    /// After something rewrote the working copy outright — compaction, a partial
-    /// reply kept on the way out — the shared handle is told the new whole.
+    /// After something rewrote the working copy outright (compaction, a partial
+    /// reply kept on the way out) the shared handle is told the new whole.
     fn sync(&mut self) {
         self.shared.replace_all(&self.local);
     }
@@ -381,7 +381,7 @@ fn try_recv_steer(rx: &mut Option<tokio::sync::mpsc::UnboundedReceiver<Steer>>) 
 /// stores it again. A steer, the step limit, a cancellation, a compaction or
 /// a failed request can end or divert the turn before that: the held answer
 /// then has to go back, or the screen showed words that reached neither the
-/// model nor the session file. The nudge itself is not rescued — it was
+/// model nor the session file. The nudge itself is not rescued: it was
 /// advice to the model, not part of the conversation, and each of these
 /// paths either replaces it or ends the turn.
 fn held_answer_back(transient: &mut Vec<ChatMessage>, history: &mut GrowingHistory) {
@@ -741,7 +741,7 @@ impl AgentLoop {
             let mut calls: Vec<ToolCall> = indexed_calls.into_iter().map(|(_, call)| call).filter(|c| !c.name.trim().is_empty()).collect();
             // A server that sends a call natively and also writes the markup in
             // its text has sent one call, not two: the same one is dropped. A
-            // call that is only in the text is a different call and is run —
+            // call that is only in the text is a different call and is run:
             // throwing it away loses work the model asked for and never hears
             // about.
             for text_call in text_calls {
@@ -1036,7 +1036,7 @@ impl AgentLoop {
                     // A separate message, since a tool result is text only. It is marked so the
                     // model does not read it as the user speaking.
                     let mut msg = ChatMessage::user(format!(
-                        "{TOOL_PICTURE_OPENING}{} and shown below — {TOOL_PICTURE_NOTE}",
+                        "{TOOL_PICTURE_OPENING}{} and shown below: {TOOL_PICTURE_NOTE}",
                         call.name
                     ));
                     msg.images = images;
@@ -1074,7 +1074,7 @@ const TOOL_PICTURE_NOTE: &str = "it is the result of that call, not a new reques
 /// with.
 ///
 /// Both halves are needed. The wording in between changes with the numbers in
-/// it — how many steps were spent, how many calls were made — so the text
+/// it (how many steps were spent, how many calls were made) so the text
 /// itself cannot be matched, and a note is the app's own writing, never
 /// something the user typed. A user message that only happens to contain the
 /// closing clause is still the user's message: it did not open like a note.
@@ -1212,7 +1212,7 @@ pub(crate) fn named_tool_nudge(history: &[ChatMessage], specs: &[ToolSpec], repl
 
 /// "Read status.txt, then report the number it contains with report_status":
 /// the model reads the file, reads it again, and never reports. It is working,
-/// so nothing above fires — it never answers in prose, it just keeps calling
+/// so nothing above fires. It never answers in prose, it just keeps calling
 /// tools and quietly skips the one the request named.
 ///
 /// Once per turn, before the next round of calls goes out, it is told plainly

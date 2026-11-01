@@ -521,7 +521,7 @@ impl App {
         // sentence is a mention, and the model has view_image for it. A dropped file
         // arrives as a paste on Unix and as typing on Windows; both land here.
         //
-        // The whole message has to be paths — one of them, or several. A path
+        // The whole message has to be paths: one of them, or several. A path
         // named in a sentence is a mention: attaching it would spend the
         // traffic, the tokens and the money without anyone asking for a picture.
         //
@@ -582,7 +582,7 @@ impl App {
             "Autonomous Goal Mode:\n\
              Usage: /goal <task description>\n\
              Example: /goal Refactor error handling in the core crate and run the test suite\n\
-             Limits: {} — change them in Settings → Goal.\n\
+             Limits: {}. Change them in Settings → Goal.\n\
              In goal mode FlashAgent approves its own tool calls (dangerous shell commands are refused), \
              thinks at maximum effort and works on its own. A question it asks you waits {} for an answer, \
              then the run carries on without it.",
@@ -675,7 +675,7 @@ impl App {
              3. Thoroughly test and verify your changes before finishing.\n\
              4. Conclude with a clear structured summary of what was accomplished.\n\
              5. Call update_plan with your whole step-by-step plan before starting, \
-             and again whenever a step finishes or the plan changes — the person \
+             and again whenever a step finishes or the plan changes: the person \
              who started this run watches it live and has no other way to see where \
              the run stands.\n\n\
              {budget_rule}",
@@ -988,7 +988,7 @@ impl App {
         // against, and what the card says it freed.
         let used = self.context_usage.total_used();
         // The room one request may carry: the window minus the prompt, the
-        // memory and the schemas — once. What the conversation holds now is
+        // memory and the schemas (once). What the conversation holds now is
         // what gets summarized, so it is not subtracted here.
         let room = crate::compact::room_for(
             self.context_usage.total_capacity,

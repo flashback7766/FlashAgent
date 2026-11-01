@@ -156,7 +156,7 @@ impl RulesView {
     /// A click selects the row it landed on. Taking a rule back stays with
     /// the keys: a click is a poor place for a destructive surprise.
     pub fn click_select(&mut self, line: usize) -> bool {
-        // Title, what the list is, a blank — then the rows.
+        // Title, what the list is, a blank, then the rows.
         const FIRST_ROW_LINE: usize = 3;
         let Some(in_window) = line.checked_sub(FIRST_ROW_LINE) else { return false };
         let idx = in_window + self.scroll;

@@ -220,7 +220,7 @@ impl PrefillTracker {
             // reports its cache only when the turn is over, so the token count and
             // the speed on this line come from the previous turn's cache share. A
             // nearby server is a machine whose rate holds, so its numbers are worth
-            // printing. A hosted one is a queue and a network — there the same two
+            // printing. A hosted one is a queue and a network. There the same two
             // numbers would be an assumption wearing the clothes of a measurement,
             // and only the estimate and the bar are left.
             let detail = if nearby {

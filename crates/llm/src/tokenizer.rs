@@ -1,8 +1,8 @@
 //! How many tokens a text is, for the model it is sent to.
 //!
-//! One place, one rule. Everything that counts tokens — the budget for the
+//! One place, one rule. Everything that counts tokens (the budget for the
 //! tool schemas, the bar that says how full the window is, the trigger for
-//! compaction, the speed on the status line — goes through
+//! compaction, the speed on the status line) goes through
 //! [`count_tokens`]. Before this there were three rules side by side: a
 //! character count divided by four for the conversation, the same for the
 //! compaction, and a real tokenizer for the budget. The bar and the budget
@@ -22,9 +22,9 @@
 //! 3. What the model was measured to be, on top of that table. Every server
 //!    says how many tokens it wrote, and the app knows the text it wrote, so
 //!    the app can measure the model and keep the measurement. The
-//!    measurement is kept per model and per kind of text — words in the
+//!    measurement is kept per model and per kind of text (words in the
 //!    Latin script, words in another script, and the punctuation between
-//!    them — because the same sentence costs a third more in Russian.
+//!    them) because the same sentence costs a third more in Russian.
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -276,7 +276,7 @@ const SHORTEST_MEASURED: usize = 24;
 /// The pair a sample is built from can be broken: reasoning the stream never
 /// showed as deltas, a retry whose first attempt is still in the text, the
 /// answer of the request before still in the buffer. Every one of those reads
-/// as a tokenizer several times off the table, and no tokenizer is — `o200k`,
+/// as a tokenizer several times off the table, and no tokenizer is: `o200k`,
 /// the table every stranger is counted with, was measured within 30% of a real
 /// model's own on every text tried. A sample outside this band is a broken
 /// pair, and learning from it is what walked one factor to 4.1 and another to
@@ -295,7 +295,7 @@ fn credible(factor: f64) -> bool {
 ///
 /// The server counts the tokens of the text it generated, and the app has
 /// that text: the two together are a measurement of the model, exact, and
-/// they cost nothing extra — the number arrives with every answer anyway.
+/// they cost nothing extra: the number arrives with every answer anyway.
 ///
 /// What it teaches is how far the model is from the table it is counted with.
 /// A Russian answer moves the correction for Russian words; an English one
@@ -417,7 +417,7 @@ mod tests {
         let model = "measured-model-for-test";
         let text = "Русский текст, который сервер посчитал, и довольно длинный, чтобы конц��вка сервера была малой долей ответа.";
         let before = count_tokens(model, text);
-        // The server says the text is a bit over half of what the table says —
+        // The server says the text is a bit over half of what the table says:
         // inside the band an honest sample may sit in.
         let table = table_count(model, text);
         let target = (table * 3 / 5).max(1);
@@ -446,8 +446,8 @@ mod tests {
 
     #[test]
     fn a_sample_no_tokenizer_could_have_written_is_not_learned_from() {
-        // Broken pairs — reasoning the stream never showed, a retry's text
-        // counted once while sitting in the buffer twice — read as a tokenizer
+        // Broken pairs (reasoning the stream never showed, a retry's text
+        // counted once while sitting in the buffer twice) read as a tokenizer
         // several times off the table. None is: these are refused whole, not
         // clamped, or the count drifts with every request.
         let model = "measured-model-three-for-test";

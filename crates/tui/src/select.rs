@@ -320,7 +320,7 @@ impl<T> SelectMenu<T> {
             let item = &self.items[idx];
             let rows = 1 + usize::from(item.description.is_some()) + usize::from(item.hidden_match(&filter).is_some());
             if (row..row + rows).contains(&line) {
-                // The row under the pointer is the pick — the already-selected
+                // The row under the pointer is the pick: the already-selected
                 // one included, so the second click confirms as Enter would.
                 self.selected = idx;
                 return MenuClick::Select;

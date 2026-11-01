@@ -144,7 +144,7 @@ impl App {
             Some(mut other) => {
                 // A select menu answers its own rows now: a click on an item
                 // selects it, and the pick goes through the same Enter path
-                // the keys use — the palette runs its command, the model menu
+                // the keys use: the palette runs its command, the model menu
                 // switches. A pending question outranks the menu, so the
                 // click only moves the selection and waits for the keys.
                 use flashagent_tui::select::MenuClick;

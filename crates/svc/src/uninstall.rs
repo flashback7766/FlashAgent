@@ -441,7 +441,7 @@ pub fn run_interactive(assume_yes: bool) -> anyhow::Result<()> {
     if plan.data.is_empty() {
         println!("  No data in {}", plan.data_dir.display());
     } else {
-        println!("\n  Data in {} — choose what to delete:", plan.data_dir.display());
+        println!("\n  Data in {}. Choose what to delete:", plan.data_dir.display());
         for part in &plan.data {
             let question = format!("    Delete {} ({})?", part.label, human_size(part.bytes));
             let yes = if assume_yes {

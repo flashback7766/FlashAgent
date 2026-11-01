@@ -43,7 +43,7 @@ task the same way, later.
 | **does not delegate one file it could open itself** | read a single known file directly | the other half of the same rule: delegation has a cost and a point |
 
 The last eight exist because the twelve before them all asked for one tool call
-and graded it, which says nothing about multi-step work — and two of them pass on
+and graded it, which says nothing about multi-step work. Two of them pass on
 almost every model, so they are there to catch a regression rather than to
 separate prompts.
 

@@ -348,7 +348,7 @@ fn set_doing(child: &mut Child, text: String) -> bool {
 /// was called, and it reads the same whether that call is a second old or just
 /// began. The frames are the ones the rest of the interface turns, so the whole
 /// app moves at one speed and off the clock rather than off how often a frame
-/// happened to be drawn. A finished child stops moving — a spinner that kept
+/// happened to be drawn. A finished child stops moving: a spinner that kept
 /// turning on a dead row is the one way to say "working" about work that is over.
 fn icon(done: Option<DoneReason>, running_mark: &str) -> String {
     // From the set the rest of the interface draws from, so these show on a

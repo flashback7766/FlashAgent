@@ -85,7 +85,7 @@ pub(crate) trait WireDecoder: Send + 'static {
 
 /// Frames in a row that were not JSON. One is a gateway's stray keepalive or
 /// a single mangled line; a healthy stream never has two in a row, so a run
-/// of them means the framing is broken — and the frames carrying the finish
+/// of them means the framing is broken, and the frames carrying the finish
 /// reason are among the ones being lost, which is what makes the stream look
 /// clean when it is not.
 pub(crate) const MALFORMED_LIMIT: u32 = 3;
@@ -442,7 +442,7 @@ impl Client {
     /// been generated. Anything else is returned as it came.
     ///
     /// Every path here ends at a response that has not been read yet, so no
-    /// retry can reach events a reader has already seen — and so no retry can
+    /// retry can reach events a reader has already seen, and so no retry can
     /// repeat a tool call the previous attempt streamed.
     pub(crate) async fn post(
         &self,
@@ -542,7 +542,7 @@ fn user_agent() -> String {
         .unwrap_or_else(|| format!("flashagent/{}", option_env!("FLASHAGENT_VERSION").unwrap_or(env!("CARGO_PKG_VERSION"))))
 }
 
-/// `opencode.ai` itself or a subdomain — the host whose Go routes refuse a
+/// `opencode.ai` itself or a subdomain: the host whose Go routes refuse a
 /// request that carries no `x-opencode-session`.
 fn is_opencode_host(url: &str) -> bool {
     let host = url
@@ -954,7 +954,7 @@ mod tests {
     fn a_saved_level_the_model_does_not_have_is_not_sent_as_it_stands() {
         // Seen live: the setting said xhigh, the model listed
         // [high, medium, low, minimal, none], and the request still carried
-        // xhigh — the gateway either drops it or refuses it, and the setting
+        // xhigh: the gateway either drops it or refuses it, and the setting
         // reads as applied while nothing is thinking.
         let llm = client("m").with_profile(ThinkingProfile {
             presets: vec!["none".into(), "minimal".into(), "low".into(), "medium".into(), "high".into()],

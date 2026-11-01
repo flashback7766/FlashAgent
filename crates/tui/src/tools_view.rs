@@ -92,7 +92,7 @@ impl ToolsView {
 
     /// A click on the card. `line` counts from the title row. A row selects
     /// its tool; the tool already under the cursor turns on or off, as Space
-    /// would — a click is a focus first, an action second.
+    /// would. A click is a focus first, an action second.
     pub fn click(&mut self, line: usize) -> ToolsAction {
         // The title and the separator under it belong to the box.
         const FIRST_ROW_LINE: usize = 2;
