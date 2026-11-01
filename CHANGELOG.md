@@ -1,5 +1,12 @@
 # Changelog
 
+## b660 — The same fixes as b659, built by a green test suite
+
+- **Nothing user-visible changed.** b659 was never published: one TUI test
+  compared the shimmering compaction status line with its colour codes still
+  in place, and on macOS the band happened to light the first letter. The test
+  now reads the text without them, and every phase of the sweep is covered.
+
 ## b659 — Compaction tells the truth, and an Azure replay refusal has a way through
 
 - **The context gauge moves when compaction ends, not on the next prompt.**

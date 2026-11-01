@@ -15,7 +15,7 @@
 
 </div>
 
-> **Status:** Stable v1.0.0 · Beta b659 — small changes roll out on the beta first and ride into the next stable release.
+> **Status:** Stable v1.0.0 · Beta b660 — small changes roll out on the beta first and ride into the next stable release.
 
 ## Quick start
 
