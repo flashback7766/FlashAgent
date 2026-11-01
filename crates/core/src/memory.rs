@@ -5,6 +5,11 @@
 
 use std::path::{Path, PathBuf};
 
+// One pair of markers, defined where the index is written. A copy here would
+// drift the day one of them changed, and the model's index would read as the
+// owner's own instructions.
+use crate::memory_store::{BEGIN as GENERATED_BEGIN, END as GENERATED_END};
+
 
 /// The cost of a piece of memory, in the tokens of the model that will read
 /// it. The budget it is measured against is the model's, so it is counted the
@@ -124,11 +129,6 @@ pub fn collect(project_dir: &Path, global_dir: &Path) -> Vec<MemoryDoc> {
     docs.extend(read_split(global_dir, GLOBAL_FILENAME, MemoryKind::Global));
     docs
 }
-
-/// The markers around the part of a memory file that the model wrote itself.
-/// Everything outside them is the user's own text.
-const GENERATED_BEGIN: &str = "<!-- flashagent:memory -->";
-const GENERATED_END: &str = "<!-- /flashagent:memory -->";
 
 /// Splits a memory file into the user's own text and the part the model wrote.
 ///

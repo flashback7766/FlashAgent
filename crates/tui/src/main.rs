@@ -1083,7 +1083,10 @@ fn open_in_external_editor(initial_text: &str, preferred_editor: &str) -> std::i
 
     let temp_dir = std::env::temp_dir();
     let temp_file = temp_dir.join(format!("flashagent_prompt_{}.md", std::process::id()));
-    std::fs::write(&temp_file, initial_text)?;
+    // A prompt can carry a pasted key, and a file in /tmp is readable by every
+    // user on the machine. The sessions and the config are written private for
+    // the same reason.
+    flashagent_core::paths::write_private(&temp_file, initial_text.as_bytes())?;
 
     INPUT_PAUSED.store(true, Ordering::SeqCst);
     // Let a poll already under way in the reader thread run out.

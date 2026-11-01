@@ -624,9 +624,11 @@ fn plan_one_edit(path: &str, text: &str, edit: &EditChunk) -> Result<PlannedEdit
         // it replaces are known by number, not by a match.
         let mut new_text = in_line_endings_of(text, &edit.new_string).into_owned();
         // The lines that went had a line ending after them; the text that
-        // takes their place needs one too, or the next line joins it.
+        // takes their place needs one too, or the next line joins it. A
+        // deletion writes nothing and must not leave the ending behind as an
+        // empty line.
         let replaced = &text[from..to];
-        if replaced.ends_with('\n') && !new_text.ends_with('\n') {
+        if !new_text.is_empty() && replaced.ends_with('\n') && !new_text.ends_with('\n') {
             let ending = if replaced.ends_with("\r\n") { "\r\n" } else { "\n" };
             new_text.push_str(ending);
         }
@@ -990,6 +992,15 @@ fn grep_file(cwd: &Path, file: &Path, re: &regex::Regex) -> Vec<String> {
 mod tests {
     use super::*;
     use crate::testing::tempdir;
+
+    #[test]
+    fn deleting_lines_by_number_leaves_no_blank_line() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.txt"), "one\ntwo\nthree\n").unwrap();
+        let edit = EditChunk { start_line: Some(2), end_line: Some(2), new_string: String::new(), ..Default::default() };
+        edit_file(dir.path(), "a.txt", &[edit]).unwrap();
+        assert_eq!(std::fs::read_to_string(dir.path().join("a.txt")).unwrap(), "one\nthree\n");
+    }
 
     fn chunk(old: &str, new: &str, replace_all: bool) -> EditChunk {
         EditChunk { old_string: old.into(), new_string: new.into(), replace_all, ..Default::default() }

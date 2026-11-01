@@ -192,6 +192,12 @@ impl McpModal {
             // first press only arms it and says so: a stray `d` in this panel
             // would take away the permission the owner had given.
             KeyCode::Char('d') | KeyCode::Delete => {
+                // Only the servers tab lists trust. On another tab the cursor
+                // is on menu rows, and a `d` there took the trust of a server
+                // the owner could not see.
+                if self.active_tab != McpViewTab::Servers {
+                    return McpModalAction::None;
+                }
                 let Some(name) = self.trusted_at(self.selected_index).map(|t| t.name.clone()) else {
                     return McpModalAction::None;
                 };
@@ -352,6 +358,7 @@ impl McpModal {
                     for (idx, s) in self.servers.iter().enumerate() {
                         let is_sel = idx == self.selected_index;
                         let ptr = if is_sel { "\x1b[1;38;2;225;175;95m▸\x1b[0m" } else { " " };
+                        let name = pad_cells(&crate::truncate_middle(&s.name, 18), 18);
                         let st_badge = match &s.state {
                             ServerConnectionState::Active => "\x1b[38;2;135;220;145m● active\x1b[0m",
                             ServerConnectionState::Disabled => "\x1b[38;2;135;130;125m○ disabled\x1b[0m",
@@ -360,9 +367,9 @@ impl McpModal {
                         };
                         let tools = crate::text::plural(s.tool_count, "tool", "tools");
                         let row = if is_sel {
-                            format!("{ptr} \x1b[1;38;2;240;235;225m{:<18}\x1b[0m {st_badge}  \x1b[1;38;2;225;175;95m{tools}\x1b[0m", s.name)
+                            format!("{ptr} \x1b[1;38;2;240;235;225m{name}\x1b[0m {st_badge}  \x1b[1;38;2;225;175;95m{tools}\x1b[0m")
                         } else {
-                            format!("{ptr} \x1b[38;2;160;155;145m{:<18}\x1b[0m {st_badge}  \x1b[38;2;135;130;125m{tools}\x1b[0m", s.name)
+                            format!("{ptr} \x1b[38;2;160;155;145m{name}\x1b[0m {st_badge}  \x1b[38;2;135;130;125m{tools}\x1b[0m")
                         };
                         lines.push((LineKind::System, pad_row(&row)));
                     }
@@ -374,12 +381,12 @@ impl McpModal {
                         for (idx, t) in self.trusted.iter().enumerate() {
                             let is_sel = self.servers.len() + idx == self.selected_index;
                             let ptr = if is_sel { "\x1b[1;38;2;225;175;95m▸\x1b[0m" } else { " " };
-                            let name = crate::truncate_middle(&t.name, 18);
+                            let name = pad_cells(&crate::truncate_middle(&t.name, 18), 18);
                             let command = crate::truncate_middle(&t.command, inner_text_w.saturating_sub(22));
                             let row = if is_sel {
-                                format!("{ptr} \x1b[1;38;2;240;235;225m{:<18}\x1b[0m \x1b[38;2;135;130;125m{command}\x1b[0m", name)
+                                format!("{ptr} \x1b[1;38;2;240;235;225m{name}\x1b[0m \x1b[38;2;135;130;125m{command}\x1b[0m")
                             } else {
-                                format!("{ptr} \x1b[38;2;160;155;145m{:<18}\x1b[0m \x1b[38;2;135;130;125m{command}\x1b[0m", name)
+                                format!("{ptr} \x1b[38;2;160;155;145m{name}\x1b[0m \x1b[38;2;135;130;125m{command}\x1b[0m")
                             };
                             lines.push((LineKind::System, pad_row(&row)));
                         }
@@ -586,6 +593,17 @@ pub fn render_mcp_add_success(item: &MarketplaceItem, target_path: &Path, width:
     lines
 }
 
+/// `{:<n}` pads by characters; a box is drawn in cells. A CJK name is twice as
+/// wide as its character count, and the border came out ragged.
+fn pad_cells(text: &str, cells: usize) -> String {
+    let width = visible_width(text);
+    if width >= cells {
+        text.to_string()
+    } else {
+        format!("{text}{}", " ".repeat(cells - width))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -680,6 +698,42 @@ mod tests {
         modal.handle_key(KeyCode::Up, KeyModifiers::empty());
         assert!(modal.confirm_forget.is_none());
         assert_eq!(modal.handle_key(KeyCode::Char('d'), KeyModifiers::empty()), McpModalAction::None);
+    }
+
+    #[test]
+    fn a_forget_key_on_another_tab_takes_no_trust_away() {
+        let mut modal = McpModal::new(Vec::new(), Vec::new(), McpViewTab::Overview).with_trusted(vec![TrustedServer {
+            name: "sqlite".into(),
+            command: "uvx mcp-server-sqlite".into(),
+        }]);
+        modal.selected_index = 2;
+        let action = modal.handle_key(KeyCode::Char('d'), KeyModifiers::NONE);
+        assert!(matches!(action, McpModalAction::None), "the key acted on another tab: {action:?}");
+        assert!(modal.confirm_forget.is_none(), "a trust was armed from the overview tab");
+    }
+
+    #[test]
+    fn a_wide_server_name_keeps_the_box_closed() {
+        // `{:<18}` pads by characters; this name is twelve cells wide but six
+        // characters long, and the border came out ragged.
+        let modal = McpModal::new(
+            Vec::new(),
+            vec![ServerStatus {
+                name: "数据库服务器".into(),
+                command: "uvx mcp-db".into(),
+                state: ServerConnectionState::Active,
+                tool_count: 2,
+                tool_names: vec!["query".into()],
+                read_only: true,
+                description: None,
+            }],
+            McpViewTab::Servers,
+        );
+        let rendered = modal.render(80);
+        let expected = visible_width(&rendered[0].1);
+        for (idx, line) in rendered.iter().enumerate() {
+            assert_eq!(visible_width(&line.1), expected, "row {idx} is not the width of the box: {line:?}");
+        }
     }
 
     /// The servers allowed in this folder are named, with what they run.

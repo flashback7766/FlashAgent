@@ -19,11 +19,26 @@ const TEXT_AMBER: &str = "\x1b[38;2;235;175;90m";
 /// One thing the app said, and when.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NoticeEntry {
-    /// How long ago, in words: "just now", "3 min ago".
-    pub when: String,
+    /// When it was said. Formatted when the list is drawn: a string fixed at
+    /// insertion said "just now" an hour later.
+    pub when: std::time::Instant,
     pub text: String,
     /// Something is wrong: amber, not green.
     pub warning: bool,
+}
+
+/// How long ago something happened, in words.
+pub(crate) fn how_long_ago(at: std::time::Instant) -> String {
+    let secs = at.elapsed().as_secs();
+    if secs < 5 {
+        crate::i18n::tr("just now").to_string()
+    } else if secs < 60 {
+        crate::i18n::tr_fill("{secs}s ago", &[("secs", &secs.to_string())])
+    } else if secs < 3600 {
+        crate::i18n::tr_fill("{n} min ago", &[("n", &(secs / 60).to_string())])
+    } else {
+        crate::i18n::tr_fill("{n} h ago", &[("n", &(secs / 3600).to_string())])
+    }
 }
 
 /// What the view asks the app to do.
@@ -163,14 +178,15 @@ impl NoticeLog {
             } else {
                 " ".to_string()
             };
+            let when = how_long_ago(entry.when);
             let (when_styled, text_styled) = if is_press {
-                (format!("{TEXT_AMBER}{}{RESET}", entry.when), format!("{TEXT_AMBER}{}{RESET}", entry.text))
+                (format!("{TEXT_AMBER}{when}{RESET}"), format!("{TEXT_AMBER}{}{RESET}", entry.text))
             } else if entry.warning {
-                (format!("{TEXT_AMBER}{}{RESET}", entry.when), format!("{TEXT_BRIGHT}{}{RESET}", entry.text))
+                (format!("{TEXT_AMBER}{when}{RESET}"), format!("{TEXT_BRIGHT}{}{RESET}", entry.text))
             } else if is_hover {
-                (format!("{TEXT_GREEN}{}{RESET}", entry.when), format!("{TEXT_BRIGHT}{}{RESET}", entry.text))
+                (format!("{TEXT_GREEN}{when}{RESET}"), format!("{TEXT_BRIGHT}{}{RESET}", entry.text))
             } else {
-                (format!("{TEXT_GREEN}{}{RESET}", entry.when), format!("{TEXT_MUTED}{}{RESET}", entry.text))
+                (format!("{TEXT_GREEN}{when}{RESET}"), format!("{TEXT_MUTED}{}{RESET}", entry.text))
             };
             lines.push((LineKind::System, pad_row(&format!("{pointer} {when_styled}  {text_styled}"))));
         }
@@ -191,9 +207,10 @@ mod tests {
     use super::*;
 
     fn entries() -> Vec<NoticeEntry> {
+        let now = std::time::Instant::now();
         vec![
-            NoticeEntry { when: "just now".into(), text: "Exported to /tmp/chat.md".into(), warning: false },
-            NoticeEntry { when: "2 min ago".into(), text: "The server did not answer".into(), warning: true },
+            NoticeEntry { when: now, text: "Exported to /tmp/chat.md".into(), warning: false },
+            NoticeEntry { when: now - std::time::Duration::from_secs(120), text: "The server did not answer".into(), warning: true },
         ]
     }
 
@@ -205,6 +222,19 @@ mod tests {
         v.move_by(50);
         assert_eq!(v.selected, 1);
         assert_eq!(v.handle_key(KeyCode::Esc, KeyModifiers::NONE), NoticeAction::Close);
+    }
+
+    #[test]
+    fn the_age_is_read_when_the_list_is_drawn() {
+        // It used to be a string fixed when the notice was said: an hour later
+        // the list still called it "just now".
+        let old = NoticeEntry {
+            when: std::time::Instant::now() - std::time::Duration::from_secs(3 * 3600),
+            text: "said a while ago".into(),
+            warning: false,
+        };
+        let screen: Vec<String> = NoticeLog::new(vec![old]).render(80, None, None).into_iter().map(|(_, l)| crate::strip_ansi(&l)).collect();
+        assert!(screen.iter().any(|l| l.contains("3 h ago")), "{screen:#?}");
     }
 
     #[test]
@@ -237,9 +267,10 @@ mod mouse_tests {
     use super::*;
 
     fn view() -> NoticeLog {
+        let now = std::time::Instant::now();
         NoticeLog::new(vec![
-            NoticeEntry { when: "now".into(), text: "first".into(), warning: false },
-            NoticeEntry { when: "then".into(), text: "second".into(), warning: true },
+            NoticeEntry { when: now, text: "first".into(), warning: false },
+            NoticeEntry { when: now, text: "second".into(), warning: true },
         ])
     }
 

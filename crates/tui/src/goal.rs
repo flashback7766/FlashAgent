@@ -275,17 +275,21 @@ impl GoalLedger {
             });
         }
 
-        let touched = self.written.len() + self.edited.len();
+        // A file created and then edited is one file. Counting the two lists
+        // added it twice, and the report said "2 files" about one path.
+        let created = self.written.len();
+        let edited_after_creation = self.edited.iter().filter(|f| !self.written.contains(f)).count();
+        let touched = created + edited_after_creation;
         if touched == 0 {
             out.push(crate::i18n::tr("Files changed: none").to_string());
         } else {
             out.push(crate::i18n::tr_fill("Files changed: {touched} ({created} created, {edited} edited)", &[
                 ("touched", &touched.to_string()),
-                ("created", &self.written.len().to_string()),
-                ("edited", &self.edited.len().to_string()),
+                ("created", &created.to_string()),
+                ("edited", &edited_after_creation.to_string()),
             ]));
             for f in self.written.iter().map(|f| format!("  + {f}")).chain(
-                self.edited.iter().map(|f| format!("  ~ {f}")),
+                self.edited.iter().filter(|f| !self.written.contains(f)).map(|f| format!("  ~ {f}")),
             ) {
                 out.push(f);
             }
@@ -513,6 +517,20 @@ mod tests {
             assert!(err.contains("Settings"), "{old}: {err}");
         }
         assert!(parse_goal_task("   ").is_err(), "no task");
+    }
+
+    #[test]
+    fn a_file_created_and_then_edited_is_one_file_in_the_report() {
+        let mut l = GoalLedger::new("t".into(), GoalBudgets::default());
+        l.on_event(&LoopEvent::StepStarted { step: 1, max_steps: Some(250) });
+        l.on_event(&ev_started("1", "write_file", r#"{"path":"src/a.rs","content":"x"}"#));
+        l.on_event(&ev_finished("1", false, "written"));
+        l.on_event(&ev_started("2", "edit_file", r#"{"path":"src/a.rs"}"#));
+        l.on_event(&ev_finished("2", false, "ok"));
+
+        let report = l.report(DoneReason::Completed).join("\n");
+        assert!(report.contains("Files changed: 1 (1 created, 0 edited)"), "{report}");
+        assert_eq!(report.matches("src/a.rs").count(), 1, "the same file is listed twice:\n{report}");
     }
 
     #[test]
