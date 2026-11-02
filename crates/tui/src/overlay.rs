@@ -141,6 +141,30 @@ impl App {
                 self.overlay = Some(Overlay::Notices(view));
                 took
             }
+            // A list whose rows are the whole screen answers a press the way
+            // Enter does: the wheel already moved its selection, and a click
+            // that followed it and did nothing read as a broken screen.
+            Some(Overlay::Tasks(mut modal)) => {
+                let shells = cx.tools_arc.shells();
+                if let flashagent_tui::TasksAction::Open(id) = modal.click(line) {
+                    modal.detail = Some((id, shells.output(id).unwrap_or_default()));
+                }
+                let output = modal.detail.as_ref().and_then(|(id, _)| shells.output(*id));
+                modal.refresh(shells.tasks(), output);
+                self.overlay = Some(Overlay::Tasks(modal));
+                true
+            }
+            Some(Overlay::Rewind(mut card)) => {
+                match card.click(line, width) {
+                    Some(true) => self.commit_rewind(cx, card.target),
+                    Some(false) => {
+                        card.confirm = false;
+                        self.overlay = Some(Overlay::Rewind(card));
+                    }
+                    None => self.overlay = Some(Overlay::Rewind(card)),
+                }
+                true
+            }
             Some(mut other) => {
                 // A select menu answers its own rows now: a click on an item
                 // selects it, and the pick goes through the same Enter path
