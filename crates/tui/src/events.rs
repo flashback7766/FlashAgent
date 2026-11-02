@@ -897,10 +897,14 @@ impl App {
     /// screen itself each frame; this only decides whether the crossing of a
     /// row's boundary is worth a frame.
     fn hover_target(&self, m: &crossterm::event::MouseEvent) -> Option<HoverTarget> {
-        if let Some(top) = self.renderer.overlay_row {
-            if self.overlay.is_some() && (m.row as usize) >= top {
-                return Some(HoverTarget::Card(m.row as usize - top, m.column));
-            }
+        // While a card owns the floor only its own rows invite: the widgets
+        // behind it are not the next press, and lighting them would say they are.
+        if self.renderer.card_owns_floor() {
+            return self
+                .renderer
+                .card_line(m.row)
+                .filter(|_| self.overlay.is_some())
+                .map(|line| HoverTarget::Card(line, m.column));
         }
         if self.renderer.gauge_press(m.row, m.column) {
             return Some(HoverTarget::Gauge);
@@ -943,13 +947,53 @@ impl App {
         self.wheel(dir);
     }
 
-    /// Where a press lands decides what it does: the scrollbar's thumb, a
-    /// pinned subagent row, the open overlay's card, or the transcript.
+    /// Where a press lands decides what it does: the scrollbar's thumb, the
+    /// card that owns the floor, a pinned subagent row, or the transcript.
     async fn press_at(&mut self, cx: &mut LoopCtx<'_>, m: crossterm::event::MouseEvent) {
         // The scrollbar's column is the transcript's own widget; a press
         // there never selects text or folds a row.
         if self.renderer.scrollbar_press(m.row, m.column) {
             self.renderer.request_reprint();
+            return;
+        }
+        // A card owns the floor of the frame: the open overlay answers its
+        // rows, a safety card its own buttons. Everything behind it waits,
+        // the way the keys claim the board; a gauge press under an unsaved
+        // Settings screen used to throw the edits away. Returning to the end
+        // of the conversation stays, because reading above the card does.
+        if self.renderer.card_owns_floor() {
+            if self.renderer.scroll_marker_press(m.row) {
+                self.zone_flash = Some((m.row, 0, self.last_term_size.0 as usize, flashagent_tui::anim::now_ms()));
+                self.renderer.scroll_offset = 0;
+                self.renderer.request_reprint();
+                return;
+            }
+            if let Some(line) = self.renderer.card_line(m.row) {
+                if self.overlay.is_some() {
+                    // The card's own ✕ closes what Esc closes.
+                    if self.renderer.overlay_close_hit(m.row, m.column) {
+                        self.dismiss_overlay();
+                        return;
+                    }
+                    // The row answers for a moment even where nothing else
+                    // moves: a click that toggled something one row down would
+                    // otherwise read as lost.
+                    self.click_flash = Some((line, flashagent_tui::anim::now_ms()));
+                    self.overlay_click(cx, line, m.column as usize).await;
+                    self.renderer.request_reprint();
+                } else if let Some(hit) = self.renderer.card_hit(line, m.column as usize) {
+                    self.card_click(cx, hit);
+                    self.renderer.request_reprint();
+                }
+            }
+            // The card's paper is not transcript: a press on it, or on the
+            // footer under it, does not start a copy.
+            return;
+        }
+        // The composer's own rows take the press as text, not as a selection.
+        // The caret goes where the hand does once it can be placed; until
+        // then the press stays out of the transcript.
+        if self.renderer.card_line(m.row).is_some() {
             return;
         }
         // The context gauge at the end of the status line is a widget of its
@@ -992,25 +1036,6 @@ impl App {
             self.renderer.request_reprint();
             return;
         }
-        // The open overlay's card, once the press is on the card itself; a
-        // press in the transcript above it reads the transcript as before.
-        if let Some(top) = self.renderer.overlay_row {
-            if (m.row as usize) >= top {
-                let line = m.row as usize - top;
-                // The card's own ✕ closes what Esc closes.
-                if self.renderer.overlay_close_hit(m.row, m.column) {
-                    self.dismiss_overlay();
-                    return;
-                }
-                // The row answers for a moment even where nothing else moves:
-                // a click that toggled something one row down would otherwise
-                // read as lost.
-                self.click_flash = Some((line, flashagent_tui::anim::now_ms()));
-                self.overlay_click(cx, line, m.column as usize).await;
-                self.renderer.request_reprint();
-                return;
-            }
-        }
         // What the scrollbar, a subagent row and the card left behind is the
         // transcript's: a selection starts here and nowhere else, so a drag
         // that begins on a card copies nothing on its release.
@@ -1031,6 +1056,39 @@ impl App {
                     }
                 }
                 None => {}
+            }
+        }
+    }
+
+    /// A press on a card's own button: the same path the keys take, so a
+    /// click and a key cannot answer differently.
+    fn card_click(&mut self, cx: &LoopCtx<'_>, hit: CardHit) {
+        match hit {
+            CardHit::Confirm(choice) => {
+                self.confirm_select.selected = choice;
+                self.approval_key(cx, KeyCode::Enter, KeyModifiers::NONE);
+            }
+            CardHit::Option(i) => {
+                let Some(req) = cx.question_gate.pending() else { return };
+                self.question_ui_state.is_writing = false;
+                self.question_ui_state.selected_index = i;
+                if req.multi_select {
+                    // A click on a list that ticks answers this row alone; the
+                    // keys still send the set with Enter.
+                    self.question_key(cx, &req, KeyCode::Char(' '), KeyModifiers::NONE);
+                } else {
+                    self.question_key(cx, &req, KeyCode::Enter, KeyModifiers::NONE);
+                }
+            }
+            CardHit::Write => {
+                let Some(req) = cx.question_gate.pending() else { return };
+                self.question_ui_state.selected_index = req.options.as_ref().map_or(0, |opts| opts.len());
+                self.question_ui_state.is_writing = true;
+            }
+            CardHit::Yes(yes) => {
+                if let Some(sw) = self.channel_switch.take() {
+                    self.channel_switch_key(cx, sw, KeyCode::Char(if yes { 'y' } else { 'n' }));
+                }
             }
         }
     }
