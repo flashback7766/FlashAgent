@@ -5189,6 +5189,42 @@ fn the_approval_card_answers_the_keys_that_choose_for_it() {
     assert!(home.work().join("marker.txt").exists(), "the allowed command did not run");
 }
 
+/// The same three buttons answer the mouse: a click goes through the key
+/// path, so the two can never answer differently.
+#[test]
+fn the_approval_card_answers_the_mouse_on_its_own_buttons() {
+    let server = MockServer::start(vec![shell_call("touch clicked.txt"), Reply::Text("The click worked.".into())]);
+    let home = Home::new();
+    let term = ready(&home, &server);
+
+    term.type_text("leave a marker");
+    term.send(ENTER);
+    term.wait_for(APPROVAL, WAIT);
+    assert!(!home.work().join("clicked.txt").exists(), "the command ran before it was allowed");
+    term.wait_for("Always allow", WAIT);
+    let (row, col) = term.find_on_screen("Always allow").expect("the card draws its buttons");
+    term.click(row, col);
+    term.wait_for("Always allowed", WAIT);
+    term.wait_for("The click worked.", WAIT);
+    assert!(home.work().join("clicked.txt").exists(), "the button did not run the call it showed");
+}
+
+#[test]
+fn a_click_on_deny_refuses_the_call() {
+    let server = MockServer::start(vec![shell_call("touch denied.txt"), Reply::Text("Then I will not.".into())]);
+    let home = Home::new();
+    let term = ready(&home, &server);
+
+    term.type_text("leave a marker");
+    term.send(ENTER);
+    term.wait_for(APPROVAL, WAIT);
+    term.wait_for("Deny", WAIT);
+    let (row, col) = term.find_on_screen("Deny").expect("the card draws its buttons");
+    term.click(row, col);
+    term.wait_for("Then I will not.", WAIT);
+    assert!(!home.work().join("denied.txt").exists(), "denied by a click, and the call ran anyway");
+}
+
 /// A resumed session carries the summary into the prompt and nothing else.
 /// The archive marker, the path to the archive and the card's token counts
 /// are the reader's: the model read them as instructions of its own.

@@ -55,10 +55,12 @@ pub(crate) struct Renderer {
     screen: flashagent_tui::screen::Screen,
     /// The card on screen last frame and when it opened.
     card: (CardKey, u64),
-    /// Screen row of the first line the open overlay rendered, so a click can
-    /// tell which row of the card it landed on. `None` when nothing is open or
-    /// the card's top was pushed off the screen by its own height.
-    pub(crate) overlay_row: Option<usize>,
+    /// Where the open card's rows sit on screen, for a press. Recorded every
+    /// frame rather than counted back from the bottom: a card taller than the
+    /// terminal has its top cut off, and the rows under it are the footer.
+    pub(crate) card_rows: Option<CardRows>,
+    /// The cells inside the card that answer a press, by card line.
+    card_hits: Vec<CardHitRow>,
     /// The transcript rows on screen. They start at the top: everything else
     /// (work box, card, footer) is pinned under them. The scrollbar's track
     /// is exactly these rows, and a click above them never means the chat.
@@ -210,6 +212,52 @@ enum CardKey {
     Channel,
     Question,
     Overlay(std::mem::Discriminant<Overlay>),
+}
+
+/// Where the open card's rows sit on screen, for a press. Every drawn row
+/// keeps the card line it shows: a card taller than the screen, or one still
+/// unfolding, does not draw every line, and a press must not read the next
+/// drawn row as the next line.
+pub(crate) struct CardRows {
+    /// The screen row the drawn rows start at; 0 when the screen cut their
+    /// head off.
+    top: usize,
+    /// The drawn row that `top` holds.
+    first: usize,
+    /// The card line of every drawn row, `None` for a row the card put there
+    /// itself (the note about the rows it did not show).
+    lines: Vec<Option<usize>>,
+}
+
+impl CardRows {
+    /// The card line a screen row reads as, when the row is on the card.
+    pub(crate) fn line_at(&self, row: u16) -> Option<usize> {
+        let drawn = (row as usize).checked_sub(self.top)? + self.first;
+        self.lines.get(drawn).copied().flatten()
+    }
+}
+
+/// What a press on a card row does, in the card's own terms; the key path
+/// decides the rest, so a click and a key cannot disagree.
+#[derive(Clone, Copy)]
+pub(crate) enum CardHit {
+    /// An approval button: Allow, Always allow or Deny.
+    Confirm(ConfirmChoice),
+    /// A question option, by index.
+    Option(usize),
+    /// The "Something else" row that starts a written answer.
+    Write,
+    /// Yes or no on the channel card.
+    Yes(bool),
+}
+
+/// A press target inside a card: the card line, its columns in screen cells,
+/// and what the press does.
+struct CardHitRow {
+    at: usize,
+    from: usize,
+    to: usize,
+    hit: CardHit,
 }
 
 const UNFOLD_MS: u64 = 180;
@@ -555,7 +603,8 @@ impl Renderer {
     agent_open: Vec::new(),
             screen: flashagent_tui::screen::Screen::new(),
             card: (CardKey::Composer, 0),
-            overlay_row: None,
+            card_rows: None,
+            card_hits: Vec::new(),
             chat_rows_on_screen: 0,
             screen_width: 0,
             scrollbar_drag: None,
@@ -1007,13 +1056,13 @@ fn approval_preview_rows(height: usize) -> usize {
 /// this block: the card is then its bottom half, and a second `╭` under the
 /// `├─┤` seam would open a box inside an unclosed one.
 #[allow(clippy::too_many_arguments)]
-fn append_approval_card(tail: &mut Vec<RenderLine>, gate: &TuiGate, st: &FrameState<'_>, width: usize, height: usize, inner_w: usize, border_color: &str, joined: bool) -> usize {
+fn append_approval_card(tail: &mut Vec<RenderLine>, gate: &TuiGate, st: &FrameState<'_>, width: usize, height: usize, inner_w: usize, border_color: &str, joined: bool) -> (usize, Vec<CardHitRow>) {
     // A card with nothing pending is nothing to draw. It used to be an `expect`,
     // and it fired: the row an approval card occupies moved once prompts started
     // taking a row of their own, and a stale match drew one over a screen that
     // had already answered the request. Rendering answers the screen; it does
     // not assert about it.
-    let Some(req) = gate.pending() else { return 0 };
+    let Some(req) = gate.pending() else { return (0, Vec::new()) };
     let reset = "\x1b[0m";
     // The composer becomes the approval card.
     // Shows exactly what is approved, and never lets model-supplied escape codes
@@ -1110,31 +1159,45 @@ fn append_approval_card(tail: &mut Vec<RenderLine>, gate: &TuiGate, st: &FrameSt
         }
     };
     tail.push((LineKind::System, pad_box_row(" ", width)));
-    tail.push((
-        LineKind::System,
-        pad_box_row(
-            &format!(
-                " {}  {}  {}",
-                button(tr("Allow"), ConfirmChoice::Allow),
-                button(tr("Always allow"), ConfirmChoice::Always),
-                button(tr("Deny"), ConfirmChoice::Deny)
-            ),
-            width,
-        ),
-    ));
+    // The three buttons share a row; each one answers its own cells, counted
+    // from the row's first content column and shifted past the box's edge.
+    let mut row = String::from(" ");
+    let mut buttons = Vec::new();
+    for (i, (label, choice)) in [
+        (tr("Allow"), ConfirmChoice::Allow),
+        (tr("Always allow"), ConfirmChoice::Always),
+        (tr("Deny"), ConfirmChoice::Deny),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        if i > 0 {
+            row.push_str("  ");
+        }
+        let from = visible_width(&row) + 1;
+        let piece = button(label, choice);
+        row.push_str(&piece);
+        buttons.push(CardHitRow { at: 0, from, to: from + visible_width(&piece), hit: CardHit::Confirm(choice) });
+    }
+    let button_at = tail.len();
+    tail.push((LineKind::System, pad_box_row(&row, width)));
+    let hits: Vec<CardHitRow> = buttons
+        .into_iter()
+        .map(|hit| CardHitRow { at: button_at, ..hit })
+        .collect();
 
     let input_line_idx = tail.len();
     tail.push((
         LineKind::System,
         format!("{border_color}╰{}╯{reset}", "─".repeat(inner_w)),
     ));
-    input_line_idx
+    (input_line_idx, hits)
 }
 
 /// `joined` is true when the work box above has already drawn the top edge of
 /// this block: the card is then its bottom half, and a second `╭` under the
 /// `├─┤` seam would open a box inside an unclosed one.
-fn append_question_card(tail: &mut Vec<RenderLine>, req: &QuestionRequest, question_state: Option<&QuestionUiState>, width: usize, inner_w: usize, border_color: &str, joined: bool) -> usize {
+fn append_question_card(tail: &mut Vec<RenderLine>, req: &QuestionRequest, question_state: Option<&QuestionUiState>, width: usize, inner_w: usize, border_color: &str, joined: bool) -> (usize, Vec<CardHitRow>) {
     let reset = "\x1b[0m";
     // The composer becomes the question card.
     let title = format!(" {} ", flashagent_tui::i18n::tr("Question from FlashAgent"));
@@ -1178,6 +1241,7 @@ fn append_question_card(tail: &mut Vec<RenderLine>, req: &QuestionRequest, quest
     // past the border. Pasted control characters are shown, not sent.
     let answer_in = |label_cells: usize| write_text.field_view(inner_w.saturating_sub(label_cells + 4), card_safe);
     let mut typing_line_idx = None;
+    let mut hits: Vec<CardHitRow> = Vec::new();
 
     if let Some(ref opts) = req.options {
         let total_choices = opts.len();
@@ -1210,7 +1274,11 @@ fn append_question_card(tail: &mut Vec<RenderLine>, req: &QuestionRequest, quest
                 } else {
                     format!("{}{colour}{row}\x1b[0m", " ".repeat(indent))
                 };
+                let at = tail.len();
                 tail.push((LineKind::System, pad_box_row(&line, width)));
+                // An option owns its whole row, the wrapped lines under it
+                // included: the number is the label, not a column to hit.
+                hits.push(CardHitRow { at, from: 1, to: width.saturating_sub(1), hit: CardHit::Option(i) });
             }
         }
 
@@ -1229,10 +1297,12 @@ fn append_question_card(tail: &mut Vec<RenderLine>, req: &QuestionRequest, quest
             tail.push((LineKind::System, pad_box_row(&format!("   {hints}"), width)));
         } else {
             let colour = if is_write_sel { "\x1b[1;38;2;225;175;95m" } else { "\x1b[38;2;160;155;145m" };
+            let at = tail.len();
             tail.push((
                 LineKind::System,
                 pad_box_row(&format!("  {write_ptr} {colour}{write_num}. Something else: just type it\x1b[0m"), width),
             ));
+            hits.push(CardHitRow { at, from: 1, to: width.saturating_sub(1), hit: CardHit::Write });
             let numbers = format!("1-{write_num}");
             let hints: Vec<(&str, &str)> = if req.multi_select {
                 vec![("Space", "tick"), ("↑/↓", "move"), (numbers.as_str(), "pick"), ("Enter", "confirm"), ("Esc", "cancel")]
@@ -1260,7 +1330,7 @@ fn append_question_card(tail: &mut Vec<RenderLine>, req: &QuestionRequest, quest
         LineKind::System,
         format!("{border_color}╰{}╯{reset}", "─".repeat(inner_w)),
     ));
-    input_line_idx
+    (input_line_idx, hits)
 }
 
 /// Where the cursor sits while a search of the history is typed: after the
@@ -1397,7 +1467,7 @@ fn append_composer(
     (input_line_idx, text_cursor)
 }
 
-fn append_channel_card(tail: &mut Vec<RenderLine>, st: &FrameState<'_>, width: usize, inner_w: usize, t: u64, joined: bool) -> usize {
+fn append_channel_card(tail: &mut Vec<RenderLine>, st: &FrameState<'_>, width: usize, inner_w: usize, t: u64, joined: bool) -> (usize, Vec<CardHitRow>) {
     let prompt = st.channel_prompt.expect("channel card needs a prompt");
     let title = format!(" {} ", st.prompt_title);
     let title = title.as_str();
@@ -1418,23 +1488,28 @@ fn append_channel_card(tail: &mut Vec<RenderLine>, st: &FrameState<'_>, width: u
             pad_box_row(&format!(" \x1b[38;2;240;235;225m{row}\x1b[0m"), width),
         ));
     }
-    tail.push((
-        LineKind::System,
-        pad_box_row(
-            &format!(
-                " \x1b[1;38;2;30;26;22;48;2;225;175;95m {} \x1b[0m  \x1b[38;2;190;185;175m {} \x1b[0m",
-                flashagent_tui::i18n::tr("Yes"),
-                flashagent_tui::i18n::tr("No")
-            ),
-            width,
-        ),
-    ));
+    let yes = format!("\x1b[1;38;2;30;26;22;48;2;225;175;95m {} \x1b[0m", flashagent_tui::i18n::tr("Yes"));
+    let no = format!("\x1b[38;2;190;185;175m {} \x1b[0m", flashagent_tui::i18n::tr("No"));
+    let row = format!(" {yes}  {no}");
+    let at = tail.len();
+    tail.push((LineKind::System, pad_box_row(&row, width)));
+    // The uninstall prompt stays on keys: a stray click is a poor way to
+    // remove the binary. The channel switch is a setting, so a click answers
+    // the same question the keys answer.
+    let mut hits = Vec::new();
+    if st.prompt_title != UNINSTALL_TITLE {
+        let yes_from = 2;
+        let yes_to = yes_from + visible_width(&yes);
+        let no_from = yes_to + 2;
+        hits.push(CardHitRow { at, from: yes_from, to: yes_to, hit: CardHit::Yes(true) });
+        hits.push(CardHitRow { at, from: no_from, to: no_from + visible_width(&no), hit: CardHit::Yes(false) });
+    }
     let input_line_idx = tail.len();
     tail.push((
         LineKind::System,
         format!("{border_color}╰{}╯{reset}", "─".repeat(inner_w)),
     ));
-    input_line_idx
+    (input_line_idx, hits)
 }
 
 struct LayoutInputs<'a> {
@@ -1446,6 +1521,9 @@ struct LayoutInputs<'a> {
     input_line_idx: usize,
     text_cursor: Option<u16>,
     border_color: &'a str,
+    /// The card line of every row the card has already drawn, in order: a
+    /// row that is not drawn yet or was dropped has no line to answer for.
+    card_lines: Vec<Option<usize>>,
     /// Both ends of the selection being dragged, in screen coordinates.
     selection: Option<((u16, u16), (u16, u16))>,
     /// What a click on a chat row reaches, when anything. The hover asks it
@@ -1579,12 +1657,19 @@ impl Renderer {
         // Where the user types, when they type into the composer.
         let mut text_cursor: Option<u16> = None;
 
+        let mut card_hits: Vec<CardHitRow> = Vec::new();
         if gate.pending().is_some() {
-            input_line_idx = append_approval_card(&mut tail, gate, &st, width, height as usize, inner_w, &border_color, joined);
+            let (idx, hits) = append_approval_card(&mut tail, gate, &st, width, height as usize, inner_w, &border_color, joined);
+            input_line_idx = idx;
+            card_hits = hits;
         } else if st.channel_prompt.is_some() {
-            input_line_idx = append_channel_card(&mut tail, &st, width, inner_w, t, joined);
+            let (idx, hits) = append_channel_card(&mut tail, &st, width, inner_w, t, joined);
+            input_line_idx = idx;
+            card_hits = hits;
         } else if let Some(req) = question_gate.pending() {
-            input_line_idx = append_question_card(&mut tail, &req, st.question_state, width, inner_w, &border_color, joined);
+            let (idx, hits) = append_question_card(&mut tail, &req, st.question_state, width, inner_w, &border_color, joined);
+            input_line_idx = idx;
+            card_hits = hits;
         } else if let Some(overlay) = overlay {
             // The composer turns into the open menu or screen.
             // The composer turns into the open menu or screen.
@@ -1613,6 +1698,7 @@ impl Renderer {
             self.card = (card_key, t);
         }
         let total = tail.len() - paint_start;
+        let mut card_drawn = total;
         if card_key != CardKey::Composer && total > 2 {
             let k = anim::progress(self.card.1, t, UNFOLD_MS);
             let shown = ((total as f32 * k).ceil() as usize).clamp(2, total);
@@ -1620,8 +1706,20 @@ impl Renderer {
                 let bottom = tail.len() - 1;
                 tail.drain(paint_start + shown - 1..bottom);
                 input_line_idx = input_line_idx.min(tail.len() - 1);
+                card_drawn = shown;
             }
         }
+        // The card line every drawn row shows. While the card unfolds, the
+        // last drawn row is its bottom border, not the row the count would
+        // put there; a press on the rows in between must find nothing rather
+        // than the row beneath it.
+        let card_lines: Vec<Option<usize>> = (0..card_drawn)
+            .map(|drawn| Some(if drawn + 1 == card_drawn && card_drawn < total { total - 1 } else { drawn }))
+            .collect();
+        self.card_hits = card_hits
+            .into_iter()
+            .map(|hit| CardHitRow { at: hit.at - paint_start, ..hit })
+            .collect();
 
         if let Some(ac) = autocomplete {
             tail.extend(ac.render(width));
@@ -1649,6 +1747,7 @@ impl Renderer {
         self.agent_open = st.agent_rows.iter().map(|(id, _)| id.clone()).filter(|id| open(id)).collect();
         self.paint_layout(&settled, &mut tail, LayoutInputs {
             width, height, card_key, card_start, paint_start, input_line_idx, text_cursor, border_color: &border_color, selection: st.selection,
+            card_lines,
             owner_at: &|i| chat.owner_at(i),
             zone_at: &|row, col| chat.welcome_zone_at(row, col),
             hover_chat: st.hover_chat,
@@ -1660,7 +1759,7 @@ impl Renderer {
     fn paint_layout(&mut self, settled: &[RenderLine], tail: &mut Vec<RenderLine>, layout: LayoutInputs<'_>) {
         let LayoutInputs {
             width, height, card_key, card_start, paint_start, mut input_line_idx, text_cursor, border_color, selection, owner_at, zone_at, hover_chat,
-            hover_gauge, hover_marker, zone_flash,
+            hover_gauge, hover_marker, zone_flash, mut card_lines,
         } = layout;
     // The conversation scrolls; the composer and the footer under it stay where
     // they are, so a reply can be written while reading back.
@@ -1684,6 +1783,9 @@ impl Renderer {
                 );
                 let marker = pad_box_row(&note, width).replace(BORDER_ESC, border_color);
                 tail.splice(from..to, [(LineKind::System, marker)]);
+                let at = from - paint_start;
+                let gone = to - from;
+                card_lines.splice(at..at + gone, [None]);
                 if input_line_idx >= to {
                     input_line_idx -= hidden - 1;
                 } else if input_line_idx >= from {
@@ -1695,6 +1797,9 @@ impl Renderer {
     let chat_len = settled.len() + card_start;
     let bottom = &tail[card_start..];
     let chat_room = height.saturating_sub(bottom.len());
+    // The chat is anchored to the bottom: the rows above the room are not
+    // drawn at all, and the card's first row moves up by that many.
+    let chat_skipped = chat_len.saturating_sub(chat_room);
     if self.scroll_offset > 0 && chat_len > self.total_lines {
         // New lines arrived under a view scrolled back: it stays on what is read.
         self.scroll_offset += chat_len - self.total_lines;
@@ -1735,7 +1840,7 @@ impl Renderer {
     } else {
         // Anchored: the end of the conversation right above the composer, or, while
         // it is short, the composer right under it.
-        chat().skip(chat_len.saturating_sub(chat_room)).map(styled).collect()
+        chat().skip(chat_skipped).map(styled).collect()
     };
     let chat_rows = rows.len();
     rows.extend(bottom.iter().map(styled));
@@ -1757,17 +1862,25 @@ impl Renderer {
     // screen cut from the top. Measured against a real screen, a row that
     // counts the tail before the card twice lands one line low, and every
     // click and hover on the card answers one row beneath the pointer.
-    self.overlay_row = if matches!(card_key, CardKey::Overlay(_)) {
-        chat_rows
-            .checked_sub(cut)
-            .and_then(|top| top.checked_add(paint_start - card_start))
-    } else {
-        None
+    let card_first_abs = (settled.len() + paint_start).saturating_sub(chat_skipped);
+    let (top, first) = match card_first_abs.checked_sub(cut) {
+        Some(top) => (top, 0),
+        None => (0, cut - card_first_abs),
     };
+    self.card_rows = Some(CardRows {
+        top,
+        first,
+        lines: card_lines,
+    });
+    // The ✕ lives on the card's first row, which a card taller than the screen
+    // takes off the top: a corner nobody can reach is not a button.
     self.overlay_close = self
-        .overlay_close_col
-        .zip(self.overlay_row)
-        .map(|(col, row)| (row, col));
+        .card_rows
+        .as_ref()
+        .and_then(|rows| {
+            let drawn = rows.lines.get(rows.first..)?.iter().position(|line| *line == Some(0))? + rows.first;
+            self.overlay_close_col.map(|col| (rows.top + drawn - rows.first, col))
+        });
     // The transcript's own hover: the row under the pointer, when a click
     // there would reach a thought or a tool call, takes a quiet background:
     // the same hint the card rows give theirs.
@@ -1903,6 +2016,24 @@ impl Renderer {
             None => false,
         }
     }
+
+    /// The card line a screen row holds, when the row is on the open card.
+    pub(crate) fn card_line(&self, row: u16) -> Option<usize> {
+        self.card_rows.as_ref().and_then(|rows| rows.line_at(row))
+    }
+
+    /// What a press on the card does there, when it lands on a target.
+    pub(crate) fn card_hit(&self, line: usize, column: usize) -> Option<CardHit> {
+        self.card_hits
+            .iter()
+            .find(|hit| hit.at == line && (hit.from..hit.to).contains(&column))
+            .map(|hit| hit.hit)
+    }
+
+    /// Whether something other than the composer owns the floor of the frame.
+    pub(crate) fn card_owns_floor(&self) -> bool {
+        !matches!(self.card.0, CardKey::Composer)
+    }
 }
 
 /// The card's top border gives its last dash to a ✕: same width, one cell of
@@ -2014,10 +2145,8 @@ impl App {
                 // press just reached: the hover line is counted from the row
                 // the card's first line took last frame, close enough while
                 // the mouse glides over a card that is not moving.
-                let overlay_hover = match (self.mouse_at, self.renderer.overlay_row) {
-                    (Some((row, col)), Some(top)) if self.overlay.is_some() && (row as usize) >= top => {
-                        Some((row as usize - top, col))
-                    }
+                let overlay_hover = match self.mouse_at {
+                    Some((row, col)) if self.overlay.is_some() => self.renderer.card_line(row).map(|line| (line, col)),
                     _ => None,
                 };
                 let now_ms = anim::now_ms();
@@ -2428,10 +2557,39 @@ mod footer_tests {
             deadline: None,
         };
         let mut tail = Vec::new();
-        let answer_row = append_question_card(&mut tail, &req, None, 40, 38, "", false);
+        let answer_row = append_question_card(&mut tail, &req, None, 40, 38, "", false).0;
         let screen: String = tail.iter().map(|(_, row)| row.as_str()).collect::<Vec<_>>().join("\n");
         assert!(screen.contains("Which branch?"), "{screen}");
         assert!(screen.contains("main"), "{screen}");
         assert!(answer_row < tail.len(), "the answer row was not placed in the card");
+    }
+
+    #[test]
+    fn a_press_reads_the_card_line_under_it() {
+        let rows = CardRows { top: 10, first: 0, lines: vec![Some(0), Some(1), None, Some(5)] };
+        assert_eq!(rows.line_at(9), None, "above the card is not the card");
+        assert_eq!(rows.line_at(10), Some(0));
+        assert_eq!(rows.line_at(11), Some(1));
+        assert_eq!(rows.line_at(12), None, "the note row stands for rows that are not there");
+        assert_eq!(rows.line_at(13), Some(5));
+        assert_eq!(rows.line_at(14), None, "the footer under the card is not the card");
+    }
+
+    #[test]
+    fn a_card_cut_off_the_top_still_maps_its_rows() {
+        let rows = CardRows { top: 0, first: 2, lines: vec![Some(0), Some(1), Some(2), Some(3)] };
+        assert_eq!(rows.line_at(0), Some(2), "the first row on screen is the third line of the card");
+        assert_eq!(rows.line_at(1), Some(3));
+        assert_eq!(rows.line_at(2), None);
+    }
+
+    #[test]
+    fn a_press_lands_on_the_button_under_it() {
+        let mut r = Renderer::new();
+        r.card_hits = vec![CardHitRow { at: 3, from: 2, to: 8, hit: CardHit::Confirm(ConfirmChoice::Allow) }];
+        assert!(matches!(r.card_hit(3, 2), Some(CardHit::Confirm(ConfirmChoice::Allow))));
+        assert!(r.card_hit(3, 1).is_none(), "the column before the label is the box edge");
+        assert!(r.card_hit(3, 8).is_none(), "the cell after the label is not the label");
+        assert!(r.card_hit(2, 4).is_none(), "another row is another row");
     }
 }

@@ -108,7 +108,7 @@ impl App {
         self.scroll_key(code, mods)
     }
 
-    fn approval_key(&mut self, cx: &LoopCtx<'_>, code: KeyCode, mods: KeyModifiers) {
+    pub(crate) fn approval_key(&mut self, cx: &LoopCtx<'_>, code: KeyCode, mods: KeyModifiers) {
         match code {
             // Ctrl+C refuses the call and interrupts the turn.
             _ if is_ctrl_c(code, mods) => {
@@ -179,7 +179,7 @@ impl App {
         self.confirm_select = ConfirmSelect::new();
     }
 
-    fn channel_switch_key(&mut self, cx: &LoopCtx<'_>, sw: ChannelSwitch, code: KeyCode) {
+    pub(crate) fn channel_switch_key(&mut self, cx: &LoopCtx<'_>, sw: ChannelSwitch, code: KeyCode) {
         if is_yes(code) {
             self.config.update_channel = sw.to;
             self.save_config();
@@ -202,7 +202,7 @@ impl App {
         }
     }
 
-    fn question_key(&mut self, cx: &LoopCtx<'_>, req: &flashagent_tui::QuestionRequest, code: KeyCode, mods: KeyModifiers) {
+    pub(crate) fn question_key(&mut self, cx: &LoopCtx<'_>, req: &flashagent_tui::QuestionRequest, code: KeyCode, mods: KeyModifiers) {
         if is_ctrl_c(code, mods) {
             self.question_ui_state = QuestionUiState::default();
             cx.question_gate.cancel();
