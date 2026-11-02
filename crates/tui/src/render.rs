@@ -1727,7 +1727,7 @@ impl Renderer {
         // place, so it says there is more above the block the user works in,
         // not above some composer floating in the middle of the chat.
         let marker = format!(
-            " \x1b[38;2;100;95;90m── \x1b[38;2;225;175;95m↓ {} below\x1b[38;2;100;95;90m · End or Esc to return ──\x1b[0m",
+            " \x1b[38;2;100;95;90m── \x1b[38;2;225;175;95m↓ {} below\x1b[38;2;100;95;90m · click or End to return ──\x1b[0m",
             flashagent_tui::plural(self.scroll_offset, "more line", "more lines")
         );
         rows.push(marker);
