@@ -821,7 +821,16 @@ impl App {
         // Shift belongs to the terminal: with the app holding the mouse, the
         // one modifier every terminal keeps for itself is the way to select
         // what the screen shows over what the app would do with the press.
+        // A release while Shift is held still ends the drag the app was
+        // tracking: left unhandled, it stranded the highlight and the
+        // scrollbar, and kept the wheel dead for the rest of the session.
         if m.modifiers.contains(crossterm::event::KeyModifiers::SHIFT) {
+            if matches!(m.kind, MouseEventKind::Up(crossterm::event::MouseButton::Left)) {
+                self.selection_anchor = None;
+                self.selection_head = None;
+                self.renderer.scrollbar_drag = None;
+                self.renderer.request_reprint();
+            }
             return;
         }
         self.mouse_at = Some((m.row, m.column));

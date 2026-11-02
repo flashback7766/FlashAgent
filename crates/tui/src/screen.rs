@@ -73,6 +73,11 @@ impl Screen {
     /// The text of the rectangle a mouse drag covers, so a selection made with a
     /// finger or a trackpad can be copied the moment it is made. Rows are cut by
     /// visible column, not by bytes: an escape sequence is not a column.
+    ///
+    /// The first row is cut at the anchor and the last at the head; the rows
+    /// between them are taken whole, which is how the highlight paints them.
+    /// Cutting every row to the same columns copied a narrow band out of the
+    /// middle of a selection that was shown whole.
     pub fn text_in(&self, top: u16, bottom: u16, left: u16, right: u16) -> String {
         let (top, bottom) = (top.min(bottom) as usize, top.max(bottom) as usize);
         let (left, right) = (left.min(right) as usize, left.max(right) as usize);
@@ -83,8 +88,20 @@ impl Screen {
             }
             let Some(raw) = self.rows.get(y) else { break };
             let plain = crate::text::strip_ansi(raw);
-            if let Some((start, end)) = columns_of(&plain, left, right) {
-                out.extend(plain.chars().skip(start).take(end + 1 - start));
+            let (from, to) = if top == bottom {
+                (left, right)
+            } else if y == top {
+                (left, usize::MAX)
+            } else if y == bottom {
+                (0, right)
+            } else {
+                (0, usize::MAX)
+            };
+            if let Some((start, end)) = columns_of(&plain, from, to) {
+                let piece: String = plain.chars().skip(start).take(end + 1 - start).collect();
+                // A row keeps its indentation and loses the padding that runs
+                // to the edge of the screen.
+                out.push_str(piece.trim_end());
             }
         }
         out.trim().to_string()
@@ -409,6 +426,12 @@ mod tests {
         // A combining mark stays with the letter it belongs to.
         s.compose(&rows(&["ae\u{0301}b"]), None, 20, 2);
         assert_eq!(s.text_in(0, 0, 1, 1), "e\u{0301}");
+
+        // A selection that spans rows is cut at its ends and whole between: the
+        // clipboard must hold what the highlight showed, not a column band.
+        s.compose(&rows(&["aaaaa", "bbbbb", "ccccc"]), None, 10, 3);
+        assert_eq!(s.text_in(0, 2, 1, 2), "aaaa\nbbbbb\nccc");
+        assert_eq!(s.text_in(2, 0, 2, 1), "aaaa\nbbbbb\nccc", "dragging upwards reads the same way");
     }
 
     #[test]

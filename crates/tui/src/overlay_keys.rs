@@ -961,7 +961,12 @@ impl App {
             KeyCode::PageUp => self.renderer.scroll_up(page),
             KeyCode::PageDown => self.renderer.scroll_down(page),
             KeyCode::Home if scrolled => self.renderer.scroll_to_top(),
-            KeyCode::End | KeyCode::Esc if scrolled => self.renderer.scroll_to_bottom(),
+            KeyCode::End if scrolled => self.renderer.scroll_to_bottom(),
+            // Esc keeps its own jobs while a turn runs or the composer holds
+            // text: returning to the bottom is what it does only when it has
+            // nothing else to do. Stealing the interrupt made a scrolled-back
+            // user press it twice, and the turn outlived the first press.
+            KeyCode::Esc if scrolled && !self.running && self.input.is_empty() => self.renderer.scroll_to_bottom(),
             KeyCode::Up if modified || scrolled => self.renderer.scroll_up(2),
             KeyCode::Down if modified || scrolled => self.renderer.scroll_down(2),
             KeyCode::Enter => {
