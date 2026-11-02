@@ -1,6 +1,6 @@
 # Changelog
 
-## b680 — A binary that runs on the machine it lands on
+## b681 — A binary that runs on the machine it lands on
 
 - **The release binary runs on any x86-64.** b670 was built with AVX2 and BMI2
   enabled and died with SIGILL on a Xeon E5-2667 v2 while the setup wizard was
