@@ -89,6 +89,19 @@ impl TasksModal {
         self.tasks.get(self.selected).filter(|t| t.state == TaskState::Running).map(|t| t.id)
     }
 
+    /// A press on a task's row opens it, the way Enter does. The detail pane
+    /// is read, not chosen from: Backspace and Esc take it back.
+    pub fn click(&mut self, line: usize) -> TasksAction {
+        if self.detail.is_some() {
+            return TasksAction::None;
+        }
+        let Some(index) = line.checked_sub(1).filter(|i| *i < self.tasks.len()) else {
+            return TasksAction::None;
+        };
+        self.selected = index;
+        TasksAction::Open(self.tasks[index].id)
+    }
+
     pub fn handle_key(&mut self, code: KeyCode, _mods: KeyModifiers) -> TasksAction {
         let kill = matches!(code, KeyCode::Char('k' | 'K' | '\u{043b}' | '\u{041b}') | KeyCode::Delete);
         if self.detail.is_some() {
@@ -214,6 +227,10 @@ mod tests {
         modal.handle_key(KeyCode::Up, KeyModifiers::NONE);
         assert_eq!(modal.handle_key(KeyCode::Char('k'), KeyModifiers::NONE), TasksAction::None, "stopped a task that ended");
         assert_eq!(modal.handle_key(KeyCode::Enter, KeyModifiers::NONE), TasksAction::Open(1));
+        assert_eq!(modal.click(1), TasksAction::Open(1), "a press on the row opens it, as Enter does");
+        assert_eq!(modal.selected_id(), Some(1), "and moves the selection there");
+        assert_eq!(modal.click(0), TasksAction::None, "the title is not a task");
+        assert_eq!(modal.click(9), TasksAction::None, "past the list is not a task");
         assert_eq!(modal.handle_key(KeyCode::Esc, KeyModifiers::NONE), TasksAction::Close);
     }
 

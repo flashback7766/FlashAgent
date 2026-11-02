@@ -289,6 +289,20 @@ impl RewindConfirm {
         self.confirm = !self.confirm;
     }
 
+    /// A press on one of the two answers, counted from the card's last row:
+    /// the hint and the border sit under them, so a card that grew by a file
+    /// row still answers where the eye sees it.
+    pub fn click(&self, line: usize, width: usize) -> Option<bool> {
+        let total = self.render(width).len();
+        if line + 4 == total {
+            Some(true)
+        } else if line + 3 == total {
+            Some(false)
+        } else {
+            None
+        }
+    }
+
     pub fn render(&self, width: usize) -> Vec<RenderLine> {
         let card_w = width.clamp(36, 90);
         let inner_w = card_w.saturating_sub(2);
@@ -378,11 +392,25 @@ mod rewind_confirm_tests {
             files: vec![row("notes.txt", 1, 1)],
             confirm: true,
         };
-        assert!(rc.confirm);
         rc.toggle();
         assert!(!rc.confirm);
         rc.toggle();
         assert!(rc.confirm);
+    }
+
+    #[test]
+    fn the_two_answers_answer_a_press_where_they_are_drawn() {
+        let rc = RewindConfirm {
+            target: flashagent_core::Rewindable { user_index: 0, turn: 0, files: 1 },
+            prompt_label: "change the notes".to_string(),
+            files: vec![row("notes.txt", 1, 1)],
+            confirm: true,
+        };
+        let total = rc.render(60).len();
+        assert_eq!(rc.click(total - 4, 60), Some(true), "the first answer sits under the blank above it");
+        assert_eq!(rc.click(total - 3, 60), Some(false));
+        assert_eq!(rc.click(total - 5, 60), None, "the blank row above the answers is not an answer");
+        assert_eq!(rc.click(0, 60), None, "the title confirms nothing");
     }
 
     #[test]

@@ -1860,6 +1860,25 @@ fn one_ctrl_c_before_any_reply_does_not_quit() {
     assert!(term.wait_exit(WAIT).is_some(), "the second Ctrl+C did not quit");
 }
 
+/// The palette opens while a turn runs: a command that has to wait is queued
+/// by the same submit path as a typed one, and the list is for reading.
+#[test]
+fn the_command_palette_opens_while_a_turn_runs() {
+    let server = MockServer::start(vec![Reply::Held { before: "Working".into(), after: "Done.".into() }]);
+    let home = Home::new();
+    let term = ready(&home, &server);
+
+    term.type_text("do the thing");
+    term.send(ENTER);
+    term.wait_for("Working", WAIT);
+    term.send("\x0b");
+    let screen = term.wait_for("Commands", WAIT);
+    assert!(screen.contains("Working"), "the turn was stopped when the palette opened:\n{screen}");
+    term.send(ESC);
+    server.release();
+    term.wait_for("Done.", WAIT);
+}
+
 #[test]
 fn ctrl_r_while_an_answer_is_written_says_when_it_works() {
     let words: Vec<String> = (1..=40).map(|i| format!("word{i}")).collect();
@@ -4852,6 +4871,26 @@ fn a_task_stopped_from_the_task_list_wakes_nobody() {
     let told = sent(server.turns().last().unwrap());
     assert!(told.contains("Background task 1 was stopped by the user after"), "{told}");
     assert!(told.contains("It is no longer running"), "{told}");
+}
+
+#[test]
+fn a_click_on_a_task_row_opens_its_output() {
+    let mut replies = background_sleep();
+    replies.push(Reply::Text("It is stopped.".into()));
+    let server = MockServer::start(replies);
+    let home = Home::new();
+    let term = ready_with(&home, &server, serde_json::json!({ "permission_mode": "Bypass" }));
+    ask(&term, "start the server", "The server is starting.");
+    term.wait_for("1 task", WAIT);
+
+    term.type_text("/tasks");
+    term.send(ENTER);
+    term.wait_for("#1", WAIT);
+    // The wheel already moved this list; the click that followed used to do
+    // nothing. A press on a row opens it, as Enter does.
+    let (row, col) = term.find_on_screen("#1").expect("the task row is on the screen");
+    term.click(row, col);
+    term.wait_for("Esc back", WAIT);
 }
 
 #[test]

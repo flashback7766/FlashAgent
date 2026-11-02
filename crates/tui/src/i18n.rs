@@ -686,7 +686,6 @@ static RU: &[(&str, &str)] = &[
     ("{label} attached · Ctrl+Z removes it", "{label} прикреплено · Ctrl+Z убирает"),
     ("{what} removed", "{what} убрано"),
     ("Still connecting to {name} · send it once it answers", "Всё ещё подключаемся к {name} · отправьте, когда ответит"),
-    ("Commands open once the turn is done · Esc interrupts it", "Команды откроются, когда ход кончится · Esc прерывает его"),
     ("No earlier prompts to search yet", "Искать пока нечего: ранних промптов не было"),
     ("No saved session in this folder yet; starting a new one.", "В этой папке нет сохранённых сессий; начинаем новую."),
     ("Connecting to {name} · {url}…", "Подключаемся к {name} · {url}…"),

@@ -586,10 +586,9 @@ impl App {
             }
             // Shell editing keys, on either layout.
             KeyCode::Char(c) if mods.contains(KeyModifiers::CONTROL) => match latin(c) {
-                'k' if self.running => {
-                    self.say(BackgroundNotice::fading(tr("Commands open once the turn is done · Esc interrupts it"), 4));
-                    self.renderer.request_reprint();
-                }
+                // The palette opens while a turn runs: a command that has to
+                // wait is queued by the same submit path as a typed one, and
+                // reading the list is no reason to type blind.
                 'k' => self.open_palette(),
                 // Claude Code's key: the running shell command goes on in the background.
                 'b' if self.running => self.detach_shell(cx),
