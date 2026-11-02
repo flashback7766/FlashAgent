@@ -570,6 +570,7 @@ static RU: &[(&str, &str)] = &[
     ("The provider ended the answer with the error below. Ctrl+R retries.", "Провайдер закончил ответ ошибкой ниже. Ctrl+R повторяет."),
     ("This session: ${amount} over {turns}", "Эта сессия: ${amount} за {turns}"),
     ("This session: ${amount} of the monthly allowance over {turns}", "Эта сессия: ${amount} из месячного лимита за {turns}"),
+    ("waiting {secs}s for the rate limit", "ждём {secs} с: сервер просит подождать"),
     ("  the monthly allowance: ${amount} over {turns}", "  месячный лимит: ${amount} за {turns}"),
     ("  the providers themselves: ${amount} over {turns}", "  сами провайдеры: ${amount} за {turns}"),
     (

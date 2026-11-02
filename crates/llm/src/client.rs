@@ -4,7 +4,7 @@
 
 use std::sync::atomic::{AtomicBool, AtomicI8, AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use futures::stream::BoxStream;
@@ -53,6 +53,10 @@ pub struct Client {
     /// app replaces it with the session's own id, so a resumed conversation
     /// keeps its route and its prompt cache.
     session: RwLock<String>,
+    /// When the server asked us to wait before the next attempt, while that
+    /// wait is running: the status line says why the answer is quiet instead
+    /// of looking like a stalled model.
+    rate_limit_wait: RwLock<Option<Instant>>,
 }
 
 /// Counts a request as running until dropped; a stream holds it to its last byte.
@@ -142,6 +146,7 @@ impl Client {
             in_flight: Arc::new(AtomicUsize::new(0)),
             learned: RwLock::default(),
             session: RwLock::new(generated_session_id()),
+            rate_limit_wait: RwLock::new(None),
         }
     }
 
@@ -164,6 +169,15 @@ impl Client {
     /// The id OpenCode's gateway routes and caches the conversation by.
     pub fn session_id(&self) -> String {
         self.session.read().clone()
+    }
+
+    /// How long the server asked us to wait, while the wait is still running.
+    /// The request is asleep inside `post`; this is what lets the screen say
+    /// so, instead of showing a model that has silently stopped.
+    pub fn waiting_for_rate_limit(&self) -> Option<Duration> {
+        let until = (*self.rate_limit_wait.read())?;
+        let left = until.saturating_duration_since(Instant::now());
+        (!left.is_zero()).then_some(left)
     }
 
     /// Names the conversation: OpenCode's Go routes refuse to route a request
@@ -490,7 +504,9 @@ impl Client {
                     if wait > Duration::from_secs(30) {
                         return Ok(resp);
                     }
+                    *self.rate_limit_wait.write() = Some(Instant::now() + wait);
                     tokio::time::sleep(wait).await;
+                    *self.rate_limit_wait.write() = None;
                 }
                 Ok(resp) => return Ok(resp),
                 // Connect errors only: after connecting, the server may already be generating.
@@ -919,6 +935,55 @@ mod tests {
         let resp = llm.post(&llm.base_url(), &reqwest::header::HeaderMap::new(), &serde_json::json!({})).await.unwrap();
         assert_eq!(resp.status().as_u16(), 429);
         assert_eq!(*few.lock().unwrap(), 3, "two retries, so three attempts");
+    }
+
+    #[test]
+    fn a_wait_for_the_rate_limit_is_not_reported_once_it_is_over() {
+        let llm = client("m");
+        assert_eq!(llm.waiting_for_rate_limit(), None, "nothing is being waited for");
+        *llm.rate_limit_wait.write() = Some(Instant::now() + Duration::from_secs(5));
+        assert!(llm.waiting_for_rate_limit().is_some_and(|left| left <= Duration::from_secs(5)));
+        *llm.rate_limit_wait.write() = Some(Instant::now() - Duration::from_secs(1));
+        assert_eq!(llm.waiting_for_rate_limit(), None, "an expired wait is over");
+    }
+
+    #[tokio::test]
+    async fn the_status_line_can_see_the_wait_a_rate_limit_asked_for() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/v1", listener.local_addr().unwrap());
+        tokio::spawn(async move {
+            let mut first = true;
+            while let Ok((mut sock, _)) = listener.accept().await {
+                let mut buf = [0u8; 4096];
+                let _ = sock.read(&mut buf).await;
+                let resp = if first {
+                    first = false;
+                    "HTTP/1.1 429 Too Many Requests\r\nretry-after: 1\r\ncontent-length: 0\r\nconnection: close\r\n\r\n"
+                } else {
+                    "HTTP/1.1 200 OK\r\ncontent-length: 2\r\nconnection: close\r\n\r\nok"
+                };
+                let _ = sock.write_all(resp.as_bytes()).await;
+            }
+        });
+        let llm = Arc::new(Client::new(Endpoint::new(ApiProtocol::OpenAi, url, None), "m"));
+        llm.set_max_retries(1);
+        let asking = {
+            let llm = llm.clone();
+            tokio::spawn(async move { llm.post(&llm.base_url(), &reqwest::header::HeaderMap::new(), &serde_json::json!({})).await })
+        };
+        let mut seen = None;
+        for _ in 0..20 {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            seen = llm.waiting_for_rate_limit();
+            if seen.is_some() {
+                break;
+            }
+        }
+        assert!(seen.is_some_and(|left| left <= Duration::from_secs(1)), "the wait was not visible: {seen:?}");
+        let resp = asking.await.unwrap().unwrap();
+        assert_eq!(resp.status().as_u16(), 200, "the retry went out after the wait");
+        assert_eq!(llm.waiting_for_rate_limit(), None, "and the line stops saying it waited");
     }
 
     #[test]

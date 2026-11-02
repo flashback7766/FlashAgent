@@ -126,6 +126,9 @@ pub(crate) struct FrameState<'a> {
     pub(crate) reasoning_expand: ReasoningExpansion,
     pub(crate) tick_n: usize,
     pub(crate) running: bool,
+    /// Seconds the server asked us to wait before the next attempt, while that
+    /// wait is still running: the turn is not stalled, it is rate limited.
+    pub(crate) rate_limit_wait: Option<u64>,
     /// Generation speed over the last 3 seconds; `None` when counters are off.
     pub(crate) tokens_per_sec: Option<f64>,
     /// `draft 81%`: how much of a draft model's guessing the model kept.
@@ -793,6 +796,12 @@ fn footer_hint(shown: FooterVisibility, st: &FrameState<'_>, width: usize, t: u6
         // it waits for one.
         let dot = " \x1b[38;2;75;99;130m·\x1b[0m ";
         let mut live = format!("  {}", anim::spinner(t));
+        if let Some(secs) = st.rate_limit_wait {
+            live.push_str(&format!(
+                " \x1b[38;2;230;190;120m{}\x1b[0m",
+                tr_fill("waiting {secs}s for the rate limit", &[("secs", &secs.to_string())])
+            ));
+        }
         if let Some(speed) = st.tokens_per_sec.filter(|s| *s > 0.0) {
             live.push_str(&format!(" \x1b[38;2;194;231;255m{speed:.1} t/s\x1b[0m"));
         }
@@ -2048,6 +2057,7 @@ impl App {
                 reasoning_expand: ReasoningExpansion { all: self.all_expanded, last: self.last_expanded },
                 tick_n: self.tick_n,
                 running: self.running,
+                rate_limit_wait: cx.source.0.waiting_for_rate_limit().map(|wait| wait.as_secs_f64().ceil() as u64),
                 tokens_per_sec: config.show_tokens.then_some(tg_speed),
                 draft_acceptance: draft.as_deref().filter(|_| config.show_tokens),
                 turn_tokens: config.show_tokens.then(|| self.turn_token_phrase()).flatten(),

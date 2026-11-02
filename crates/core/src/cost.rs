@@ -71,6 +71,14 @@ impl CostLedger {
         (self.upstream_turns > 0).then_some(self.upstream_total)
     }
 
+    /// A turn's share of the bill and of any plan's allowance, from the usage
+    /// the server sent. The main loop and a child's turns both come through
+    /// here: a child's turn is the same account's.
+    pub fn record_usage(&mut self, provider: &str, usage: &flashagent_llm::Usage) {
+        self.record_with_details(provider, usage.cost, usage.cost_details.and_then(|d| d.upstream_cost));
+        self.record_allowance(usage.allowance);
+    }
+
     /// A turn counted against a plan's monthly allowance: the provider's own
     /// prices, spent from a quota instead of billed.
     pub fn record_allowance(&mut self, counted: Option<f64>) {
@@ -158,6 +166,25 @@ mod tests {
         assert!((counted - 0.0043).abs() < 1e-9);
         assert_eq!(turns, 2, "a negative count is not a turn");
         assert_eq!(ledger.total(), None, "a quota is not a bill");
+    }
+
+    #[test]
+    fn a_turns_usage_carries_its_bill_and_its_quota_together() {
+        let mut ledger = CostLedger::default();
+        let usage = flashagent_llm::Usage {
+            cost: Some(0.002),
+            cost_details: Some(flashagent_llm::types::CostDetails { upstream_cost: Some(0.0015) }),
+            allowance: Some(0.0042),
+            ..Default::default()
+        };
+        ledger.record_usage("OpenCode Go", &usage);
+        assert_eq!(ledger.total(), Some(0.002));
+        assert_eq!(ledger.upstream_total(), Some(0.0015));
+        assert_eq!(ledger.allowance(), Some((0.0042, 1)), "a child's turn is the same account's");
+        // A turn that says nothing adds nothing.
+        ledger.record_usage("OpenCode Go", &flashagent_llm::Usage::default());
+        assert_eq!(ledger.priced_turns(), 1, "a turn that prices nothing is not priced");
+        assert_eq!(ledger.total(), Some(0.002));
     }
 
     #[test]
