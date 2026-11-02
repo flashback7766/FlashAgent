@@ -1,5 +1,28 @@
 # Changelog
 
+## b680 — A binary that runs on the machine it lands on
+
+- **The release binary runs on any x86-64.** b670 was built with AVX2 and BMI2
+  enabled and died with SIGILL on a Xeon E5-2667 v2 while the setup wizard was
+  connecting. The release build is pinned to the baseline now, and refuses to
+  package a binary that still carries AVX2 code.
+- **A card on the floor answers the mouse.** Allow, Always allow and Deny, a
+  question's options, the channel card's Yes and No, the task list and both
+  rewind answers respond to a click through the same handlers their keys use.
+  A card taller than the screen no longer loses every press, and a press under
+  a card is no longer read as a row of the card.
+- **The clipboard gets what the highlight showed.** A drag across several rows
+  copies its first row from the anchor, its last to the head, and the rows
+  between them whole.
+- **Ctrl+K opens while a turn runs.** A command that has to wait is queued by
+  the same path a typed one takes, so the list is there to read.
+- **Esc while scrolled back interrupts the turn**, and a Shift held at release
+  no longer leaves the selection highlight and the scrollbar drag armed.
+- **A rate limit says why the answer is quiet.** The status line reads
+  "waiting Ns for the rate limit" instead of showing a model that looks stuck.
+- **A child's turn is billed to its session.** The cost, the upstream share and
+  the plan allowance of subagent turns reach `/cost` and `/goal`.
+
 ## b670 — The audit's last holes, and a repository that reads like a person wrote it
 
 - **Session files stop carrying what a tool was given.** A `write_file` call
