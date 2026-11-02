@@ -184,6 +184,15 @@ impl App {
     /// answer, and F2 does not reprint it. A turn that is writing its answer is
     /// left alone.
     pub(crate) fn on_subagent_event(&mut self, event: &flashagent_core::SubagentEvent) {
+        // A child's turn is this session's: its tokens already count here, and
+        // its money and quota are the same account's, so `/cost` and `/goal`
+        // must see them too.
+        if let flashagent_core::loop_::LoopEvent::Usage(usage) = &event.event {
+            self.cost.record_usage(&self.config.active_profile().name, usage);
+            if let Some(ledger) = self.goal_ledger.as_mut() {
+                ledger.record_cost(&self.config.active_profile().name, usage.cost);
+            }
+        }
         if !self.agents.apply(event) {
             return;
         }

@@ -644,14 +644,7 @@ impl App {
                 }
                 // Only what the server priced. A local backend reports nothing,
                 // and the ledger stays silent rather than inventing a bill.
-                self.cost.record_with_details(
-                    &self.config.active_profile().name,
-                    u.cost,
-                    u.cost_details.and_then(|d| d.upstream_cost),
-                );
-                // A plan that bills by quota sends no per-turn price; what it
-                // counted against the monthly allowance is its only figure.
-                self.cost.record_allowance(u.allowance);
+                self.cost.record_usage(&self.config.active_profile().name, u);
                 if let Some(ledger) = self.goal_ledger.as_mut() {
                     ledger.record_cost(&self.config.active_profile().name, u.cost);
                 }
