@@ -17,9 +17,24 @@ mkdir -p "${DIST_DIR}"
 
 # 1. Build release binary with explicit version embedded
 BINARY="${ROOT_DIR}/target/release/flashagent"
+# The released binary runs on any x86-64: b670 was built with AVX2 enabled and
+the first AVX2 instruction killed the setup on a Xeon E5-2667 v2 (Ivy Bridge)
+with SIGILL. The flags are set here rather than in the workflow so a local run
+of this script produces the same portable artifact as CI.
+export RUSTFLAGS="-C target-cpu=x86-64"
+export CFLAGS="-march=x86-64 -mtune=generic"
+export CXXFLAGS="${CFLAGS}"
 echo "--> Compiling release binary with FLASHAGENT_VERSION=${VERSION}..."
 FLASHAGENT_VERSION="${VERSION}" cargo build --release --workspace -p flashagent-tui
 strip "${BINARY}" || true
+
+# The artifact must not carry AVX2 outside the code that checks for it at
+# runtime. `vpbroadcastd` was the instruction that crashed b670, and it only
+# appears when the compiler was allowed to use AVX2 for the whole build.
+if objdump -d "${BINARY}" 2>/dev/null | grep -q 'vpbroadcastd'; then
+    echo "error: ${BINARY} contains AVX2 code; it will crash on a CPU without AVX2" >&2
+    exit 1
+fi
 
 # Ensure icon and desktop file exist
 mkdir -p "${ROOT_DIR}/packaging/desktop"
