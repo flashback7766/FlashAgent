@@ -953,17 +953,39 @@ pub(crate) fn grep(
     }
     files.sort();
 
+    // Cut like the other capped paths: the note names the cap, and the model
+    // can then ask for the rest instead of believing nothing more was found.
     let mut hits: Vec<String> = Vec::new();
+    let mut hit_the_global_cap = false;
+    let mut per_file_capped = false;
     'chunks: for chunk in files.chunks(GREP_CHUNK) {
-        let found: Vec<Vec<String>> = chunk.par_iter().map(|file| grep_file(cwd, file, &re)).collect();
-        for hit in found.into_iter().flatten() {
-            hits.push(hit);
+        let walked = chunk.par_iter().map(|file| grep_file(cwd, file, &re)).collect::<Vec<_>>();
+        for found in walked.into_iter() {
+            if found.len() == MAX_GREP_HITS_PER_FILE {
+                per_file_capped = true;
+            }
+            hits.extend(found);
             if hits.len() >= MAX_GREP_HITS {
+                hits.truncate(MAX_GREP_HITS);
+                hit_the_global_cap = true;
                 break 'chunks;
             }
         }
     }
-    Ok(if hits.is_empty() { "no matches".into() } else { hits.join("\n") })
+    let mut out = if hits.is_empty() {
+        "no matches".to_string()
+    } else {
+        hits.join("\n")
+    };
+    if hit_the_global_cap {
+        out.push_str(&format!("\n...[limit {MAX_GREP_HITS} reached]"));
+        if per_file_capped {
+            out.push_str(&format!("\n...[limit {MAX_GREP_HITS_PER_FILE} per file]"));
+        }
+    } else if per_file_capped {
+        out.push_str(&format!("\n...[limit {MAX_GREP_HITS_PER_FILE} per file]"));
+    }
+    Ok(out)
 }
 
 /// Files over 10 MB and binary files are data, not something to search.
@@ -1596,12 +1618,28 @@ mod tests {
         }
         let out = grep(&dir, "^hit", None, false).unwrap();
         let lines: Vec<&str> = out.lines().collect();
-        assert_eq!(lines.len(), MAX_GREP_HITS);
+        // The hits and the two notes that say where they stop.
+        assert_eq!(lines.len(), MAX_GREP_HITS + 2);
         assert_eq!(&lines[..3], ["a.txt:1:hit 1", "a.txt:3:hit 2", "b/a.txt:1:hit 1"]);
         // Fifty per file at most, and the cap falls inside the last file.
         assert_eq!(lines.iter().filter(|l| l.starts_with("b/z.txt:")).count(), MAX_GREP_HITS_PER_FILE);
         assert_eq!(lines[MAX_GREP_HITS - 1], "e.txt:91:hit 46");
+        assert!(out.contains("...[limit 200 reached]"), "the cap says its name: {out}");
+        assert!(out.contains("...[limit 50 per file]"), "the per-file cap says its name: {out}");
         assert_eq!(grep(&dir, "^hit", None, false).unwrap(), out, "the same search gave another answer");
+    }
+
+    #[test]
+    fn a_search_that_asks_for_one_file_only_can_still_say_its_cap() {
+        let dir = tempdir();
+        let hits = (1..=50).map(|i| format!("hit {i}\nmiss\n")).collect::<String>();
+        std::fs::write(dir.join("a.txt"), &hits).unwrap();
+        std::fs::write(dir.join("b.txt"), &hits).unwrap();
+        let out = grep(&dir, "^hit", None, false).unwrap();
+        let lines: Vec<&str> = out.lines().collect();
+        assert_eq!(lines.len(), 2 * MAX_GREP_HITS_PER_FILE + 1, "{out}");
+        assert!(out.contains("...[limit 50 per file]"), "{out}");
+        assert!(!out.contains("...[limit 200"), "the total cap was not hit: {out}");
     }
 
     #[test]

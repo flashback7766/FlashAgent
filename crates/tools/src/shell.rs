@@ -834,6 +834,9 @@ impl ShellRegistry {
     }
 
     /// Waits a moment for the process to be gone, so what is reported is final.
+    /// Waits a moment for the process to be gone, so what is reported is final.
+    /// `stop()` only asks; a wedged child can ignore a stop and keep running, and
+    /// the model must not read that as done.
     pub async fn kill(&self, id: u32) -> Result<String, ToolError> {
         if !self.stop(id) {
             let state = self.state(id).ok_or_else(|| ToolError::Other(format!("no such background task: {id}")))?;
@@ -844,10 +847,16 @@ impl ShellRegistry {
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
         let output = self.output(id).unwrap_or_default();
-        Ok(format!(
-            "task {id} killed. output:\n{}",
-            if output.trim().is_empty() { "(no output)" } else { &output }
-        ))
+        let head = if output.trim().is_empty() { "(no output)".to_string() } else { output.clone() };
+        let still_running = self.state(id) == Some(TaskState::Running);
+        Ok(if still_running {
+            format!(
+                "task {id} is still running; the stop was sent but the process did not go away. output:\n{}",
+                if output.trim().is_empty() { "(no output)".to_string() } else { head }
+            )
+        } else {
+            format!("task {id} killed. output:\n{}", head)
+        })
     }
 
     /// Kills every running task at once, without waiting. How many there were.

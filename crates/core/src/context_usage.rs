@@ -49,15 +49,11 @@ impl ContextUsage {
         }
     }
 
-    /// E.g. 5.2K instead of 5K.
+    /// The same rule the window uses, so the bar never shows `131.1K` beside
+    /// a capacity named `128K`. Powers of two are named exactly; anything else
+    /// keeps the one decimal the numbers want.
     fn format_used_tokens(tokens: usize) -> String {
-        if tokens >= 1_000_000 {
-            format!("{:.1}M", tokens as f64 / 1_000_000.0)
-        } else if tokens >= 1000 {
-            format!("{:.1}K", tokens as f64 / 1_000.0)
-        } else {
-            tokens.to_string()
-        }
+        flashagent_llm::thinking::token_count_label(tokens)
     }
 
     /// E.g. 128K or 200K.
@@ -131,7 +127,7 @@ mod tests {
 
         let gauge = usage.format_compact_gauge(10);
         assert!(gauge.contains("23%"));
-        assert!(gauge.contains("30.0K"));
+        assert!(gauge.contains("30K"));
         assert!(gauge.contains("128K"));
     }
 
@@ -165,10 +161,11 @@ mod tests {
         assert_eq!(ContextUsage::format_capacity_tokens(3_250), "3K");
         assert_eq!(ContextUsage::format_capacity_tokens(500), "500");
 
-        assert_eq!(ContextUsage::format_used_tokens(5_230), "5.2K");
-        assert_eq!(ContextUsage::format_used_tokens(5_000), "5.0K");
-        assert_eq!(ContextUsage::format_used_tokens(8_400), "8.4K");
+        assert_eq!(ContextUsage::format_used_tokens(5_230), "5K");
+        assert_eq!(ContextUsage::format_used_tokens(5_000), "5K");
+        assert_eq!(ContextUsage::format_used_tokens(8_400), "8K");
         assert_eq!(ContextUsage::format_used_tokens(500), "500");
+        assert_eq!(ContextUsage::format_used_tokens(131_072), "128K");
     }
 }
 

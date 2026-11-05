@@ -33,6 +33,11 @@ async fn load_model(source: &BackendSource) {
 }
 
 /// Once, right after setup.
+/// How long a model may take for one scenario. The setup run and the CLI
+/// ask the same thing; one timeout means the same numbers, not one that
+/// decided alone.
+pub(crate) const TOOL_TEST_TURN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
+
 pub(crate) async fn first_run_tool_check(config: &AppConfig) -> Option<String> {
     // Without a server every probe fails, and the verdict would blame the model.
     let endpoint = config.endpoint();
@@ -53,7 +58,7 @@ pub(crate) async fn first_run_tool_check(config: &AppConfig) -> Option<String> {
     let report = flashagent_core::toolcheck::check_scenarios(
         &source,
         model,
-        std::time::Duration::from_secs(60),
+        TOOL_TEST_TURN_TIMEOUT,
         &[],
     )
     .await;
@@ -82,7 +87,7 @@ pub(crate) async fn first_run_tool_check(config: &AppConfig) -> Option<String> {
 /// when a model cannot drive tools, so it works as a check. `only` narrows it
 /// to named scenarios; `json` is where the machine-readable copy goes.
 pub(crate) async fn run_tool_check_cli(config: &AppConfig, all_models: bool, only: Vec<String>, json: Option<String>, repeat: usize) -> i32 {
-    let timeout = std::time::Duration::from_secs(120);
+    let timeout = TOOL_TEST_TURN_TIMEOUT;
     let endpoint = config.endpoint();
     // Every key is checked, not the first: an unknown one among good ones used
     // to pass, then quietly widen the run to every scenario before the report
@@ -177,8 +182,40 @@ pub(crate) async fn run_tool_check_cli(config: &AppConfig, all_models: bool, onl
 }
 
 /// Settings → "Run Tool Test": a well-formed call, native or recovered from text.
-pub(crate) async fn run_tool_call_probe(source: &BackendSource) -> String {
+/// The first tool call the probe saw, and its own text. Calls are kept by
+/// index: a model that writes several, one named first, is still a valid
+/// answer to both halves of the prompt.
+pub(crate) async fn collect_first_tool_call(
+    stream: &mut futures::stream::BoxStream<'static, Result<flashagent_llm::LlmEvent, flashagent_llm::LlmError>>,
+) -> Result<Result<(Option<(String, String)>, String), String>, String> {
     use futures::StreamExt;
+    let mut parts: Vec<(usize, String, String)> = Vec::new();
+    let mut text = String::new();
+    while let Some(ev) = stream.next().await {
+        match ev.map_err(|e| e.to_string())? {
+            flashagent_llm::LlmEvent::ToolCallDelta { index, name, args_delta, .. } => {
+                let at = parts.binary_search_by_key(&index, |p| p.0).unwrap_or_else(|at| {
+                    parts.insert(at, (index, String::new(), String::new()));
+                    at
+                });
+                let (_, slot_name, slot_args) = &mut parts[at];
+                if let Some(n) = name {
+                    if slot_name.is_empty() {
+                        *slot_name = n;
+                    }
+                }
+                slot_args.push_str(&args_delta);
+            }
+            flashagent_llm::LlmEvent::TextDelta(t) => text.push_str(&t),
+            _ => {}
+        }
+    }
+    parts.sort_by_key(|(index, _, _)| *index);
+    let first = parts.iter().find(|(_, name, _)| !name.is_empty()).map(|p| (p.1.clone(), p.2.clone()));
+    Ok(Ok((first, text)))
+}
+
+pub(crate) async fn run_tool_call_probe(source: &BackendSource) -> String {
     let probe = flashagent_llm::ToolSpec {
         name: "report_status".into(),
         description: "Report a numeric status code back to the test harness.".into(),
@@ -197,40 +234,29 @@ pub(crate) async fn run_tool_call_probe(source: &BackendSource) -> String {
     let started = std::time::Instant::now();
     let run = async {
         let mut stream = source.turn_with_options(&messages, std::slice::from_ref(&probe), &opts).await.map_err(|e| e.to_string())?;
-        let (mut name, mut args, mut text) = (String::new(), String::new(), String::new());
-        while let Some(ev) = stream.next().await {
-            match ev.map_err(|e| e.to_string())? {
-                flashagent_llm::LlmEvent::ToolCallDelta { name: Some(n), args_delta, .. } => {
-                    name = n;
-                    args.push_str(&args_delta);
-                }
-                flashagent_llm::LlmEvent::ToolCallDelta { args_delta, .. } => args.push_str(&args_delta),
-                flashagent_llm::LlmEvent::TextDelta(t) => text.push_str(&t),
-                _ => {}
-            }
-        }
-        Ok::<_, String>((name, args, text))
+        collect_first_tool_call(&mut stream).await
     };
-    let (name, args, text) = match tokio::time::timeout(std::time::Duration::from_secs(120), run).await {
+    let (native, text) = match run.await {
         Err(_) => return "FAIL: no answer within 120s".into(),
         Ok(Err(e)) => return format!("FAIL: {e}"),
         Ok(Ok(parts)) => parts,
     };
     let secs = started.elapsed().as_secs_f32();
-    let (name, args, via) = if !name.is_empty() {
-        (name, args, "native")
-    } else {
-        let mut scanner = flashagent_llm::TextToolScanner::default();
-        let mut events = scanner.feed(&text);
-        events.extend(scanner.finish());
-        match events.into_iter().find_map(|e| match e {
-            flashagent_llm::ScannerEvent::ToolCall { name, args_json, .. } => Some((name, args_json)),
-            flashagent_llm::ScannerEvent::Text(_) => None,
-        }) {
-            Some((n, a)) => (n, a, "text markup"),
-            None => {
-                let snippet: String = text.trim().chars().take(60).collect();
-                return format!("FAIL: model replied with text, no tool call ({snippet:?})");
+    let (name, args, via) = match native {
+        Some((n, a)) => (n, a, "native"),
+        None => {
+            let mut scanner = flashagent_llm::TextToolScanner::default();
+            let mut events = scanner.feed(&text);
+            events.extend(scanner.finish());
+            match events.into_iter().find_map(|e| match e {
+                flashagent_llm::ScannerEvent::ToolCall { name, args_json, .. } => Some((name, args_json)),
+                flashagent_llm::ScannerEvent::Text(_) => None,
+            }) {
+                Some((n, a)) => (n, a, "text markup"),
+                None => {
+                    let snippet: String = text.trim().chars().take(60).collect();
+                    return format!("FAIL: model replied with text, no tool call ({snippet:?})");
+                }
             }
         }
     };
@@ -242,5 +268,40 @@ pub(crate) async fn run_tool_call_probe(source: &BackendSource) -> String {
         (true, Some(42)) => format!("PASS: {via} tool call in {secs:.1}s"),
         (true, _) => format!("PARTIAL: {via} call, wrong arguments {args}"),
         (false, _) => format!("FAIL: called unknown tool '{name}'"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use futures::stream::BoxStream;
+
+    fn events(events: Vec<Result<flashagent_llm::LlmEvent, flashagent_llm::LlmError>>) -> BoxStream<'static, Result<flashagent_llm::LlmEvent, flashagent_llm::LlmError>> {
+        Box::pin(futures::stream::iter(events))
+    }
+
+    /// Calls arrive as named first and numbered second. Grouping by name took
+    /// the second call's text as the model's own, so a named call after a
+    /// numbered one was read as an answer to both halves of the prompt.
+    #[tokio::test]
+    async fn calls_are_grouped_by_index_not_by_name() {
+        let mut stream = events(vec![
+            Ok(flashagent_llm::LlmEvent::ToolCallDelta { index: 0, name: Some("report_status".into()), args_delta: "{\"code\": 42 }".into(), id: None }),
+            Ok(flashagent_llm::LlmEvent::ToolCallDelta { index: 1, name: None, args_delta: "text".into(), id: None }),
+        ]);
+        let (first, _) = collect_first_tool_call(&mut stream).await.expect("the test wrote the stream").ok().unwrap();
+        let (name, args) = first.unwrap();
+        assert_eq!(name, "report_status");
+        assert_eq!(args, "{\"code\": 42 }");
+    }
+
+    #[tokio::test]
+    async fn the_first_named_call_wins_when_there_are_two() {
+        let mut stream = events(vec![
+            Ok(flashagent_llm::LlmEvent::ToolCallDelta { index: 0, name: Some("lead".into()), args_delta: "{}".into(), id: None }),
+            Ok(flashagent_llm::LlmEvent::ToolCallDelta { index: 1, name: Some("report_status".into()), args_delta: "{}".into(), id: None }),
+        ]);
+        let (first, _) = collect_first_tool_call(&mut stream).await.expect("the test wrote the stream").ok().unwrap();
+        assert_eq!(first.unwrap().0, "lead");
     }
 }
