@@ -205,6 +205,17 @@ pub fn memory_update(
         }
     };
     let entry = entry_from(&args, existing.as_ref());
+    // The same guard as create, so a correction that only names a new title
+    // does not turn into a second entry covering the same fact.
+    let already_named = existing.as_ref().is_some_and(|e| e.name == entry.name);
+    if !already_named {
+        if let Some(similar) = store.find_similar(&entry.description) {
+            return Err(ToolError::Other(format!(
+                "'{}' already covers this ({}). Use its name in memory_update instead of writing another entry.",
+                similar.name, similar.description
+            )));
+        }
+    }
     store.save(&entry).map_err(|e| ToolError::Other(format!("failed to write memory: {e}")))?;
     Ok(match existing {
         Some(_) => format!("Updated '{}' in {} memory.", entry.name, scope.label()),
@@ -272,6 +283,21 @@ mod tests {
         );
         let msg = format!("{:?}", again.unwrap_err());
         assert!(msg.contains("memory_update"), "it must point at the existing one: {msg}");
+    }
+
+    /// The same guard an update uses: a fact that says the thing again is a
+    /// correction on the old entry, not a second one.
+    #[test]
+    fn an_update_that_names_the_same_fact_again_says_so() {
+        let dir = tempfile::tempdir().unwrap();
+        memory_create(dir.path(), &goal_off(), write("Runs on the release owner's key", "The production deploys need the release owner's key.")).unwrap();
+        let again = memory_update(
+            dir.path(),
+            &goal_off(),
+            write("Runs on the owner's key", "The production deploys need the release owner's key before they run."),
+        );
+        let msg = format!("{:?}", again.unwrap_err());
+        assert!(msg.contains("already covers this"), "{msg}");
     }
 
     #[test]

@@ -1,5 +1,24 @@
 # Changelog
 
+## b700 — Tools that agree with themselves
+
+- **The tool test times and counts one way.** The setup probe and the CLI
+  share one per-scenario timeout, and a model that writes two calls in one
+  turn is graded on the first named call, not on the concatenation of both.
+- **`grep` says where it stopped.** The cap the search respects is printed
+  next to the last hit, so the model cannot read a full page as the whole
+  result.
+- **`memory_update` cannot turn a correction into a second entry.** An update
+  that names a new title first finds whether the same fact is already under
+  another name and names that one, instead of filing a near-duplicate.
+- **MCP tool names survive a server whose own name contains `__`.** A server
+  named `my__server` and a tool named `tool` are no longer read as server
+  `my` and tool `server__tool`.
+- **A stop that did not work is said as such.** A background task that
+  outlives its stop reports "still running" rather than "killed".
+- **One rule for the context bar.** The window and the fill use the same
+  token labels, so a 64k bar no longer says `65.5K/64K`.
+
 ## b681 — A binary that runs on the machine it lands on
 
 - **The release binary runs on any x86-64.** b670 was built with AVX2 and BMI2

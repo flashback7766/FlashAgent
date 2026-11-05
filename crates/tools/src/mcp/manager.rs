@@ -253,13 +253,27 @@ impl McpManager {
 
     /// `mcp__<server>__<tool>`, or a bare tool name found on a running server.
     pub fn parse_tool_name(&self, name: &str) -> Option<(String, String)> {
+        // The separator is `__`. A server that has one in its name would be
+        // split at the wrong place, so the tool is matched as the longest
+        // configured server prefix.
         if let Some(rest) = name.strip_prefix("mcp__") {
-            let parts: Vec<&str> = rest.splitn(2, "__").collect();
-            if parts.len() == 2 {
-                return Some((parts[0].to_string(), parts[1].to_string()));
+            let configs = self.configs.read();
+            let mut candidates: Vec<&String> = configs.keys().collect();
+            candidates.sort_by(|a, b| (a.len(), b.as_str()).cmp(&(b.len(), a.as_str())));
+            for server in candidates {
+                let prefix = format!("{server}__");
+                if rest.starts_with(prefix.as_str()) {
+                    return Some((server.clone(), rest[prefix.len()..].to_string()));
+                }
+            }
+            // There is one configured server whose name the prefix could also
+            // be part of; fall back to the simple split.
+            if let Some(parts) = rest.split_once("__") {
+                return Some((parts.0.to_string(), parts.1.to_string()));
             }
         }
-
+        // A bare name a client knows is accepted too; that is how the protocol
+        // reports a tool when the caller did not use the prefixed form.
         let clients = self.clients.read();
         for (server_name, client) in clients.iter() {
             for t in client.tools() {
@@ -268,7 +282,6 @@ impl McpManager {
                 }
             }
         }
-
         None
     }
 
@@ -443,6 +456,25 @@ mod tests {
         assert!(mgr.is_tool_read_only("mcp__mock_db__read_query"));
         assert!(!mgr.is_tool_read_only("mcp__mock_db__write_query"));
         assert!(!mgr.is_tool_read_only("unknown_tool"));
+    }
+
+    /// A server whose own name contains the separator still resolves, because
+    /// the tool name is the longest configured server prefix.
+    #[test]
+    fn a_server_with_a_double_underscore_in_its_name_still_resolves() {
+        let dir = tempfile::tempdir().unwrap();
+        let mgr = McpManager::new(dir.path().to_path_buf());
+        let mut configs = std::collections::HashMap::new();
+        configs.insert("my__server".to_string(), McpServerConfig::new("echo", vec![]));
+        *mgr.configs.write() = configs;
+        let (server, tool) = mgr.parse_tool_name("mcp__my__server__tool").expect("a configured server wins");
+        assert_eq!(server, "my__server");
+        assert_eq!(tool, "tool");
+        // The other name still works when the config names only that one.
+        assert_eq!(
+            mgr.parse_tool_name("mcp__other__tool"),
+            Some(("other".to_string(), "tool".to_string()))
+        );
     }
 
     #[cfg(unix)]
