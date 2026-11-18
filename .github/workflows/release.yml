@@ -268,6 +268,18 @@ jobs:
           # date must see the channel release first, and no asset from an older
           # build may linger next to the new ones. Each build stays reachable
           # through its own version tag (git tag ${VERSION}).
+          #
+          # A re-run of an older tag must not put an older build on the
+          # channel: every client would see it as an update and go backwards.
+          # Publishing the same build again (a retried workflow) is allowed.
+          current="$(gh release view "${CHANNEL_TAG}" --repo "${GITHUB_REPOSITORY}" --json name -q '.name' 2>/dev/null | awk 'NF { print $NF; exit }' || true)"
+          if [ -n "${current}" ]; then
+            newest="$(printf '%s\n%s\n' "${current}" "${VERSION}" | sort -V | tail -n 1)"
+            if [ "${newest}" != "${VERSION}" ]; then
+              echo "::error::${CHANNEL_TAG} already carries ${current}, which is newer than ${VERSION}; a channel is never moved backwards"
+              exit 1
+            fi
+          fi
           gh release delete "${CHANNEL_TAG}" --yes --cleanup-tag --repo "${GITHUB_REPOSITORY}" || true
           # shellcheck disable=SC2086
           gh release create "${CHANNEL_TAG}" release-assets/* \

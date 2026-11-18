@@ -394,7 +394,7 @@ async fn prepare_backend(config: &mut AppConfig, mut skip_trust: bool, ran_setup
     let active_model_info = discovery.as_ref().and_then(|d| d.model(&model).cloned());
 
     let context_display = active_model_info.as_ref().and_then(|m| m.context_display());
-    let context_capacity = active_model_info.as_ref().and_then(|m| m.prompt_budget()).unwrap_or(131_072);
+    let context_capacity = active_model_info.as_ref().and_then(|m| m.prompt_budget()).or(config.active_profile().context_window).unwrap_or(0);
 
     let available_models: Vec<String> = discovery
         .as_ref()
@@ -851,6 +851,7 @@ struct App {
     archive: Vec<ChatMessage>,
     /// The history is with the compaction task until it comes back.
     compacting: bool,
+    compaction_cancel: Option<Arc<AtomicBool>>,
     input: flashagent_tui::Composer,
     custom_placeholder: Option<String>,
     suggested_prompt: Option<String>,
@@ -885,10 +886,15 @@ struct App {
     mid_turn_report: Option<Arc<std::sync::Mutex<Option<flashagent_tui::CompactionResult>>>>,
     active_steer_tx: Option<tokio::sync::mpsc::UnboundedSender<flashagent_core::Steer>>,
     pending_steers: Vec<(String, Vec<Attachment>)>,
+    compacted_messages: Vec<(String, Vec<Attachment>)>,
     /// Commands typed while a turn ran that change the conversation: they run when it ends.
     queued_commands: Vec<String>,
     /// Notices of background tasks that ended, on their way to the model.
     task_inbox: flashagent_core::NoticeInbox,
+    /// Tasks that were running when the conversation on screen changed. Their
+    /// output belongs to the session that started them, not to this one: a
+    /// notice waking this model would be another conversation's work.
+    foreign_tasks: std::collections::HashSet<u32>,
     /// Transcript lines of tasks that ended while a turn was writing.
     task_lines: Vec<String>,
     tasks_refreshed: std::time::Instant,
@@ -937,6 +943,7 @@ struct App {
     /// The model's own checklist for whatever it is doing, in any session and
     /// not only under /goal.
     plan: Vec<flashagent_tools::plan_tool::PlanStep>,
+    context_request_tokens: usize,
     /// The arguments of the call now running, so a finished call can be read
     /// back without the loop having to carry them a second time.
     last_tool_args: String,
@@ -1501,6 +1508,7 @@ fn initial_app(init: InitialApp) -> App {
         history: vec![ChatMessage::system(system_prompt_text)],
         archive: Vec::new(),
         compacting: false,
+        compaction_cancel: None,
         input: flashagent_tui::Composer::new(),
         custom_placeholder: None,
         suggested_prompt: None,
@@ -1522,8 +1530,10 @@ fn initial_app(init: InitialApp) -> App {
         mid_turn_report: None,
         active_steer_tx: None,
         pending_steers: Vec::new(),
+        compacted_messages: Vec::new(),
         queued_commands: Vec::new(),
         task_inbox: flashagent_core::NoticeInbox::default(),
+        foreign_tasks: std::collections::HashSet::new(),
         agents: flashagent_tui::agents::AgentTree::default(),
         expanded_agents: std::collections::HashSet::new(),
         selection_anchor: None,
@@ -1549,6 +1559,7 @@ fn initial_app(init: InitialApp) -> App {
         cost: flashagent_core::CostLedger::default(),
         plan: Vec::new(),
         last_tool_args: String::new(),
+        context_request_tokens: 0,
         prompt_config: system_prompt_config,
         goal_active: false,
         prompt_tokens,
@@ -1822,7 +1833,8 @@ async fn event_loop(app: &mut App, w: &Wiring, mut inbox: Inbox, session_id: &mu
     loop {
         // Switched here, where the session id and the snapshot store live.
         if let Some(id) = app.pending_resume.take().filter(|id| id != session_id) {
-            if app.switch_session(session_id, &id, &w.memory_block, w.perm) {
+            let running = w.tools_arc.shells().running_ids();
+            if app.switch_session(session_id, &id, &w.memory_block, w.perm, &running) {
                 app.tell_of_lost_tasks(&w.tools_arc.shells().tasks());
                 *session_id = id;
                 w.source.set_session_id(session_id);
@@ -2001,7 +2013,10 @@ fn update_context_usage(
     let (chat_user, chat_assistant, chat_reasoning, chat_tools) = chat.raw_content_tokens(&count);
 
     let (mut user, mut assistant, mut reasoning, mut tool_out) = (0usize, 0usize, 0usize, 0usize);
+    usage.image_tokens = 0;
     for m in history {
+        let image_tokens = m.images.iter().fold(0usize, |sum, _| sum.saturating_add(1_024));
+        usage.image_tokens = usage.image_tokens.saturating_add(image_tokens);
         match m.role {
             flashagent_llm::Role::User => user += count(&m.content),
             flashagent_llm::Role::Assistant => {
@@ -2927,17 +2942,17 @@ mod tests {
         assert_eq!(request.iter().filter(|m| m.role == flashagent_llm::Role::System).count(), 1);
     }
 
-    /// A user message may not follow a tool result; providers that check the
-    /// pairing reject the request outright. The dropped tail is summarized.
+    /// Unpaired tool results at a part boundary stay as labelled summary data.
     #[test]
-    fn a_dangling_tool_result_is_dropped_before_the_instruction() {
+    fn unpaired_tool_results_are_kept_before_the_instruction() {
         let conversation = vec![
             ChatMessage::user("do the thing"),
             ChatMessage::tool_result("c1", "out"),
             ChatMessage::tool_result("c2", "out"),
         ];
         let request = compaction_request(&conversation, None, None, Detail::Brief, false);
-        assert!(!request.iter().any(|m| m.role == flashagent_llm::Role::Tool), "a tool result was left hanging before a user message");
+        assert!(!request.iter().any(|m| m.role == flashagent_llm::Role::Tool));
+        assert!(request.iter().filter(|m| m.content.contains("Earlier tool result")).count() == 2);
         assert_eq!(request.last().unwrap().role, flashagent_llm::Role::User);
     }
 

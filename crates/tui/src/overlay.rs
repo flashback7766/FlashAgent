@@ -215,14 +215,6 @@ impl App {
         self.open_overlay(Overlay::Palette(SelectMenu::new(flashagent_tui::i18n::tr("Command palette"), items).with_noun(flashagent_tui::select::Noun::COMMANDS)));
     }
 
-    pub(crate) fn dismiss_overlay(&mut self) {
-        self.overlay = match self.overlay.take() {
-            Some(Overlay::Theme(picker)) => picker.return_to.map(Overlay::Settings),
-            _ => None,
-        };
-        self.renderer.request_reprint();
-    }
-
     pub(crate) fn open_overlay(&mut self, overlay: Overlay) {
         self.overlay = Some(overlay);
         self.renderer.request_reprint();

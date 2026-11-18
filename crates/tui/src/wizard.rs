@@ -1789,7 +1789,7 @@ mod tests {
         let rendered = wizard.render(80).join("\n");
         assert!(rendered.contains("(1 loaded in LM Studio)"));
         assert!(rendered.contains("deepseek-r1-distill-qwen-14b"));
-        assert!(rendered.contains("128k ctx · tools · thinking: on [off,on]"));
+        assert!(rendered.contains("131k ctx · tools · thinking: on [off,on]"));
     }
 
     #[test]

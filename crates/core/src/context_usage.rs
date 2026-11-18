@@ -7,6 +7,9 @@ pub struct ContextUsage {
     pub assistant_tokens: usize,
     pub reasoning_tokens: usize,
     pub tool_output_tokens: usize,
+    pub image_tokens: usize,
+    /// Local size of the request whose server count was reported.
+    pub server_baseline: Option<usize>,
     pub total_capacity: usize,
     /// What the server last said it read for a whole request. It is bigger
     /// than the sum of the components whenever something stands in front of
@@ -21,20 +24,28 @@ pub struct ContextUsage {
 impl ContextUsage {
     pub fn new(total_capacity: usize) -> Self {
         Self {
-            total_capacity: total_capacity.max(1024),
+            total_capacity,
             ..Default::default()
         }
     }
 
+    pub fn local_used(&self) -> usize {
+        [self.system_tokens, self.memory_tokens, self.tools_tokens, self.user_tokens,
+            self.assistant_tokens, self.reasoning_tokens, self.tool_output_tokens, self.image_tokens]
+            .into_iter().fold(0usize, usize::saturating_add)
+    }
+
     pub fn total_used(&self) -> usize {
-        let local = self.system_tokens
-            + self.memory_tokens
-            + self.tools_tokens
-            + self.user_tokens
-            + self.assistant_tokens
-            + self.reasoning_tokens
-            + self.tool_output_tokens;
-        local.max(self.server_seen.unwrap_or(0))
+        let local = self.local_used();
+        let measured = self.server_seen.map(|seen| {
+            seen.saturating_add(local.saturating_sub(self.server_baseline.unwrap_or(local)))
+        }).unwrap_or(0);
+        local.max(measured)
+    }
+
+    pub fn invalidate_server(&mut self) {
+        self.server_seen = None;
+        self.server_baseline = None;
     }
 
     pub fn remaining(&self) -> usize {
@@ -68,6 +79,9 @@ impl ContextUsage {
 
     /// `▌───────── 6% · 4.1K/64K`
     pub fn format_compact_gauge(&self, bar_width: usize) -> String {
+        if self.total_capacity == 0 {
+            return format!("{} tokens · context unknown", Self::format_used_tokens(self.total_used()));
+        }
         let pct = self.percentage().clamp(0.0, 100.0);
         let bar_width = bar_width.max(4);
 
@@ -152,10 +166,22 @@ mod tests {
     }
 
     #[test]
+    fn retained_growth_is_added_to_the_measured_request() {
+        let mut usage = ContextUsage::new(16_000);
+        usage.system_tokens = 1_000;
+        usage.server_seen = Some(10_000);
+        usage.server_baseline = Some(1_000);
+        usage.assistant_tokens = 2_000;
+        assert_eq!(usage.total_used(), 12_000);
+        usage.invalidate_server();
+        assert_eq!(usage.total_used(), 3_000);
+    }
+
+    #[test]
     fn test_format_tokens_binary_and_decimal() {
-        assert_eq!(ContextUsage::format_capacity_tokens(131_072), "128K");
-        assert_eq!(ContextUsage::format_capacity_tokens(65_536), "64K");
-        assert_eq!(ContextUsage::format_capacity_tokens(32_768), "32K");
+        assert_eq!(ContextUsage::format_capacity_tokens(131_072), "131K");
+        assert_eq!(ContextUsage::format_capacity_tokens(65_536), "66K");
+        assert_eq!(ContextUsage::format_capacity_tokens(32_768), "33K");
         assert_eq!(ContextUsage::format_capacity_tokens(128_000), "128K");
         assert_eq!(ContextUsage::format_capacity_tokens(200_000), "200K");
         assert_eq!(ContextUsage::format_capacity_tokens(3_250), "3K");
@@ -165,7 +191,7 @@ mod tests {
         assert_eq!(ContextUsage::format_used_tokens(5_000), "5K");
         assert_eq!(ContextUsage::format_used_tokens(8_400), "8K");
         assert_eq!(ContextUsage::format_used_tokens(500), "500");
-        assert_eq!(ContextUsage::format_used_tokens(131_072), "128K");
+        assert_eq!(ContextUsage::format_used_tokens(131_072), "131K");
     }
 }
 

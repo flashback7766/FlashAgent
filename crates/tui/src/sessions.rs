@@ -454,7 +454,7 @@ impl App {
         true
     }
 
-    pub(crate) fn switch_session(&mut self, current: &str, id: &str, memory_block: &str, perm: &PermissionedTools) -> bool {
+    pub(crate) fn switch_session(&mut self, current: &str, id: &str, memory_block: &str, perm: &PermissionedTools, running_tasks: &[u32]) -> bool {
         if !self.may_switch_session() {
             return false;
         }
@@ -511,9 +511,16 @@ impl App {
         // one charged a conversation for work it never did.
         self.cost = flashagent_core::CostLedger::default();
         self.token_tracker = TokenTracker::new(self.current_model.clone());
-        // As with the bill: the last server count belongs to the conversation
-        // just left, not to the one taking the screen.
-        self.context_usage.server_seen = None;
+        self.agents = flashagent_tui::agents::AgentTree::default();
+        self.expanded_agents.clear();
+        self.task_inbox = flashagent_core::NoticeInbox::default();
+        // A background task outlives the conversation that started it. From
+        // here its notice is shown, not handed to the freshly opened session's
+        // model: it is output from work that session never did.
+        self.foreign_tasks = running_tasks.iter().copied().collect();
+        self.task_lines.clear();
+        // As with the bill: the server count belongs to the previous session.
+        self.context_usage.invalidate_server();
         update_context_usage(&self.current_model, &mut self.context_usage, &self.history, memory_block, &self.chat, perm);
         self.notice(tr_fill("Resumed session {id} · {messages}", &[("id", id), ("messages", &flashagent_tui::plural(restored, "message", "messages"))]));
         true
@@ -1289,13 +1296,13 @@ mod session_tests {
         // As the screen shows it, folded.
         let (settled, live) = chat.render_split(100, flashagent_tui::ReasoningExpansion::default());
         let text = settled.iter().chain(live.iter()).map(|(_, t)| flashagent_tui::strip_ansi(t)).collect::<Vec<_>>().join("\n");
-        assert!(text.contains("Reading store.py"), "the read is gone:\n{text}");
-        assert!(text.lines().any(|l| l.contains("Fixing total_value") && l.contains("· declined")), "the declined edit is gone:\n{text}");
+        assert!(text.contains("Read store.py"), "the read is gone:\n{text}");
+        assert!(text.lines().any(|l| l.contains("Not run: store.py") && l.contains("· declined")), "the declined edit is gone:\n{text}");
         assert!(text.contains("Thought: Reading Files") && !text.contains("(1s)"), "{text}");
         // The words between calls are their own blocks, not one paragraph.
         let reading = text.find("Reading it.").unwrap();
         let declined = text.find("You declined the fix.").unwrap();
-        assert!(text[reading..declined].contains("Reading store.py"), "{text}");
+        assert!(text[reading..declined].contains("Read store.py"), "{text}");
         assert!(!text.contains('▌'), "a restored answer is not still being written");
         assert_eq!(chat.user_turn_count(), 2);
     }

@@ -49,6 +49,8 @@ impl BackendSource {
 
 #[async_trait::async_trait]
 impl LlmSource for BackendSource {
+    fn token_model(&self) -> String { self.0.model() }
+
     async fn turn(
         &self,
         messages: &[ChatMessage],

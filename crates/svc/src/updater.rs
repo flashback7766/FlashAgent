@@ -376,7 +376,7 @@ fn is_writable(path: &Path) -> bool {
 /// that name writes over the copy the rollback exists for, or fails outright
 /// once the cleanup has taken it. The binary the owner starts is the one the
 /// last update placed beside it.
-fn installed_beside_parked(exe: &Path) -> Option<PathBuf> {
+pub(crate) fn installed_beside_parked(exe: &Path) -> Option<PathBuf> {
     let name = exe.file_name()?.to_string_lossy();
     if !(name.starts_with(".flashagent-old.") && name.ends_with(".bak")) {
         return None;
@@ -459,10 +459,9 @@ fn replace_executable(
 }
 
 /// Moves the running binary to the backup name. Windows cannot rename over
-/// a name another copy holds and needs the removal first; unix replaces
-/// atomically, and a `NotFound` means the target was parked away by another
-/// update between the check and this rename: the place step still puts our
-/// build where the owner runs it from.
+/// a name another copy holds and needs the removal first. Unix never parks:
+/// its rename replaces the name atomically and the install path is never
+/// empty, so only the Windows path needs this move.
 #[cfg(windows)]
 fn park_running_binary(target: &Path, old_backup: &Path) -> anyhow::Result<()> {
     let _ = std::fs::remove_file(old_backup);
@@ -470,12 +469,50 @@ fn park_running_binary(target: &Path, old_backup: &Path) -> anyhow::Result<()> {
         .map_err(|e| anyhow::anyhow!("could not move the current binary {} aside: {e}", target.display()))
 }
 
-#[cfg(not(windows))]
-fn park_running_binary(target: &Path, old_backup: &Path) -> anyhow::Result<()> {
-    match std::fs::rename(target, old_backup) {
-        Ok(()) => Ok(()),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(e) => Err(anyhow::anyhow!("could not move the current binary {} aside: {e}", target.display())),
+/// One update at a time in a folder. Two windows updating at once each park
+/// and place the same path, and the slower one could put an older build over
+/// the newer one; the loser of that race has no error to report. A crashed
+/// update must not block future updates forever, so a lock older than ten
+/// minutes is taken over.
+#[derive(Debug)]
+struct UpdateLock {
+    path: PathBuf,
+}
+
+impl UpdateLock {
+    fn acquire(dir: &Path) -> anyhow::Result<Self> {
+        let path = dir.join(".flashagent-update.lock");
+        for attempt in 0..2 {
+            match std::fs::OpenOptions::new().write(true).create_new(true).open(&path) {
+                Ok(mut file) => {
+                    use std::io::Write as _;
+                    let _ = writeln!(file, "{}", std::process::id());
+                    return Ok(Self { path });
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists && attempt == 0 => {
+                    let stale = std::fs::metadata(&path)
+                        .and_then(|meta| meta.modified())
+                        .ok()
+                        .and_then(|time| time.elapsed().ok())
+                        .is_some_and(|age| age > std::time::Duration::from_secs(600));
+                    if !stale {
+                        anyhow::bail!(
+                            "another update is installing into {}; let it finish and try again",
+                            dir.display()
+                        );
+                    }
+                    let _ = std::fs::remove_file(&path);
+                }
+                Err(e) => anyhow::bail!("could not lock {}: {e}", dir.display()),
+            }
+        }
+        anyhow::bail!("could not lock {}", dir.display())
+    }
+}
+
+impl Drop for UpdateLock {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.path);
     }
 }
 
@@ -486,32 +523,63 @@ fn install_executable(
     new_binary_bytes: &[u8],
     place: impl FnOnce(&Path, &Path) -> anyhow::Result<()>,
 ) -> anyhow::Result<()> {
+    let _lock = UpdateLock::acquire(target.parent().unwrap_or_else(|| Path::new(".")))?;
     write_synced(temp_file, new_binary_bytes)?;
 
-    // A running .exe cannot be overwritten, but can be renamed; on unix the
-    // same move keeps the current build available for a rollback.
-    let parked = target.is_file();
-    if parked {
-        park_running_binary(target, old_backup)?;
+    #[cfg(windows)]
+    {
+        // A running .exe cannot be overwritten, but can be renamed; the name
+        // has to be free while the new file is moved in.
+        let parked = target.is_file();
+        if parked {
+            park_running_binary(target, old_backup)?;
+        }
+
+        match place(temp_file, target) {
+            Ok(()) => Ok(()),
+            Err(e) => {
+                if parked {
+                    // A failed copy can leave part of the new build at the path.
+                    let _ = std::fs::remove_file(target);
+                    if let Err(restore) = std::fs::rename(old_backup, target) {
+                        anyhow::bail!(
+                            "{e}; the old binary at {} could not be put back: {restore}",
+                            target.display()
+                        );
+                    }
+                } else {
+                    let _ = std::fs::remove_file(target);
+                }
+                Err(e)
+            }
+        }
     }
 
-    match place(temp_file, target) {
-        Ok(()) => Ok(()),
-        Err(e) => {
-            if parked {
-                // A failed copy can leave part of the new build at the path.
-                let _ = std::fs::remove_file(target);
-                if let Err(restore) = std::fs::rename(old_backup, target) {
-                    anyhow::bail!(
-                        "{e}; the old binary at {} could not be put back: {restore}",
-                        target.display()
-                    );
-                }
-            } else {
-                let _ = std::fs::remove_file(target);
+    #[cfg(not(windows))]
+    {
+        // The install path must name a complete binary at every instant. Moving
+        // the old file aside first would leave a gap: a crash in it leaves
+        // nothing to start. A copy keeps the old build for a rollback while the
+        // single rename swaps the names atomically, so a failure leaves the old
+        // file exactly where it was.
+        let had_old = target.is_file();
+        if had_old {
+            let old = std::fs::read(target)?;
+            if let Err(e) = write_synced(old_backup, &old) {
+                // A rollback copy that cannot be written is worth a diagnosis,
+                // but the replacement itself is still safe.
+                eprintln!("warning: could not keep a rollback copy of {}: {e}", target.display());
             }
-            Err(e)
         }
+
+        if let Err(e) = place(temp_file, target) {
+            let _ = std::fs::remove_file(temp_file);
+            if had_old {
+                let _ = std::fs::remove_file(old_backup);
+            }
+            return Err(e);
+        }
+        Ok(())
     }
 }
 
@@ -745,37 +813,36 @@ mod tests {
         assert_eq!(installed_beside_parked(std::path::Path::new("/opt/bin/.flashagent-old-README")), None);
     }
 
+    // The install path must name a complete binary at the moment the new file
+    // is put in place: unix swaps the names with one rename instead of parking
+    // the old file first, so a crash in the gap cannot leave nothing to start.
     #[cfg(not(windows))]
     #[test]
-    fn nothing_to_park_is_not_an_error() {
-        // Two updates at once: the other one parked the binary away between
-        // our check and our rename. The place step still puts our build
-        // where the owner runs it from; the failed move is not a failure.
-        let dir = std::env::temp_dir().join(format!("fa-park-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let target = dir.join("flashagent");
-        let backup = dir.join(".flashagent-old.1.bak");
-        park_running_binary(&target, &backup).expect("a target that is already gone parks nothing");
-        assert!(!backup.exists(), "nothing was written for a target that is not there");
-        let _ = std::fs::remove_dir_all(&dir);
+    fn the_install_path_never_stops_naming_a_complete_binary_during_the_replace() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("flashagent");
+        std::fs::write(&target, b"old build").unwrap();
+
+        let seen = std::cell::Cell::new(None);
+        let result = replace_executable(&target, b"new build", |temp, target| {
+            assert!(temp.is_file(), "the new build is staged before the path changes");
+            seen.set(Some(std::fs::read(target).unwrap()));
+            anyhow::bail!("stop just before the swap")
+        });
+
+        assert!(result.is_err());
+        assert_eq!(seen.take().as_deref(), Some(b"old build".as_slice()), "the path was emptied before the new build was in place");
+        assert_eq!(std::fs::read(&target).unwrap(), b"old build", "the old build is still what the path names");
     }
 
-    #[cfg(not(windows))]
     #[test]
-    fn the_park_replaces_what_stands_at_the_backup_name() {
-        // The second update of a running process reuses the same {pid} backup
-        // name; the park must replace the name, not die on it: the running
-        // binary it parked before is this process's own inode.
-        let dir = std::env::temp_dir().join(format!("fa-park2-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let target = dir.join("flashagent");
-        let backup = dir.join(".flashagent-old.1.bak");
-        std::fs::write(&target, b"the running build").unwrap();
-        std::fs::write(&backup, b"a stale backup").unwrap();
-        park_running_binary(&target, &backup).expect("the park replaces the backup name");
-        assert!(!target.exists(), "the running binary moved aside");
-        assert_eq!(std::fs::read(&backup).unwrap(), b"the running build", "the backup holds what was parked");
-        let _ = std::fs::remove_dir_all(&dir);
+    fn a_second_update_in_the_same_folder_is_refused_while_the_first_holds_the_lock() {
+        let dir = tempfile::tempdir().unwrap();
+        let first = UpdateLock::acquire(dir.path()).unwrap();
+        let err = UpdateLock::acquire(dir.path()).expect_err("a second update must not race the first").to_string();
+        assert!(err.contains("another update"), "{err}");
+        drop(first);
+        UpdateLock::acquire(dir.path()).expect("the lock is free once the first update has finished");
     }
 
     #[test]

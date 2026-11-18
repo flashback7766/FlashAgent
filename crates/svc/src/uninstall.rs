@@ -210,7 +210,15 @@ pub fn remove_from_path_list(path_var: &str, dir: &str) -> Option<String> {
 /// Existing paths only, each once.
 pub fn binary_locations(exe: &Path, home: &Path, local_app_data: Option<&Path>) -> Vec<PathBuf> {
     let exe_name = if cfg!(windows) { "flashagent.exe" } else { "flashagent" };
-    let mut candidates = vec![exe.to_path_buf(), home.join(".local").join("bin").join(exe_name)];
+    let mut candidates = vec![exe.to_path_buf()];
+    // After an update the process runs from the parked backup name; the path
+    // the owner starts is the sibling the update placed. Without it, an
+    // uninstall from a parked process leaves the real binary (and its PATH
+    // line) behind.
+    if let Some(installed) = crate::updater::installed_beside_parked(exe) {
+        candidates.push(installed);
+    }
+    candidates.push(home.join(".local").join("bin").join(exe_name));
     // Leftovers of older installs next to either of those.
     for dir in [exe.parent().map(Path::to_path_buf), Some(home.join(".local").join("bin"))].into_iter().flatten() {
         candidates.push(dir.join(if cfg!(windows) { "flashagent-tui.exe" } else { "flashagent-tui" }));
@@ -408,7 +416,10 @@ pub fn run_interactive(assume_yes: bool) -> anyhow::Result<()> {
         );
     }
     let local_app_data = std::env::var_os("LOCALAPPDATA").map(PathBuf::from);
-    let package = if cfg!(unix) { package_owner(&exe) } else { None };
+    // The path a package owns is the installed one, not the parked copy the
+    // running process sits in after an update.
+    let owned = crate::updater::installed_beside_parked(&exe).unwrap_or_else(|| exe.clone());
+    let package = if cfg!(unix) { package_owner(&owned) } else { None };
     let plan = plan(&exe, &home, local_app_data.as_deref(), package);
 
     let stdin = std::io::stdin();
@@ -605,6 +616,30 @@ mod tests {
     // line's folders are read as a colon list, and on Windows that reading
     // stops at the drive colon. The Windows PATH entry lives in the user
     // environment and is edited apart.
+    // A process that updated once runs from the parked backup name; the path
+    // the owner starts is the sibling. Uninstalling only the parked copy left
+    // the real binary and its PATH line behind.
+    #[cfg(unix)]
+    #[test]
+    fn an_uninstall_from_a_parked_process_removes_the_installed_binary() {
+        let home = home_with_everything();
+        let h = home.path();
+        let installed = h.join(".local/bin/flashagent");
+        let parked = h.join(".local/bin/.flashagent-old.77.bak");
+        std::fs::write(&parked, "the build that ran before the update").unwrap();
+
+        let plan = plan(&parked, h, None, None);
+        assert!(plan.binaries.contains(&installed), "the installed path is in the plan: {:?}", plan.binaries);
+        assert!(plan.binaries.contains(&parked), "the parked copy is in the plan: {:?}", plan.binaries);
+
+        let report = execute(&plan, &[]);
+        assert!(report.failed.is_empty(), "{:?}", report.failed);
+        assert!(!installed.exists(), "the binary the owner starts is gone");
+        assert!(!parked.exists(), "the parked copy is gone");
+        let bashrc = std::fs::read_to_string(h.join(".bashrc")).unwrap();
+        assert_eq!(bashrc, "alias x=y\n", "the PATH line goes once the folder is empty");
+    }
+
     #[cfg(unix)]
     #[test]
     fn an_uninstall_removes_the_program_its_path_line_and_only_the_chosen_data() {

@@ -19,8 +19,64 @@ use super::protocol::{
 };
 
 const STDERR_RING_BUFFER_SIZE: usize = 100;
+const STDERR_LINE_BYTES: usize = 4096;
 
 type PendingMap = Arc<Mutex<HashMap<u64, oneshot::Sender<Result<Value, JsonRpcError>>>>>;
+
+/// Drain the whole line, but never grow a protocol/log buffer past its cap.
+async fn read_line_capped(
+    reader: &mut (impl AsyncBufReadExt + Unpin),
+    raw: &mut Vec<u8>,
+    cap: usize,
+    mut on_truncated: impl FnMut(),
+) -> std::io::Result<(usize, bool)> {
+    let mut total = 0usize;
+    let mut notified = false;
+    loop {
+        let bytes = reader.fill_buf().await?;
+        if bytes.is_empty() {
+            return Ok((total, total > raw.len()));
+        }
+        let end = bytes.iter().position(|b| *b == b'\n').map(|at| at + 1);
+        let used = end.unwrap_or(bytes.len());
+        let keep = used.min(cap.saturating_sub(raw.len()));
+        raw.extend_from_slice(&bytes[..keep]);
+        if keep < used && !notified {
+            on_truncated();
+            notified = true;
+        }
+        total = total.saturating_add(used);
+        reader.consume(used);
+        if end.is_some() {
+            return Ok((total, total > raw.len()));
+        }
+    }
+}
+
+fn oversized_frame(pending: &PendingMap) {
+    let error = JsonRpcError {
+        code: -32000,
+        message: format!("MCP stdout frame exceeded {} bytes and was truncated; the server may have done it anyway, so check before calling it again", crate::MAX_LINE_BYTES),
+        data: None,
+    };
+    for tx in pending.lock().drain().map(|(_, tx)| tx) {
+        let _ = tx.send(Err(error.clone()));
+    }
+}
+
+fn record_stderr(ring: &Mutex<VecDeque<String>>, raw: &[u8], truncated: bool) {
+    let mut line = String::from_utf8_lossy(raw).trim_end_matches(['\r', '\n']).to_string();
+    if truncated {
+        line.push_str("...[truncated stderr line]");
+    }
+    let mut ring = ring.lock();
+    let mut bytes: usize = ring.iter().map(String::len).sum();
+    while ring.len() >= STDERR_RING_BUFFER_SIZE || bytes + line.len() > crate::MAX_OUTPUT_BYTES {
+        let Some(old) = ring.pop_front() else { break };
+        bytes -= old.len();
+    }
+    ring.push_back(line);
+}
 
 pub struct McpClient {
     name: String,
@@ -118,9 +174,12 @@ impl McpClient {
             let mut raw = Vec::new();
             loop {
                 raw.clear();
-                match reader.read_until(b'\n', &mut raw).await {
-                    Ok(0) | Err(_) => break,
-                    Ok(_) => {}
+                let truncated = match read_line_capped(&mut reader, &mut raw, crate::MAX_LINE_BYTES, || oversized_frame(&pending_clone)).await {
+                    Ok((0, _)) | Err(_) => break,
+                    Ok((_, truncated)) => truncated,
+                };
+                if truncated {
+                    continue;
                 }
                 let line = String::from_utf8_lossy(&raw);
                 let trimmed = line.trim();
@@ -176,16 +235,11 @@ impl McpClient {
             let mut raw = Vec::new();
             loop {
                 raw.clear();
-                match reader.read_until(b'\n', &mut raw).await {
-                    Ok(0) | Err(_) => break,
-                    Ok(_) => {}
-                }
-                let line = String::from_utf8_lossy(&raw).trim_end_matches(['\r', '\n']).to_string();
-                let mut ring = stderr_ring.lock();
-                if ring.len() >= STDERR_RING_BUFFER_SIZE {
-                    ring.pop_front();
-                }
-                ring.push_back(line);
+                let truncated = match read_line_capped(&mut reader, &mut raw, STDERR_LINE_BYTES, || {}).await {
+                    Ok((0, _)) | Err(_) => break,
+                    Ok((_, truncated)) => truncated,
+                };
+                record_stderr(&stderr_ring, &raw, truncated);
             }
         });
 
@@ -208,6 +262,10 @@ impl McpClient {
 
     pub fn tools(&self) -> Vec<McpTool> {
         self.tools.read().clone()
+    }
+
+    pub(super) fn tool_names(&self) -> Vec<String> {
+        self.tools.read().iter().map(|tool| tool.name.clone()).collect()
     }
 
     pub fn server_info(&self) -> Option<McpServerInfo> {
@@ -235,7 +293,7 @@ impl McpClient {
 
         let result = match tokio::time::timeout(timeout, rx).await {
             Ok(Ok(Ok(val))) => Ok(val),
-            Ok(Ok(Err(err))) => Err(format!("MCP error (code {}): {}", err.code, err.message)),
+            Ok(Ok(Err(err))) => Err(crate::truncate_output(format!("MCP error (code {}): {}", err.code, err.message))),
             Ok(Err(_)) => Err(format!("MCP server '{}' closed response channel", self.name)),
             Err(_) => {
                 // A call that timed out may have happened on the server anyway.
@@ -352,6 +410,43 @@ mod tests {
 
 
     #[tokio::test]
+    async fn capped_mcp_lines_are_drained_and_the_next_frame_is_preserved() {
+        let input = b"a very long stdout frame\nnext\n";
+        let mut reader = BufReader::with_capacity(3, &input[..]);
+        let mut raw = Vec::new();
+        let (_, truncated) = read_line_capped(&mut reader, &mut raw, 5, || {}).await.unwrap();
+        assert!(truncated);
+        assert_eq!(raw, b"a ver");
+        raw.clear();
+        assert_eq!(read_line_capped(&mut reader, &mut raw, 5, || {}).await.unwrap(), (5, false));
+        assert_eq!(raw, b"next\n");
+    }
+
+    #[tokio::test]
+    async fn an_oversized_mcp_stdout_frame_fails_pending_requests_with_a_note() {
+        let pending: PendingMap = Arc::new(Mutex::new(HashMap::new()));
+        let (tx, rx) = oneshot::channel();
+        pending.lock().insert(1, tx);
+        oversized_frame(&pending);
+        let error = rx.await.unwrap().unwrap_err();
+        assert!(error.message.contains("truncated") && error.message.contains("may have done it anyway"));
+        assert!(pending.lock().is_empty());
+    }
+
+    #[test]
+    fn stderr_is_bounded_by_bytes_as_well_as_lines() {
+        let ring = Mutex::new(VecDeque::new());
+        let raw = vec![b'x'; STDERR_LINE_BYTES];
+        for _ in 0..STDERR_RING_BUFFER_SIZE + 10 {
+            record_stderr(&ring, &raw, true);
+        }
+        let ring = ring.lock();
+        assert!(ring.len() <= STDERR_RING_BUFFER_SIZE);
+        assert!(ring.iter().map(String::len).sum::<usize>() <= crate::MAX_OUTPUT_BYTES);
+        assert!(ring.iter().all(|line| line.contains("truncated stderr")));
+    }
+
+    #[tokio::test]
     async fn server_initiated_request_is_answered_and_never_resolves_ours() {
         // The server sends its own request with id 1, the same as our `initialize`.
         // It must get an error reply, and our request must wait for the real response.
@@ -377,7 +472,7 @@ done
         assert_eq!(init.server_info.name, "strict");
         let tools = client.tools();
         assert_eq!(tools.len(), 1);
-        assert!(tools[0].claims_read_only(), "readOnlyHint must be parsed");
+        assert_eq!(tools[0].annotations.as_ref().and_then(|a| a.read_only), Some(true), "readOnlyHint must be parsed");
         client.kill().await;
     }
 

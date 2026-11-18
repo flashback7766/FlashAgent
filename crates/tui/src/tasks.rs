@@ -104,13 +104,25 @@ impl App {
         }
     }
 
+    /// True when a task notice belongs to the conversation on screen. A task
+    /// that was already running when the session changed is claimed once, as
+    /// the left session's, and never wakes this model.
+    pub(crate) fn claims_task_notice(&mut self, id: u32) -> bool {
+        !self.foreign_tasks.remove(&id)
+    }
+
     pub(crate) fn on_task_ended(&mut self, cx: &LoopCtx<'_>, notice: TaskNotice) {
         let line = task_line(&notice);
+        // A notice from a task that was already running when this conversation
+        // opened belongs to the session that started it. It is shown, but not
+        // fed to this model: another conversation's command output is not this
+        // one's work.
+        let foreign = !self.claims_task_notice(notice.id);
         if self.running {
             // A line now would split the answer being written; it goes in when the
             // loop takes the notice, or when the turn ends.
             self.task_lines.push(line);
-            if !notice.killed() {
+            if !notice.killed() && !foreign {
                 self.say(BackgroundNotice::fading(
                     tr_fill("Background task {id} {state} \u{b7} the agent will be told", &[("id", &notice.id.to_string()), ("state", &notice.state.describe())]),
                     6,
@@ -119,10 +131,18 @@ impl App {
         } else {
             self.chat.push_system(&line);
         }
-        // Stopped by the model or on quit: nothing to tell. Stopped by the user
-        // from the task list: the model thinks it still runs, and hears
-        // otherwise with the next thing the user sends, without a turn of its own.
-        if !notice.killed() {
+        if foreign {
+            self.say(BackgroundNotice::fading(
+                tr_fill(
+                    "Background task {id} ended in the session that started it \u{b7} its output is in /tasks",
+                    &[("id", &notice.id.to_string())],
+                ),
+                8,
+            ));
+        } else if !notice.killed() {
+            // Stopped by the model or on quit: nothing to tell. Stopped by the user
+            // from the task list: the model thinks it still runs, and hears
+            // otherwise with the next thing the user sends, without a turn of its own.
             self.task_inbox.push(notice.message());
         } else if notice.by_user {
             self.task_inbox.push_quiet(notice.message());
@@ -153,7 +173,8 @@ impl App {
         // A draft waits to be sent and carries the notices with it; an emptied
         // prompt lets them go. Only a view that only shows things stays open
         // under a turn.
-        let busy = cx.gate.pending().is_some()
+        let busy = self.compacting
+            || cx.gate.pending().is_some()
             || cx.question_gate.pending().is_some()
             || !self.input.trim().is_empty()
             || !self.attachments.is_empty()
@@ -415,6 +436,15 @@ mod tests {
         later.push(shell("g", r#"{"command":"python -m http.server","background":true}"#));
         later.push(ChatMessage::tool_result("g", "started background task 1. A notice arrives when it exits"));
         assert_eq!(tasks_left_running(&later), vec![(1, "python -m http.server".to_string())]);
+    }
+
+    #[test]
+    fn a_task_started_before_the_session_changed_does_not_wake_the_new_session() {
+        let mut app = crate::tests::test_app();
+        app.foreign_tasks.insert(4);
+        assert!(!app.claims_task_notice(4), "a task left running by the previous session is not this conversation's");
+        assert!(app.claims_task_notice(4), "the claim is spent once, then the id is an ordinary task");
+        assert!(app.claims_task_notice(5), "a task of this session is this conversation's");
     }
 
     #[test]

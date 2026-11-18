@@ -304,6 +304,28 @@ impl Composer {
         true
     }
 
+    /// Vertical movement uses the same soft-wrapped rows as the prompt.
+    pub fn move_visual(&mut self, width: usize, direction: isize) -> bool {
+        let width = width.max(1);
+        let mut ranges = Vec::new();
+        let mut start = 0;
+        for line in self.text.split('\n') {
+            let wrapped = wrap_line(line, width);
+            if wrapped.is_empty() { ranges.push((start, start)); }
+            for (at, row) in wrapped {
+                ranges.push((start + at, start + at + row.len()));
+            }
+            start += line.len() + 1;
+        }
+        let current = ranges.iter().enumerate().filter(|(_, (start, end))| self.cursor >= *start && self.cursor <= *end).map(|(i, _)| i).next_back().unwrap_or(0);
+        let (start, _) = ranges[current];
+        let col = self.text[start..self.cursor].width();
+        let Some(target) = current.checked_add_signed(direction).filter(|i| *i < ranges.len()) else { return false };
+        let (start, end) = ranges[target];
+        self.cursor = self.offset_at_col(start, end, col.min(width.saturating_sub(1)));
+        true
+    }
+
     pub fn line_count(&self) -> usize {
         self.text.split('\n').count()
     }

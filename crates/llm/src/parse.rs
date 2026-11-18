@@ -34,6 +34,11 @@ impl SseDecoder {
             }
         }
         while let Some(end) = rest.iter().position(|&b| b == b'\n' || b == b'\r') {
+            if self.line.len().saturating_add(end) > crate::client::MAX_FRAME_BYTES {
+                self.line.clear();
+                self.data.clear();
+                return vec![r#"{"error":{"message":"SSE frame exceeded the byte limit"}}"#.to_string()];
+            }
             if self.line.is_empty() {
                 self.take_line(&rest[..end], &mut out);
             } else {
@@ -52,6 +57,11 @@ impl SseDecoder {
                     Some(_) => {}
                 }
             }
+        }
+        if self.line.len().saturating_add(rest.len()) > crate::client::MAX_FRAME_BYTES {
+            self.line.clear();
+            self.data.clear();
+            return vec![r#"{"error":{"message":"SSE frame exceeded the byte limit"}}"#.to_string()];
         }
         self.line.extend_from_slice(rest);
         out
@@ -80,6 +90,12 @@ impl SseDecoder {
             None => (line, &line[line.len()..]),
         };
         if field == b"data" {
+            if self.data.len().saturating_add(value.len()).saturating_add(1) > crate::client::MAX_FRAME_BYTES {
+                self.data.clear();
+                self.has_data = false;
+                out.push(r#"{"error":{"message":"SSE event exceeded the byte limit"}}"#.to_string());
+                return;
+            }
             if self.has_data {
                 self.data.push(b'\n');
             }
@@ -109,6 +125,8 @@ pub struct ChunkParser {
     /// told apart from the previous one by its name once that one is whole.
     tool_args: Vec<String>,
     thought: ThoughtTags,
+    raw_text: String,
+    unsafe_measurement: bool,
     /// Readers stop at the first `Done`, so there is only one: a finish
     /// reason followed by `[DONE]` must not end the stream twice.
     done: bool,
@@ -234,6 +252,20 @@ impl ChunkParser {
         events
     }
 
+    pub(crate) fn measurement(&self, usage: &crate::types::Usage) -> crate::types::CompletionMeasurement {
+        use crate::types::CompletionMeasurement::{Text, Unavailable};
+        if self.unsafe_measurement || !self.done || self.raw_text.is_empty() { return Unavailable; }
+        usage.completion.filter(|n| *n >= 0).map_or(Unavailable, Text)
+    }
+
+    pub(crate) fn calibrate(&self, model: &str, usage: &crate::types::Usage) {
+        if let crate::types::CompletionMeasurement::Text(tokens) = self.measurement(usage) {
+            if tokens > 0 {
+                crate::tokenizer::note_measured(model, &self.raw_text, tokens as usize);
+            }
+        }
+    }
+
     /// The body ended without `[DONE]` or a finish reason: a held `<` was text.
     pub fn finish(&mut self) -> Vec<LlmEvent> {
         let mut events = Vec::new();
@@ -303,6 +335,7 @@ impl ChunkParser {
             Some((prompt_n + cache_n, cache_n))
         });
 
+        let usage_at = events.len();
         // Groq puts the usage of its last chunk under `x_groq`.
         let usage = v.get("usage").filter(|u| u.is_object()).or_else(|| v.pointer("/x_groq/usage").filter(|u| u.is_object()));
         if let Some(usage) = usage {
@@ -313,8 +346,8 @@ impl ChunkParser {
             // Anthropic-style `cache_read_input_tokens`; llama.cpp `timings`.
             // Each source is checked on its own: a value of the wrong type in one
             // of them must not hide the number in the next.
-            let cache_read = usage.get("cache_read_input_tokens").and_then(Value::as_i64);
-            let cache_written = usage.get("cache_creation_input_tokens").and_then(Value::as_i64);
+            let cache_read = usage.get("cache_read_input_tokens").and_then(Value::as_i64).filter(|n| *n >= 0);
+            let cache_written = usage.get("cache_creation_input_tokens").and_then(Value::as_i64).filter(|n| *n >= 0);
             let cached = usage
                 .get("prompt_tokens_details")
                 .and_then(|d| d.get("cached_tokens"))
@@ -323,14 +356,10 @@ impl ChunkParser {
                 .or_else(|| usage.get("prompt_cache_hit_tokens").and_then(Value::as_i64))
                 .or(cache_read)
                 .or_else(|| timings.map(|(_, cached)| cached));
-            // Anthropic counts cache reads and cache writes apart from input tokens.
-            if let (Some(p), Some(read)) = (prompt, cache_read) {
-                if read > p {
-                    prompt = Some(p + read);
-                }
-            }
-            if let (Some(p), Some(written)) = (prompt, cache_written) {
-                prompt = Some(p + written);
+            // Anthropic-style fields report uncached input separately, even
+            // when the cache hit is smaller than that input.
+            if let Some(p) = prompt.filter(|n| *n >= 0) {
+                prompt = Some(p.saturating_add(cache_read.unwrap_or(0)).saturating_add(cache_written.unwrap_or(0)));
             }
             let mtp = mtp.or_else(|| {
                 let details = usage.get("completion_tokens_details")?;
@@ -355,7 +384,7 @@ impl ChunkParser {
             // monthly allowance and says how much, in dollars at official
             // prices: a subscription sends no per-turn cost, so this is the
             // figure that was spent.
-            let allowance = usage.pointer("/opencode/allowance").and_then(Value::as_f64).filter(|v| v.is_finite() && *v >= 0.0);
+            let allowance = crate::types::allowance_in(usage);
             events.push(LlmEvent::Usage(crate::types::Usage {
                 prompt,
                 completion,
@@ -386,20 +415,38 @@ impl ChunkParser {
             }));
         }
 
-        let Some(choices) = v.get_mut("choices").and_then(Value::as_array_mut) else {
-            return;
-        };
-        for choice in choices {
-            // A reply that was not streamed has a `message` where a chunk has its `delta`.
-            let key = if choice.get("delta").is_some() { "delta" } else { "message" };
-            if let Some(delta) = choice.get_mut(key) {
-                self.delta(delta, events);
+        let usage = events.split_off(usage_at);
+        if let Some(choices) = v.get_mut("choices").and_then(Value::as_array_mut) {
+            for choice in choices {
+                // A reply that was not streamed has a message instead of a delta.
+                let key = if choice.get("delta").is_some() { "delta" } else { "message" };
+                if let Some(delta) = choice.get_mut(key) {
+                    if let Some(text) = delta.get("content").and_then(Value::as_str) {
+                        self.raw_text.push_str(text);
+                    }
+                    if delta.get("tool_calls").is_some_and(|calls| !calls.is_null())
+                        || delta.get("function_call").is_some_and(|call| !call.is_null())
+                        || ["reasoning", "reasoning_content", "reasoning_details"].iter().any(|key| delta.get(*key).is_some_and(|v| !v.is_null()))
+                        || self.raw_text.contains(THOUGHT_OPEN)
+                    {
+                        self.unsafe_measurement = true;
+                    }
+                    self.delta(delta, events);
+                }
+                if let Some(reason) = choice.get("finish_reason").and_then(Value::as_str).filter(|r| !r.is_empty()) {
+                    self.flush_carry(events);
+                    self.finish_with(finish_reason(reason), events);
+                }
             }
-            // A last chunk may carry only the finish reason, and `length` must not be
-            // lost. Some gateways send `""` on every chunk until the real one.
-            if let Some(reason) = choice.get("finish_reason").and_then(Value::as_str).filter(|r| !r.is_empty()) {
-                self.flush_carry(events);
-                self.finish_with(finish_reason(reason), events);
+        }
+        for event in usage {
+            if let LlmEvent::Usage(mut usage) = event {
+                // The adapter pairs raw output, before the loop extracts calls
+                // or trims repeated continuation prefixes. Hidden output is not
+                // a measurement of the visible answer.
+                self.unsafe_measurement |= v.pointer("/usage/completion_tokens_details/reasoning_tokens").and_then(Value::as_i64).is_some_and(|n| n > 0);
+                usage.completion_measurement = self.measurement(&usage);
+                events.push(LlmEvent::Usage(usage.normalized()));
             }
         }
     }
@@ -854,17 +901,6 @@ impl TextToolScanner {
                 && !self.in_fence_at(at)
             {
                 return Some(at);
-            }
-            if let Some(after_fence) = trimmed.strip_prefix("```") {
-                let after_lang = after_fence.strip_prefix("json").unwrap_or(after_fence);
-                if let Some(after_nl) = after_lang.strip_prefix("\r\n").or_else(|| after_lang.strip_prefix('\n')) {
-                    let inner = after_nl.trim_start_matches([' ', '\t']);
-                    // An array of calls is how some models send several at once;
-                    // a single object in a fence is an example, and stays text.
-                    if inner.strip_prefix('[').is_some_and(is_tool_call_start) {
-                        return Some(at);
-                    }
-                }
             }
         }
         None
@@ -2010,14 +2046,17 @@ mod tests {
     }
 
     #[test]
-    fn scanner_fenced_json_array_tool_call() {
-        let mut s = TextToolScanner::default();
-        let delta = "Reading Cargo.toml...\n```json\n[\n  \"read_file\",\n  {\n    \"files\": [\"Cargo.toml\"]\n  }\n]\n```\ndone";
-        let out = s.feed(delta);
-        assert!(out.iter().any(|e| matches!(
-            e,
-            ScannerEvent::ToolCall { name, args_json, .. } if name == "read_file" && args_json.contains("Cargo.toml")
-        )));
+    fn ordinary_fenced_call_examples_are_chunk_invariant_text() {
+        let text = "Reading Cargo.toml...\n```json\n[\"read_file\",{\"files\":[\"Cargo.toml\"]}]\n```\ndone";
+        for cut in 0..=text.len() {
+            let mut scanner = TextToolScanner::default();
+            let mut events = scanner.feed(&text[..cut]);
+            events.extend(scanner.feed(&text[cut..]));
+            events.extend(scanner.finish());
+            assert!(events.iter().all(|event| matches!(event, ScannerEvent::Text(_))), "cut {cut}: {events:?}");
+            let rendered: String = events.iter().filter_map(|event| if let ScannerEvent::Text(text) = event { Some(text.as_str()) } else { None }).collect();
+            assert_eq!(rendered, text, "cut {cut}");
+        }
     }
 
     #[test]

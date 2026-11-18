@@ -377,6 +377,7 @@ dependencies = [
  "async-trait",
  "flashagent-llm",
  "futures",
+ "libc",
  "serde",
  "serde_json",
  "tempfile",

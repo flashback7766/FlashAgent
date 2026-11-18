@@ -18,65 +18,82 @@ use crate::ToolError;
 /// command used to be waited for without a limit, so the turn never ended.
 const GIT_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// Runs a program and waits for it, but not forever.
-///
-/// The child is killed when the wait runs out, and its pipes are read while it
-/// runs, so a command that writes a lot does not block on a full pipe.
+struct TreeGuard {
+    child: tokio::process::Child,
+    pid: Option<u32>,
+}
+
+impl TreeGuard {
+    fn stop(&mut self) {
+        if let Some(pid) = self.pid.take() {
+            // The parent may have exited while a grandchild still holds a pipe.
+            crate::shell::kill_pid_tree(pid);
+            let _ = self.child.start_kill();
+        }
+    }
+}
+
+impl Drop for TreeGuard {
+    fn drop(&mut self) {
+        self.stop();
+    }
+}
+
+async fn read_bounded<R: tokio::io::AsyncRead + Unpin>(stream: Option<R>) -> std::io::Result<Vec<u8>> {
+    use tokio::io::AsyncReadExt;
+    let Some(mut stream) = stream else { return Ok(Vec::new()) };
+    let mut out = Vec::new();
+    let mut chunk = [0u8; 8192];
+    let mut truncated = false;
+    loop {
+        let n = stream.read(&mut chunk).await?;
+        if n == 0 {
+            break;
+        }
+        let keep = n.min(crate::MAX_OUTPUT_BYTES.saturating_sub(out.len()));
+        out.extend_from_slice(&chunk[..keep]);
+        truncated |= keep < n;
+    }
+    if truncated {
+        out.extend_from_slice(format!("\n...[truncated at {} bytes]", crate::MAX_OUTPUT_BYTES).as_bytes());
+    }
+    Ok(out)
+}
+
+/// The deadline covers both the process and its pipes. Pumps are futures in
+/// this call, not detached tasks, so dropping it closes them and kills the tree.
 async fn run_with_timeout(
     program: &str,
     args: &[&str],
     cwd: &Path,
     timeout: Duration,
 ) -> Result<std::process::Output, ToolError> {
-    use tokio::io::AsyncReadExt;
     let mut cmd = tokio::process::Command::new(program);
     cmd.args(args)
         .current_dir(cwd)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    // Git spawns what the repository configures (textconv, external diff): a
-    // group, so a timeout takes the whole tree instead of leaving the driver
-    // running as an orphan while the error says everything was stopped.
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
     #[cfg(unix)]
     cmd.process_group(0);
     let mut child = cmd.spawn().map_err(|e| ToolError::Other(format!("failed to execute {program}: {e}")))?;
-    let pid = child.id();
-    // The pipes are read while it runs, so a command that writes a lot does
-    // not block on a full pipe.
-    let mut stdout_pipe = child.stdout.take();
-    let mut stderr_pipe = child.stderr.take();
-    let read_stdout = tokio::spawn(async move {
-        let mut buf = Vec::new();
-        if let Some(pipe) = stdout_pipe.as_mut() {
-            let _ = pipe.read_to_end(&mut buf).await;
-        }
-        buf
-    });
-    let read_stderr = tokio::spawn(async move {
-        let mut buf = Vec::new();
-        if let Some(pipe) = stderr_pipe.as_mut() {
-            let _ = pipe.read_to_end(&mut buf).await;
-        }
-        buf
-    });
-    match tokio::time::timeout(timeout, child.wait()).await {
-        Ok(status) => {
-            let status = status.map_err(|e| ToolError::Other(format!("{program} failed: {e}")))?;
-            let stdout = read_stdout.await.unwrap_or_default();
-            let stderr = read_stderr.await.unwrap_or_default();
+    let stdout = child.stdout.take();
+    let stderr = child.stderr.take();
+    let mut guard = TreeGuard { pid: child.id(), child };
+    let result = tokio::time::timeout(timeout, async {
+        tokio::try_join!(guard.child.wait(), read_bounded(stdout), read_bounded(stderr))
+    }).await;
+    match result {
+        Ok(Ok((status, stdout, stderr))) => {
+            guard.pid = None;
             Ok(std::process::Output { status, stdout, stderr })
         }
+        Ok(Err(e)) => Err(ToolError::Other(format!("{program} failed: {e}"))),
         Err(_) => {
-            // While git still lives: on Windows the children are found through
-            // their parent.
-            if let Some(pid) = pid {
-                crate::shell::kill_pid_tree(pid);
-            }
-            let _ = child.start_kill();
-            let _ = child.wait().await;
-            let _ = read_stdout.await;
-            let _ = read_stderr.await;
+            guard.stop();
+            // Reaping must not turn the timeout into another unbounded wait.
+            let _ = tokio::time::timeout(Duration::from_millis(500), guard.child.wait()).await;
             Err(ToolError::Other(format!(
                 "{program} did not finish within {} seconds and was stopped; the repository may be locked or unusually large",
                 timeout.as_secs().max(1)
@@ -290,6 +307,55 @@ mod tests {
         let out = git_status(&dir, None).await.unwrap();
         assert!(out.contains("Branch: feature"), "{out}");
         assert!(out.contains("not-a-branch"), "{out}");
+    }
+
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn the_git_deadline_includes_pipes_inherited_by_a_grandchild() {
+        let dir = tempfile::tempdir().unwrap();
+        let started = std::time::Instant::now();
+        let result = tokio::time::timeout(Duration::from_secs(3), run_with_timeout(
+            "sh", &["-c", "printf '%s' \"$$\" > parent.pid; sleep 30 & exit 0"], dir.path(), Duration::from_millis(100),
+        )).await;
+        let pid = std::fs::read_to_string(dir.path().join("parent.pid")).unwrap().parse::<u32>().unwrap();
+        crate::shell::kill_pid_tree(pid);
+        let err = result.expect("draining inherited pipes exceeded the whole deadline").unwrap_err();
+        assert!(err.to_string().contains("did not finish"), "{err}");
+        assert!(started.elapsed() < Duration::from_secs(2));
+    }
+
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn cancelling_a_git_call_kills_its_process_tree_and_drops_its_pumps() {
+        let dir = tempfile::tempdir().unwrap();
+        let cwd = dir.path().to_path_buf();
+        let task = tokio::spawn(async move {
+            run_with_timeout("sh", &["-c", "(sleep 0.4; printf alive > survived) & printf '%s' \"$$\" > ready; wait"], &cwd, Duration::from_secs(30)).await
+        });
+        let ready = dir.path().join("ready");
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while !ready.exists() {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        }).await.unwrap();
+        let pid = std::fs::read_to_string(&ready).unwrap().parse::<u32>().unwrap();
+        task.abort();
+        let _ = task.await;
+        tokio::time::sleep(Duration::from_millis(600)).await;
+        crate::shell::kill_pid_tree(pid);
+        assert!(!dir.path().join("survived").exists(), "a cancelled call left a grandchild running");
+    }
+
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn git_stdout_and_stderr_are_drained_but_not_retained_without_limit() {
+        let dir = tempfile::tempdir().unwrap();
+        let script = format!("printf '%0{}d' 0; printf '%0{}d' 0 >&2", crate::MAX_OUTPUT_BYTES + 100, crate::MAX_OUTPUT_BYTES + 100);
+        let out = run_with_timeout("sh", &["-c", &script], dir.path(), Duration::from_secs(3)).await.unwrap();
+        for bytes in [&out.stdout, &out.stderr] {
+            assert!(bytes.len() < crate::MAX_OUTPUT_BYTES + 100, "{} bytes retained", bytes.len());
+            assert!(String::from_utf8_lossy(bytes).contains("truncated"));
+        }
     }
 
     /// A command that never ends is stopped: the turn must not wait for it

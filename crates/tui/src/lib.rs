@@ -136,16 +136,13 @@ pub enum UiEvent {
     CompactionDelta(String),
     /// The previous summary attempt was refused: the open card starts again.
     CompactionReset,
-    /// `/compact` finished. `saved` is `None` when nothing was compacted: the
-    /// history comes back either way, unchanged in that case. `card` carries
-    /// the summary for the transcript; it is `None` when there is none.
+    /// A compaction finished; history returns unchanged when no summary landed.
     Compacted {
         /// The session the summary was made for. The task outlives the screen it
         /// was started from, and a result that lands after a switch of sessions
         /// would otherwise be written into the conversation on screen.
         session: String,
         history: Vec<ChatMessage>,
-        saved: Option<usize>,
         card: Option<CompactionResult>,
     },
 }
@@ -170,7 +167,8 @@ pub enum LineKind {
     Subagent,
 }
 
-/// How consecutive tool calls fold into one line.
+/// Tool semantics used by the reasoning stage label. Only Explore calls
+/// actually fold together; the other variants describe separate cards.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ToolGroupKind {
     Command { count: usize, last_cmd: String, is_running: bool },
@@ -179,12 +177,11 @@ pub enum ToolGroupKind {
     Subagent { count: usize, last_task: String, is_running: bool },
     Memory { scopes: Vec<String>, is_running: bool },
     Generic { name: String, summary: String, is_running: bool },
-    Custom { run_text: String, done_text: String, fail_text: String, is_running: bool },
 }
 
 pub mod tool_views;
 
-/// One call inside a folded group.
+/// One retained call, alone or inside an adjacent read/search group.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ToolCallRecord {
     pub name: String,
@@ -192,18 +189,26 @@ pub struct ToolCallRecord {
     pub result: Option<String>,
     pub is_error: bool,
     pub is_running: bool,
-    /// What the change adds and removes, counted from the real diff when the
-    /// call started. Stored apart from the diff text so the numbers stay right
-    /// however far the text is cut below.
+    /// Counts from the real diff, taken before the call runs and before the
+    /// retained diff text is bounded.
     pub added: usize,
     pub deleted: usize,
-    /// The real diff against the files as they were when the call started, cut
-    /// to what a card shows. `None` for a call that changes nothing, and for
-    /// one replayed from a saved session, where the files have moved on since.
-    ///
-    /// This is held for every call of every turn, so it is bounded: a long
-    /// session with hundreds of edits would otherwise carry every diff whole.
+    /// The retained real diff. Sessions do not persist it; replayed calls
+    /// show their retained result and label any argument-derived preview.
     pub diff: Option<String>,
+    /// Measured execution time, if supplied by the caller. ToolStarted may
+    /// precede approval, so its arrival is not an execution clock.
+    pub elapsed_ms: Option<u64>,
+}
+
+impl ToolCallRecord {
+    pub fn state(&self, waiting: bool) -> tool_views::CallState {
+        if !self.is_running && self.result.as_deref().and_then(tool_cards::not_run_note).is_some() {
+            tool_views::CallState::NotRun
+        } else {
+            tool_views::CallState::of(self.is_running, self.is_error, waiting)
+        }
+    }
 }
 
 /// One compaction as the transcript shows it: a header while the summary is
@@ -231,20 +236,20 @@ pub struct ChatLine {
     pub kind: LineKind,
     /// Without prefix.
     pub text: String,
-    /// Raw arguments JSON, for the expanded view.
+    /// Raw arguments, also kept for old/synthetic tool notices.
     pub details: Option<String>,
     pub tool_group: Option<ToolGroupKind>,
     /// For reasoning blocks.
     pub reasoning_secs: Option<u64>,
-    /// In characters, for token accounting.
-    pub tool_result_len: usize,
     pub tool_name: Option<String>,
     pub tool_result: Option<String>,
     /// Per-card expansion override.
     pub is_expanded: Option<bool>,
-    /// A preview was cut short and the owner asked for the whole block. Back
-    /// to `false` when the block folds again: a fresh open shows the glance.
+    /// A preview was cut short and the owner asked for all retained content.
+    /// Folding clears this, so the next open is a preview again.
     pub full: bool,
+    /// Exact arguments are an optional inspector, not the default card body.
+    pub tool_arguments_open: bool,
     pub tool_calls: Vec<ToolCallRecord>,
     /// Which running subagent this line reports, so its row can be updated in
     /// place as the child works instead of a new line per event.
@@ -260,11 +265,11 @@ impl ChatLine {
             details: None,
             tool_group: None,
             reasoning_secs: None,
-            tool_result_len: 0,
             tool_name: None,
             tool_result: None,
             is_expanded: None,
             full: false,
+            tool_arguments_open: false,
             tool_calls: Vec::new(),
             compaction: None,
         }
@@ -277,11 +282,11 @@ impl ChatLine {
             details: Some(details.into()),
             tool_group: None,
             reasoning_secs: None,
-            tool_result_len: 0,
             tool_name: None,
             tool_result: None,
             is_expanded: None,
             full: false,
+            tool_arguments_open: false,
             tool_calls: Vec::new(),
             compaction: None,
         }
@@ -293,6 +298,7 @@ struct SettledRenderCache {
     lines: SettledLines,
     /// Beside `lines`, see `RowOwners`.
     owners: std::sync::Arc<Vec<Option<Click>>>,
+    tool_zones: std::sync::Arc<Vec<ToolActionZone>>,
     boundary: usize,
     width: usize,
     expansion: ReasoningExpansion,
@@ -304,6 +310,9 @@ struct SettledRenderCache {
 struct RowOwners {
     settled: std::sync::Arc<Vec<Option<Click>>>,
     live: Vec<Option<Click>>,
+    settled_tool_zones: std::sync::Arc<Vec<ToolActionZone>>,
+    /// Relative to the first live row; public hit tests translate it.
+    live_tool_zones: Vec<ToolActionZone>,
 }
 
 /// Shared, not copied: a long session has tens of thousands of rows, and
@@ -318,6 +327,25 @@ pub type SettledLines = std::sync::Arc<Vec<RenderLine>>;
 pub enum Click {
     Fold(usize),
     Expand(usize),
+}
+
+/// Cell-level controls on the shared tool shell. Kept separate from `Click`
+/// so old callers that only toggle transcript rows stay compatible.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToolAction {
+    Close(usize),
+    Copy(usize),
+    Arguments(usize),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ToolActionZone {
+    /// Transcript row: settled rows, then live rows, as in `owner_at`.
+    pub row: usize,
+    pub from: usize,
+    /// Exclusive visible-cell end, not a byte or character offset.
+    pub to: usize,
+    pub action: ToolAction,
 }
 
 /// The rows of an opened block shown before the cut. A long thought or a
@@ -354,33 +382,6 @@ pub struct ChatView {
     /// compaction the gauge read zero.
     context_baseline_line: usize,
 }
-
-pub fn format_explore(is_running: bool, files: usize, searches: usize, last_target: &str) -> String {
-    let verb = if is_running { crate::i18n::tr("Exploring") } else { crate::i18n::tr("Explored") };
-    let chevron = "\x1b[38;2;120;125;140m›\x1b[0m";
-    // In the same column as every other tool line's mark.
-    let mark = format!("\x1b[38;2;120;125;140m{}\x1b[0m", tool_cards::TOOL_MARK);
-    if files > 0 && searches > 0 {
-        let f_str = crate::text::plural(files, "file", "files");
-        let s_str = crate::text::plural(searches, "search", "searches");
-        format!("  {mark} \x1b[38;2;160;165;180m{verb} {f_str}, {s_str}\x1b[0m {chevron}")
-    } else if files > 1 {
-        let f_str = crate::text::plural(files, "file", "files");
-        format!("  {mark} \x1b[38;2;160;165;180m{verb} {f_str}\x1b[0m {chevron}")
-    } else if searches > 1 {
-        let s_str = crate::text::plural(searches, "search", "searches");
-        format!("  {mark} \x1b[38;2;160;165;180m{verb} {s_str}\x1b[0m {chevron}")
-    } else if files == 1 {
-        let v = if is_running { crate::i18n::tr("Reading") } else { crate::i18n::tr("Read") };
-        format!("  {mark} \x1b[38;2;160;165;180m{v}\x1b[0m \x1b[38;2;225;230;240m{last_target}\x1b[0m {chevron}")
-    } else if searches == 1 {
-        let v = if is_running { crate::i18n::tr("Searching") } else { crate::i18n::tr("Searched") };
-        format!("  {mark} \x1b[38;2;160;165;180m{v}\x1b[0m \x1b[38;2;225;230;240m{last_target}\x1b[0m {chevron}")
-    } else {
-        format!("  {mark} \x1b[38;2;160;165;180m{verb} {last_target}\x1b[0m {chevron}")
-    }
-}
-
 
 /// A thin rule with a centred label, the way a compaction card opens and
 /// closes. The label is dimmer than the body so the summary stays the thing
@@ -508,20 +509,8 @@ fn call_edits(parsed: &serde_json::Value) -> Vec<&serde_json::Value> {
     single.chain(batch).collect()
 }
 
-/// One path, or how many a batch names.
-fn paths_label(paths: &[String], list_them: bool) -> String {
-    match paths.len() {
-        0 => "file".to_string(),
-        1 => paths[0].clone(),
-        n if list_them => format!("{n} files: {}", paths.join(", ")),
-        n => format!("{n} files"),
-    }
-}
-
-/// Characters of diff kept per call. A card shows the first lines of a change
-/// and the rest is still in the file and in the archive; keeping every diff
-/// whole for the life of a session is what turns a long chat into tens of
-/// megabytes of memory.
+/// Characters of diff retained per call. Full expansion shows this retained
+/// text, not discarded data or a fresh diff against files that have changed.
 pub(crate) const STORED_DIFF_CHARS: usize = 24_000;
 
 /// What one call changed, counted before its text is cut, and the text to keep.
@@ -547,78 +536,6 @@ fn counts_from_diff(diff: &str) -> (usize, usize) {
         }
     }
     (added, removed)
-}
-
-/// What a call names: the file and change size for a write, the target for
-/// a read, the command for a shell call. Shown next to the model's header,
-/// which says what it meant to do.
-///
-/// `diff` is the real change, taken when the call started. Without it the
-/// size is counted off the model's own arguments, which is what it said it
-/// would touch and not what the file loses: replacing one line with two to
-/// add one below reads as `+2 -1`.
-pub fn call_facts(name: &str, parsed: &serde_json::Value, diff: Option<&str>) -> Option<String> {
-    let path_of = |key: &str| -> Option<String> {
-        let raw = parsed.get(key)?.as_str()?;
-        let base = std::path::Path::new(raw)
-            .file_name()
-            .and_then(|s| s.to_str())
-            .unwrap_or(raw);
-        Some(base.to_string())
-    };
-    match name {
-        "edit_file" => {
-            let (mut added, mut deleted) = (0usize, 0usize);
-            if let Some(diff) = diff {
-                (added, deleted) = counts_from_diff(diff);
-            } else {
-                for ed in call_edits(parsed) {
-                    deleted += ed.get("old_string").and_then(|s| s.as_str()).unwrap_or("").lines().count();
-                    added += ed.get("new_string").and_then(|s| s.as_str()).unwrap_or("").lines().count();
-                }
-            }
-            let paths = call_paths(parsed);
-            let target = match paths.len() {
-                0 => return None,
-                1 => path_of("path").unwrap_or_else(|| paths[0].clone()),
-                n => format!("{n} files"),
-            };
-            // A change that only adds is not "+2 -0": the zero reads as a line
-            // taken away. Only the part that is there is written.
-            let mut size = String::new();
-            if added > 0 {
-                size.push_str(&format!(" +{added}"));
-            }
-            if deleted > 0 {
-                size.push_str(&format!(" -{deleted}"));
-            }
-            Some(format!("{target}{size}"))        }
-        "write_file" => {
-            let lines = parsed.get("content").and_then(|s| s.as_str()).unwrap_or("").lines().count().max(1);
-            Some(format!("{} +{lines}", path_of("path")?))
-        }
-        "patch_file" => {
-            let patch = parsed.get("patch").and_then(|s| s.as_str()).unwrap_or("");
-            let added = patch.lines().filter(|l| l.starts_with('+') && !l.starts_with("+++")).count();
-            let deleted = patch.lines().filter(|l| l.starts_with('-') && !l.starts_with("---")).count();
-            Some(format!("{} +{added} -{deleted}", path_of("path")?))
-        }
-        "read_file" | "outline_file" => {
-            let names: Vec<String> = call_paths(parsed)
-                .iter()
-                .map(|p| std::path::Path::new(p).file_name().and_then(|s| s.to_str()).unwrap_or(p).to_string())
-                .collect();
-            (!names.is_empty()).then(|| paths_label(&names, true))
-        }
-        "run_shell" => parsed.get("command").and_then(|c| c.as_str()).map(format_cmd),
-        "grep" | "glob" => parsed
-            .get("pattern")
-            .or_else(|| parsed.get("query"))
-            .and_then(|p| p.as_str())
-            .map(|p| format!("\"{}\"", format_cmd(p))),
-        "list_dir" => Some(path_of("path").unwrap_or_else(|| crate::i18n::tr("the project").to_string())),
-        _ => None,
-    }
 }
 
 impl ChatView {
@@ -1178,8 +1095,8 @@ impl ChatView {
                 }
             }
             LoopEvent::ToolStarted { id: _, name, args_json } => self.tool_started(name, args_json, None),
-            LoopEvent::ToolFinished { is_error, result_len, result, .. } => {
-                self.tool_finished(*is_error, *result_len, result.as_deref())
+            LoopEvent::ToolFinished { is_error, result, .. } => {
+                self.tool_finished(*is_error, result.as_deref())
             }
             LoopEvent::Usage(_) => {}
             // The summary is not something the gauge counts up again.
@@ -1285,230 +1202,155 @@ fn tool_line(head: &str, subject_source: &str) -> String {
     out
 }
 
-/// The report a finished child left, in a box. `folded` is the row the closed
-/// card showed, already styled; it goes on top of the box so that opening the
-/// card adds the report instead of replacing the line the eye was on.
-fn render_subagent_answer_card(folded: &str, answer: &str, width: usize) -> Vec<RenderLine> {
-    /// Enough of a report to read at a glance; past this the row is a wall, and
-    /// the rest is in the answer the model already has.
-    const MAX_LINES: usize = 20;
-    const MUTED: &str = "\x1b[38;2;120;125;140m";
-    let mut lines = vec![(LineKind::Tool, folded.to_string())];
-    let top = tool_views::render_card_top("Answer", width);
-    // The box draws its own padding, so a row inside it is that much narrower
-    // than the border it sits between.
-    let inner_w = visible_width(&top).saturating_sub(6);
-    lines.push((LineKind::Tool, top));
-    // A carriage return would redraw the row from its start and a tab would
-    // step off the frame; both are the answer's business, not the box's.
-    let rows: Vec<String> =
-        answer.trim().lines().map(|l| terminal_safe(l.rsplit('\r').next().unwrap_or("").trim())).collect();
-    for row in rows.iter().take(MAX_LINES) {
-        lines.push(tool_views::box_row(row, MUTED, inner_w));
+fn render_single_tool_body(call: &ToolCallRecord, waiting: bool) -> Vec<RenderLine> {
+    use tool_views::CallState;
+    let parsed = tool_cards::arguments(call);
+    let state = call.state(waiting);
+    let name = call.name.as_str();
+    let result = call.result.as_deref();
+    let mut rows = Vec::new();
+    if let Some(intent) = parsed.get("header").and_then(|h| h.as_str()).filter(|h| !h.trim().is_empty()) {
+        rows.extend(tool_views::plain_body(intent, true));
     }
-    if rows.len() > MAX_LINES {
-        lines.push(tool_views::box_row(&format!("+{}\u{b7} the report continues", rows.len() - MAX_LINES), MUTED, inner_w));
+    let text = |key: &str| parsed.get(key).and_then(|s| s.as_str());
+    let change = matches!(name, "edit_file" | "write_file" | "patch_file");
+    if state == CallState::NotRun || (state == CallState::Failed && name != "run_shell" && !change) {
+        if let Some(result) = result {
+            rows.extend(tool_views::plain_body(result, true));
+        }
+        return rows;
     }
-    lines.push((LineKind::Tool, tool_views::render_card_bottom(width)));
-    lines
-}
-
-/// A tool card longer than a glance shows its head, the cut, and its last
-/// row; the cut answers a click with the whole card, and the header folds it
-/// all back. A card already shown in full, or one that fits, passes as is.
-fn cap_tool_card(mut card: Vec<RenderLine>, full: bool) -> Vec<RenderLine> {
-    if full || card.len() <= BLOCK_PREVIEW_ROWS + 2 {
-        return card;
-    }
-    let footer = card.pop();
-    let hidden = card.len().saturating_sub(BLOCK_PREVIEW_ROWS);
-    card.truncate(BLOCK_PREVIEW_ROWS);
-    let note = crate::i18n::tr_fill("… {n} more lines · click to show all", &[("n", &hidden.to_string())]);
-    card.push((LineKind::Tool, format!("  \x1b[38;2;140;145;160m{}\x1b[0m", clip_ansi(&note, 90))));
-    if let Some(footer) = footer {
-        card.push(footer);
-    }
-    card
-}
-
-fn render_single_tool_card(
-    call: &ToolCallRecord,
-    width: usize,
-    waiting: bool,
-    folded: Option<&str>,
-) -> Vec<RenderLine> {
-    let state = tool_views::CallState::of(call.is_running, call.is_error, waiting);
-    let tool_name = call.name.as_str();
-    let details_str = call.args_json.as_str();
-    let parsed: serde_json::Value = serde_json::from_str(details_str.trim()).unwrap_or_default();
-
-    // The stated intent sits above the facts, never instead of them.
-    let card = |rows: Vec<RenderLine>| -> Vec<RenderLine> {
-        let Some(header) = parsed
-            .get("header")
-            .and_then(|h| h.as_str())
-            .map(str::trim)
-            .filter(|h| !h.is_empty())
-        else {
-            return rows;
-        };
-        let mut out = vec![(
-            LineKind::Tool,
-            format!("  \x1b[38;2;160;165;180m{}\x1b[0m", format_cmd(header)),
-        )];
-        out.extend(rows);
-        out
-    };
-
-    if tool_name == "run_shell" {
-        let cmd = parsed.get("command").and_then(|s| s.as_str()).unwrap_or("command");
-        let cwd = parsed.get("cwd").and_then(|s| s.as_str()).map(|s| s.to_string()).unwrap_or_else(|| {
-            std::env::current_dir()
-                .map(|p| p.to_string_lossy().to_string())
-                .unwrap_or_else(|_| "~".to_string())
-        });
-        return card(tool_views::render_command_card(&cwd, cmd, call.result.as_deref(), state, width));
-    }
-
-    if tool_name == "read_file" || tool_name == "outline_file" {
-        let label = paths_label(&call_paths(&parsed), true);
-        let path = label.as_str();
-        let offset = parsed.get("offset").and_then(|s| s.as_u64()).unwrap_or(0) as usize;
-        let limit = parsed.get("limit").and_then(|s| s.as_u64()).unwrap_or(2000) as usize;
-        return card(tool_views::render_read_card(
-            path,
-            call.result.as_deref(),
-            offset,
-            limit,
-            width,
-        ));
-    }
-
-    if tool_name == "list_dir" || tool_name == "glob" {
-        let path = parsed.get("path")
-            .or_else(|| parsed.get("pattern"))
-            .and_then(|s| s.as_str())
-            .unwrap_or(".");
-        return card(tool_views::render_directory_card(
-            path,
-            call.result.as_deref(),
-            call.is_running,
-            width,
-        ));
-    }
-
-    if tool_name == "grep" {
-        let pattern = parsed.get("pattern")
-            .or_else(|| parsed.get("query"))
-            .and_then(|s| s.as_str())
-            .unwrap_or("pattern");
-        return card(tool_views::render_grep_card(
-            pattern,
-            call.result.as_deref(),
-            width,
-        ));
-    }
-
-    if tool_name == "edit_file" || tool_name == "write_file" || tool_name == "patch_file" {
-        let label = paths_label(&call_paths(&parsed), true);
-        let path = label.as_str();
-        let is_write = tool_name == "write_file";
-        let (added, deleted, diff_text) = if tool_name == "write_file" {
-            let content = parsed.get("content").and_then(|s| s.as_str()).unwrap_or("");
-            (content.lines().count().max(1), 0, Some(content.to_string()))
-        } else if tool_name == "patch_file" {
-            let patch = parsed.get("patch").and_then(|s| s.as_str()).unwrap_or("");
-            let mut a = 0;
-            let mut d = 0;
-            for l in patch.lines() {
-                if l.starts_with('+') && !l.starts_with("+++") { a += 1; }
-                else if l.starts_with('-') && !l.starts_with("---") { d += 1; }
+    match name {
+        "run_shell" => {
+            if let Some(command) = text("command") {
+                rows.extend(tool_views::command_body(text("cwd"), command, result, state));
+            } else if let Some(result) = result {
+                rows.extend(tool_views::plain_body(result, false));
             }
-            (a, d, Some(patch.to_string()))
-        } else {
-            // The real diff, taken when the call started. Falling back to the
-            // model's own strings describes what it said it would touch, which
-            // is not the same thing as the change.
-            match call.diff.as_deref() {
-                Some(diff) => (call.added, call.deleted, Some(diff.to_string())),
-                None => {
-                    let mut a = 0;
-                    let mut d = 0;
-                    let mut simulated = String::new();
-                    for ed in call_edits(&parsed) {
-                        let old_s = ed.get("old_string").and_then(|s| s.as_str()).unwrap_or("");
-                        let new_s = ed.get("new_string").and_then(|s| s.as_str()).unwrap_or("");
-                        for l in old_s.lines() {
-                            simulated.push('-');
-                            simulated.push_str(l);
-                            simulated.push('\n');
-                            d += 1;
-                        }
-                        for l in new_s.lines() {
-                            simulated.push('+');
-                            simulated.push_str(l);
-                            simulated.push('\n');
-                            a += 1;
-                        }
+        }
+        "read_file" => {
+            if let Some(result) = result {
+                let offset = parsed.get("offset").and_then(|s| s.as_u64()).unwrap_or(0) as usize;
+                rows.extend(tool_views::read_body(result, offset));
+            }
+        }
+        "grep" => {
+            if let Some(result) = result {
+                rows.extend(tool_views::search_body(text("pattern").unwrap_or(""), result));
+            }
+        }
+        "list_dir" | "glob" => {
+            if let Some(result) = result { rows.extend(tool_views::directory_body(result)); }
+        }
+        "edit_file" | "write_file" | "patch_file" => {
+            // A failed change may have partly happened. Its result says what
+            // did; its proposed diff must not look like an applied change.
+            if state != CallState::Failed {
+                if let Some(diff) = &call.diff {
+                    if state != CallState::Done { rows.push(tool_views::section(crate::i18n::tr("Proposed change"))); }
+                    rows.extend(tool_views::diff_body(diff));
+                } else {
+                    let (_, _, body) = tool_cards::requested_change(name, &parsed);
+                    if let Some(body) = body {
+                        rows.push(tool_views::section(crate::i18n::tr("Requested change · original diff not retained")));
+                        if name == "write_file" { rows.extend(tool_views::written_body(&body)); }
+                        else { rows.extend(tool_views::diff_body(&body)); }
                     }
-                    (a, d, Some(simulated))
                 }
             }
-        };
-
-        let change = tool_views::EditChange { path, added, deleted, body: diff_text.as_deref(), is_write };
-        return card(tool_views::render_edit_card(&change, state, call.result.as_deref(), width));
+            if let Some(result) = result {
+                if !rows.is_empty() { rows.push((LineKind::Tool, String::new())); }
+                rows.extend(tool_views::plain_body(result, state == CallState::Failed));
+            }
+        }
+        "git_diff" => {
+            if let Some(result) = result { rows.extend(tool_views::diff_body(result)); }
+        }
+        "git_status" => {
+            if let Some(result) = result { rows.extend(tool_views::git_status_body(result)); }
+        }
+        "spawn_agent" => {
+            if let Some(task) = text("task") {
+                rows.push(tool_views::section(crate::i18n::tr("Task")));
+                rows.extend(tool_views::plain_body(task, false));
+            }
+            if let Some(result) = result { rows.extend(tool_views::plain_body(result, false)); }
+        }
+        "subagent_answer" => rows.extend(tool_views::plain_body(&call.args_json, false)),
+        _ => {
+            // Memory, web, outlines and MCP keep their readable retained
+            // result. Exact technical arguments are an optional inspector.
+            if let Some(result) = result { rows.extend(tool_views::plain_body(result, false)); }
+        }
     }
-
-    if tool_name == "subagent_answer" {
-        return render_subagent_answer_card(
-            folded.unwrap_or(crate::i18n::tr("A subagent answered")),
-            call.args_json.as_str(),
-            width,
-        );
+    if rows.is_empty() {
+        let note = if state == CallState::Waiting { crate::i18n::tr("Runs once you allow it") }
+            else if state == CallState::Running { crate::i18n::tr("no output yet") }
+            else { crate::i18n::tr("No result retained") };
+        rows.push(tool_views::section(note));
     }
+    rows
+}
 
-    if tool_name == "spawn_agent" {
-        let task = parsed.get("task").and_then(|s| s.as_str()).unwrap_or("task");
-        return card(tool_views::render_subagent_card(
-            task,
-            call.result.as_deref(),
-            call.is_running,
-            width,
-        ));
+fn synthetic_tool_call(line: &ChatLine) -> ToolCallRecord {
+    ToolCallRecord {
+        name: line.tool_name.clone().unwrap_or_default(),
+        args_json: line.details.clone().unwrap_or_default(),
+        result: line.tool_result.clone(),
+        is_error: line.kind == LineKind::ToolError,
+        is_running: false,
+        added: 0,
+        deleted: 0,
+        diff: None,
+        elapsed_ms: None,
     }
+}
 
-    if tool_name.starts_with("memory_") {
-        // The scope is the model's word; the card shows it in the language of
-        // the interface. So does the action: the name of the tool is an
-        // identifier, and an identifier in the middle of a Russian sentence
-        // is the thing the collector is there to catch.
-        let scope = crate::i18n::tr(parsed.get("scope").and_then(|s| s.as_str()).unwrap_or("project"));
-        let action = match tool_name {
-            "memory_read" => crate::i18n::tr("Reading"),
-            "memory_create" => crate::i18n::tr("Creating"),
-            "memory_update" => crate::i18n::tr("Updating"),
-            "memory_remove" => crate::i18n::tr("Removing"),
-            _ => crate::i18n::tr("Memory"),
-        };
-        return card(tool_views::render_memory_card(
-            action,
-            &[scope.to_string()],
-            call.result.as_deref().or(Some(&call.args_json)),
-            width,
-        ));
+fn render_tool_line_card(line: &ChatLine, width: usize, waiting: bool) -> tool_views::ToolCard {
+    let synthetic;
+    let calls = if line.tool_calls.is_empty() {
+        synthetic = [synthetic_tool_call(line)];
+        synthetic.as_slice()
+    } else {
+        line.tool_calls.as_slice()
+    };
+    let title = if line.tool_calls.is_empty() {
+        // An old grouped notice only retains its label and concatenated
+        // result; do not invent individual calls from that raw text.
+        let folded = strip_ansi(&line.text);
+        let folded = folded.trim_start().trim_start_matches(tool_cards::TOOL_MARK).trim_start();
+        let folded = folded.trim_end().trim_end_matches('›').trim_end();
+        let state = calls[0].state(waiting);
+        format!("{}{}\x1b[0m {folded}", state.colour(), state.marker(true))
+    } else if calls.len() == 1 {
+        tool_cards::call_title(&calls[0], waiting)
+    } else {
+        tool_cards::group_title(line, waiting)
+    };
+    let mut body = Vec::new();
+    for (i, call) in calls.iter().enumerate() {
+        if calls.len() > 1 {
+            if i > 0 { body.push((LineKind::Tool, String::new())); }
+            body.push((LineKind::Tool, tool_cards::call_title(call, waiting)));
+        }
+        body.extend(render_single_tool_body(call, waiting));
     }
-
-    if tool_name == "git_status" || tool_name == "git_diff" {
-        let is_diff = tool_name == "git_diff";
-        return card(tool_views::render_git_card(
-            is_diff,
-            call.result.as_deref(),
-            width,
-        ));
+    let has_arguments = calls.iter().any(|call| call.name != "subagent_answer" && !call.args_json.is_empty());
+    if line.tool_arguments_open {
+        body.push((LineKind::Tool, String::new()));
+        body.push(tool_views::section(crate::i18n::tr("arguments")));
+        for call in calls.iter().filter(|call| call.name != "subagent_answer") {
+            if calls.len() > 1 { body.push(tool_views::section(&call.name)); }
+            let formatted = serde_json::from_str::<serde_json::Value>(&call.args_json)
+                .ok().and_then(|value| serde_json::to_string_pretty(&value).ok())
+                .unwrap_or_else(|| call.args_json.clone());
+            body.extend(tool_views::plain_body(&formatted, true));
+        }
     }
-
-    tool_views::render_generic_card(if !tool_name.is_empty() { tool_name } else { "tool" }, &call.args_json, call.result.as_deref(), state, width)
+    let can_copy = calls.iter().any(|call| call.result.is_some()
+        || (!call.is_error && call.state(waiting) != tool_views::CallState::NotRun && call.diff.is_some())
+        || call.name == "subagent_answer");
+    tool_views::render_card(&title, body, width, line.full || line.tool_arguments_open, can_copy, has_arguments)
 }
 
 /// A blank line goes between blocks, so the question, the work and the
@@ -1570,19 +1412,21 @@ impl ChatView {
                 && cache.expansion == expansion
                 && !cache.lines.is_empty()
             {
-                Some((cache.boundary, cache.lines.clone(), cache.owners.clone()))
+                Some((cache.boundary, cache.lines.clone(), cache.owners.clone(), cache.tool_zones.clone()))
             } else {
                 None
             }
         };
         // The lines the cached rows already cover.
-        let cached_boundary = cached_prefix.as_ref().map(|(b, _, _)| *b).unwrap_or(0);
+        let cached_boundary = cached_prefix.as_ref().map(|(b, ..)| *b).unwrap_or(0);
         let cached_settled_match = match &cached_prefix {
-            Some((b, lines, owners)) if *b == boundary => Some((lines.clone(), owners.clone())),
+            Some((b, lines, owners, zones)) if *b == boundary => Some((lines.clone(), owners.clone(), zones.clone())),
             _ => None,
         };
         // Where each line's rows start, in settled or live, for `RowOwners`.
-        let mut starts: Vec<(bool, usize, usize)> = Vec::new();
+        let mut starts: Vec<(bool, usize, usize, bool)> = Vec::new();
+        let mut tool_zones: Vec<(bool, ToolActionZone)> = Vec::new();
+        let mut tool_cuts: Vec<(bool, usize, usize)> = Vec::new();
 
         let push_reasoning = |target: &mut Vec<RenderLine>, text: &str, secs: Option<u64>, is_streaming: bool, is_expanded: bool, full: bool, stage: &str| {
             if !is_expanded {
@@ -1746,15 +1590,15 @@ impl ChatView {
                 // front, that is their last row.
                 settled
                     .last()
-                    .or_else(|| cached_prefix.as_ref().and_then(|(_, rows, _)| rows.last()))
+                    .or_else(|| cached_prefix.as_ref().and_then(|(_, rows, ..)| rows.last()))
                     .map(blank)
             } else {
                 live.last()
                     .or_else(|| settled.last())
                     // The rows the cache holds are the ones above, when the
                     // boundary moved and the new rows start after them.
-                    .or_else(|| cached_prefix.as_ref().and_then(|(_, rows, _)| rows.last()))
-                    .or_else(|| cached_settled_match.as_ref().and_then(|(rows, _)| rows.last()))
+                    .or_else(|| cached_prefix.as_ref().and_then(|(_, rows, ..)| rows.last()))
+                    .or_else(|| cached_settled_match.as_ref().and_then(|(rows, ..)| rows.last()))
                     .map(blank)
             };
             let target = if i < boundary { &mut settled } else { &mut live };
@@ -1767,10 +1611,14 @@ impl ChatView {
                 }
             }
             previous_block = Some(block);
-            starts.push((i < boundary, target.len(), i));
+            starts.push((i < boundary, target.len(), i, true));
             let is_last_turn = i >= last_user_idx;
             // A card the user opened or folded by clicking keeps that.
             let is_expanded = line.is_expanded.unwrap_or(expansion.all || (expansion.last && is_last_turn));
+            if line.kind == LineKind::Tool || line.kind == LineKind::ToolError {
+                let has_card = !line.tool_calls.is_empty() || line.tool_name.is_some() || line.details.is_some();
+                starts.last_mut().unwrap().3 = !is_expanded || has_card;
+            }
 
             if line.kind == LineKind::User {
                 current_turn_user_idx = i;
@@ -1854,52 +1702,32 @@ impl ChatView {
             }
 
             if line.kind == LineKind::Tool || line.kind == LineKind::ToolError {
-                if is_expanded {
-                    if !line.tool_calls.is_empty() {
-                        // The call in flight waits while an approval or question card is up.
-                        let waiting = self.awaiting_user && self.open_tool == Some(i);
-                        for call in &line.tool_calls {
-                            let card_lines = cap_tool_card(render_single_tool_card(call, width, waiting, None), line.full);
-                            for cl in card_lines {
-                                target.push(cl);
-                            }
-                        }
-                        continue;
-                    } else if line.tool_name.is_some() || line.details.is_some() {
-                        let synthetic_call = ToolCallRecord {
-                            name: line.tool_name.clone().unwrap_or_default(),
-                            args_json: line.details.clone().unwrap_or_default(),
-                            result: line.tool_result.clone(),
-                            is_error: line.kind == LineKind::ToolError,
-                            is_running: false,
-                            added: 0,
-                            deleted: 0,
-                            diff: None,
+                let has_card = !line.tool_calls.is_empty() || line.tool_name.is_some() || line.details.is_some();
+                let waiting = self.awaiting_user && self.open_tool == Some(i);
+                if is_expanded && has_card {
+                    let at = target.len();
+                    let card = render_tool_line_card(line, width, waiting);
+                    for (row, from, to, control) in card.zones {
+                        let action = match control {
+                            tool_views::CardControl::Close => ToolAction::Close(i),
+                            tool_views::CardControl::Copy => ToolAction::Copy(i),
+                            tool_views::CardControl::Arguments => ToolAction::Arguments(i),
                         };
-                        let card_lines = cap_tool_card(render_single_tool_card(&synthetic_call, width, false, Some(&line.text)), line.full);
-                        for cl in card_lines {
-                            target.push(cl);
-                        }
-                        continue;
+                        tool_zones.push((i < boundary, ToolActionZone { row: at + row, from, to, action }));
                     }
-                }
-                if self.open_tool == Some(i) && line.kind == LineKind::Tool {
-                    // The call in flight: margin spinner and a sweep across its words.
-                    let t = anim::now_ms();
-                    let words = strip_ansi(&line.text);
-                    // The spinner takes the mark's column, so the words stay where they
-                    // will be once the call is done.
-                    let words = words.trim_start().trim_start_matches(tool_cards::TOOL_MARK).trim_start();
-                    let words = words.trim_end_matches('›').trim_end();
-                    let row = format!(
-                        "  \x1b[38;2;135;185;205m{}\x1b[0m {}",
-                        anim::spinner(t),
-                        anim::shimmer(words, t, 1800, anim::Rgb(150, 160, 175), anim::Rgb(240, 245, 255)),
-                    );
-                    target.push((line.kind, clip_ansi(&row, width)));
+                    if let Some(cut) = card.cut { tool_cuts.push((i < boundary, at + cut, i)); }
+                    target.extend(card.lines);
                     continue;
                 }
-                // Wrapped, not cut: the end of an error often says what happened.
+                if !line.tool_calls.is_empty() {
+                    // Exactly one row, including failures: detail stays in the
+                    // card rather than wrapping the collapsed summary.
+                    target.push((line.kind, tool_cards::compact_row(line, waiting, width)));
+                    continue;
+                }
+                // Old tool notices without a retained call are ordinary text.
+                // Keep their error prose readable, rather than applying a
+                // fabricated call summary to a session diagnostic.
                 let plain = strip_ansi(&line.text);
                 if line.kind == LineKind::ToolError && visible_width(&plain) > width {
                     let indent = plain.chars().count() - plain.trim_start().chars().count();
@@ -1909,7 +1737,7 @@ impl ChatView {
                     }
                     continue;
                 }
-                target.push((line.kind, line.text.clone()));
+                target.push((line.kind, tool_views::clip_ellipsis(&line.text, width)));
                 continue;
             }
 
@@ -1950,9 +1778,9 @@ impl ChatView {
         }
         let owners_of = |rows: &[RenderLine], settled_rows: bool| {
             let mut owners: Vec<Option<Click>> = vec![None; rows.len()];
-            let marks: Vec<(usize, usize)> = starts.iter().filter(|(s, ..)| *s == settled_rows).map(|(_, at, i)| (*at, *i)).collect();
-            for (k, (at, i)) in marks.iter().enumerate() {
-                let end = marks.get(k + 1).map_or(rows.len(), |(next, _)| *next);
+            let marks: Vec<(usize, usize, bool)> = starts.iter().filter(|(s, ..)| *s == settled_rows).map(|(_, at, i, control)| (*at, *i, *control)).collect();
+            for (k, (at, i, control)) in marks.iter().enumerate() {
+                let end = marks.get(k + 1).map_or(rows.len(), |(next, ..)| *next);
                 let foldable = matches!(self.lines[*i].kind, LineKind::Reasoning | LineKind::Tool | LineKind::ToolError | LineKind::Assistant);
                 // A line can own no rows at all: an answer that was nothing but a
                 // think block, when reasoning has its own line already. There is
@@ -1965,7 +1793,7 @@ impl ChatView {
                 // the way; the body of an open block is text to read. Only
                 // a header of a block kind counts. An answer that happens
                 // to open a span answers no click.
-                if matches!(rows[*at].0, LineKind::Reasoning | LineKind::Tool | LineKind::ToolError) {
+                if *control && matches!(rows[*at].0, LineKind::Reasoning | LineKind::Tool | LineKind::ToolError) {
                     owners[*at] = Some(Click::Fold(*i));
                 }
                 for row in *at..end.min(rows.len()) {
@@ -1975,56 +1803,71 @@ impl ChatView {
                         .trim_start_matches('│')
                         .trim_start()
                         .starts_with('\u{2026}');
-                    if matches!(rows[row].0, LineKind::Reasoning | LineKind::Tool | LineKind::ToolError) && is_cut {
+                    // Tool preview cuts are mapped by the renderer, not by
+                    // scanning output that may itself begin with an ellipsis.
+                    if self.lines[*i].kind != LineKind::Tool && self.lines[*i].kind != LineKind::ToolError
+                        && matches!(rows[row].0, LineKind::Reasoning) && is_cut
+                    {
                         owners[row] = Some(Click::Expand(*i));
                     }
                 }
             }
+            for (settled, row, i) in &tool_cuts {
+                if *settled == settled_rows && *row < owners.len() { owners[*row] = Some(Click::Expand(*i)); }
+            }
             owners
         };
         let live_owners = owners_of(&live, false);
-        let (settled, settled_owners) = match cached_prefix {
+        let live_tool_zones = tool_zones.iter().filter(|(settled, _)| !settled).map(|(_, zone)| *zone).collect();
+        let zones_of_settled = || tool_zones.iter().filter(|(settled, _)| *settled).map(|(_, zone)| *zone).collect::<Vec<_>>();
+        let (settled, settled_owners, settled_tool_zones) = match cached_prefix {
             // The whole settled part is cached: nothing to draw.
-            Some((cached_boundary, lines, owners)) if cached_boundary == boundary => (lines, owners),
+            Some((cached_boundary, lines, owners, zones)) if cached_boundary == boundary => (lines, owners, zones),
             // The boundary moved forward: the rows for the lines before it are
             // the same, so they are kept and the new ones are added after.
-            Some((_, lines, owners)) => {
+            Some((_, lines, owners, zones)) => {
                 let new_owners = owners_of(&settled, true);
+                let offset = lines.len();
                 let mut rows = lines.as_ref().clone();
                 rows.extend(settled.iter().cloned());
                 let rows = std::sync::Arc::new(rows);
                 let mut all_owners = owners.as_ref().clone();
                 all_owners.extend(new_owners);
                 let all_owners = std::sync::Arc::new(all_owners);
+                let mut all_zones = zones.as_ref().clone();
+                all_zones.extend(zones_of_settled().into_iter().map(|mut zone| { zone.row += offset; zone }));
+                let all_zones = std::sync::Arc::new(all_zones);
                 if boundary > 0 {
                     let mut cache = self.settled_cache.lock();
                     cache.lines = rows.clone();
                     cache.owners = all_owners.clone();
+                    cache.tool_zones = all_zones.clone();
                     cache.boundary = boundary;
                     cache.width = width;
                     cache.expansion = expansion;
                 }
-                (rows, all_owners)
+                (rows, all_owners, all_zones)
             }
             None => {
                 let owners = std::sync::Arc::new(owners_of(&settled, true));
+                let zones = std::sync::Arc::new(zones_of_settled());
                 let settled = std::sync::Arc::new(settled);
                 if boundary > 0 {
                     let mut cache = self.settled_cache.lock();
                     cache.lines = settled.clone();
                     cache.owners = owners.clone();
+                    cache.tool_zones = zones.clone();
                     cache.boundary = boundary;
                     cache.width = width;
                     cache.expansion = expansion;
                 }
-                (settled, owners)
+                (settled, owners, zones)
             }
         };
-        *self.row_owners.lock() = RowOwners { settled: settled_owners, live: live_owners };
+        *self.row_owners.lock() = RowOwners { settled: settled_owners, live: live_owners, settled_tool_zones, live_tool_zones };
         (settled, live)
     }
 
-    /// Opens or folds the thought or tool call drawn on `row` (settled rows, then
     /// Folds or opens the block at line `i`, as a click on its header does.
     /// A block folded again loses its shown-everything mark: a fresh open is
     /// a glance, and the cut offers the rest.
@@ -2037,9 +1880,8 @@ impl ChatView {
         let Some(line) = self.lines.get_mut(i) else { return false };
         let shown = line.is_expanded.unwrap_or(expansion.all || (expansion.last && i >= last_user_idx));
         line.is_expanded = Some(!shown);
-        if !shown {
-            line.full = false;
-        }
+        line.full = false;
+        if shown { line.tool_arguments_open = false; }
         *self.settled_cache.lock() = SettledRenderCache::default();
         true
     }
@@ -2069,6 +1911,89 @@ impl ChatView {
         }
     }
 
+    /// A cell-level control on a tool card, in the coordinates of the last
+    /// render_split. Check this before the row-only `owner_at` click.
+    pub fn tool_action_at(&self, row: usize, col: usize) -> Option<ToolAction> {
+        self.tool_action_zone_at(row, col).map(|zone| zone.action)
+    }
+
+    /// The same zone hover and pressed styling should light. Its row is a
+    /// transcript row; callers map it with their existing chat_screen_row.
+    pub fn tool_action_zone_at(&self, row: usize, col: usize) -> Option<ToolActionZone> {
+        let owners = self.row_owners.lock();
+        let (zones, local_row, offset) = match row.checked_sub(owners.settled.len()) {
+            None => (owners.settled_tool_zones.as_slice(), row, 0),
+            Some(live_row) => (owners.live_tool_zones.as_slice(), live_row, owners.settled.len()),
+        };
+        let mut zone = *zones.iter().find(|zone| zone.row == local_row && col >= zone.from && col < zone.to)?;
+        zone.row += offset;
+        Some(zone)
+    }
+
+    /// Raw retained results in call order, not the styled/clipped preview.
+    /// A retained diff is included too unless the call failed or never ran;
+    /// no file is read again.
+    pub fn tool_copy_text(&self, i: usize) -> Option<String> {
+        let line = self.lines.get(i)?;
+        if line.tool_calls.is_empty() {
+            return if line.tool_name.as_deref() == Some("subagent_answer") { line.details.clone() } else { line.tool_result.clone() };
+        }
+        let mut parts = Vec::new();
+        for call in &line.tool_calls {
+            let mut text = String::new();
+            if !call.is_error && call.state(false) != tool_views::CallState::NotRun {
+                if let Some(diff) = &call.diff { text.push_str(diff); }
+            }
+            if let Some(result) = &call.result {
+                if !text.is_empty() { text.push_str("\n\n"); }
+                text.push_str(result);
+            } else if call.name == "subagent_answer" {
+                text.push_str(&call.args_json);
+            }
+            if call.result.is_some() || !text.is_empty() {
+                if line.tool_calls.len() > 1 { text = format!("{}\n{text}", call.name); }
+                parts.push(text);
+            }
+        }
+        (!parts.is_empty()).then(|| parts.join("\n\n---\n\n"))
+    }
+
+    /// Exact original argument bytes, not the resolver's normalized value.
+    /// One element per retained call; an old concatenated group is one raw
+    /// element because its removed per-call records cannot be reconstructed.
+    pub fn tool_arguments(&self, i: usize) -> Option<Vec<(String, String)>> {
+        let line = self.lines.get(i)?;
+        if line.tool_calls.is_empty() {
+            if line.tool_name.as_deref() == Some("subagent_answer") { return None; }
+            return Some(vec![(line.tool_name.clone().unwrap_or_default(), line.details.clone()?)]);
+        }
+        Some(line.tool_calls.iter().filter(|call| call.name != "subagent_answer")
+            .map(|call| (call.name.clone(), call.args_json.clone())).collect())
+    }
+
+    pub fn toggle_tool_arguments(&mut self, i: usize) -> bool {
+        let Some(line) = self.lines.get_mut(i) else { return false };
+        if !matches!(line.kind, LineKind::Tool | LineKind::ToolError) { return false; }
+        let has_arguments = line.details.is_some() && line.tool_name.as_deref() != Some("subagent_answer")
+            || line.tool_calls.iter().any(|call| call.name != "subagent_answer" && !call.args_json.is_empty());
+        if !has_arguments { return false; }
+        line.tool_arguments_open = !line.tool_arguments_open;
+        line.is_expanded = Some(true);
+        *self.settled_cache.lock() = SettledRenderCache::default();
+        true
+    }
+
+    /// Close is idempotent even when keyboard expansion is globally enabled.
+    pub fn close_tool_card(&mut self, i: usize) -> bool {
+        let Some(line) = self.lines.get_mut(i) else { return false };
+        if !matches!(line.kind, LineKind::Tool | LineKind::ToolError) { return false; }
+        line.is_expanded = Some(false);
+        line.full = false;
+        line.tool_arguments_open = false;
+        *self.settled_cache.lock() = SettledRenderCache::default();
+        true
+    }
+
     /// `›` prefix on user lines.
     pub fn render(&self, width: usize) -> Vec<(LineKind, String)> {
         let (settled, live) = self.render_split(width, true);
@@ -2094,13 +2019,15 @@ pub const USER_BAR: &str = "│";
 mod tests {
     use super::*;
 
-    /// The explore line says what happened, in the words the interface uses.
-    ///
-    /// The verbs and the counts were English in a Russian screen: the table
-    /// holds them now, and the line says "2 файла", not "2 files".
     #[test]
     fn the_explore_line_says_what_happened_in_the_language_of_the_interface() {
-        let line = strip_ansi(&format_explore(false, 2, 1, "src/main.rs"));
+        let mut chat = ChatView::default();
+        chat.tool_started("read_file", r#"{"paths":["src/a.rs","src/b.rs"]}"#, None);
+        chat.tool_finished(false, Some("read"));
+        chat.tool_started("grep", r#"{"pattern":"needle"}"#, None);
+        chat.tool_finished(false, Some("no matches"));
+        let (settled, live) = chat.render_split(100, ReasoningExpansion::none());
+        let line = settled.iter().chain(live.iter()).map(|(_, row)| strip_ansi(row)).collect::<Vec<_>>().join("\n");
         assert!(line.contains("Explored") && line.contains("2 files") && line.contains("1 search"), "{line}");
         let ru = crate::i18n::Lang::Russian;
         for phrase in ["Exploring", "Explored", "Reading", "Read", "Searching", "Searched"] {
@@ -2427,7 +2354,10 @@ mod tests {
         v2.on_event(&LoopEvent::ToolFinished { id: "c3".into(), is_error: false, result_len: 10, result: None });
         let (settled2, live2) = v2.render_split(100, false);
         let all2: Vec<_> = settled2.iter().cloned().chain(live2).collect();
-        assert!(all2.iter().any(|(_, t)| t.contains("Ran 3 commands") && (t.contains('›') || t.contains('>'))));
+        let text2 = all2.iter().map(|(_, t)| strip_ansi(t)).collect::<Vec<_>>().join("\n");
+        assert_eq!(all2.len(), 3, "commands remain separate");
+        for command in ["cargo check", "cargo test", "cargo clippy"] { assert!(text2.contains(command), "{text2}"); }
+        assert!(!text2.contains("Ran 3 commands"));
 
         let mut v3 = ChatView::default();
         v3.on_event(&LoopEvent::ToolStarted {
@@ -2438,7 +2368,8 @@ mod tests {
         v3.on_event(&LoopEvent::ToolFinished { id: "e1".into(), is_error: false, result_len: 50, result: None });
         let (settled3, live3) = v3.render_split(100, false);
         let all3: Vec<_> = settled3.iter().cloned().chain(live3).collect();
-        assert!(all3.iter().any(|(_, t)| t.contains("Edited") && t.contains("lib.rs") && t.contains("+2") && t.contains("-0")));
+        assert!(all3.iter().any(|(_, t)| t.contains("Edited") && t.contains("crates/tui/src/lib.rs") && t.contains("requested") && t.contains("+2")));
+        assert!(!all3.iter().any(|(_, t)| t.contains("-0")), "zero deletions are not a change");
 
         let mut v4 = ChatView::default();
         for i in 1..=4 {
@@ -2471,7 +2402,7 @@ mod tests {
         assert!(all5.iter().any(|(_, t)| t.contains("Read memory") && t.contains("[project]") && (t.contains('›') || t.contains('>'))));
         assert!(!all5.iter().any(|(_, t)| t.contains("{\"scope\":\"project\"}")));
 
-        // Consecutive memory reads merge their scopes.
+        // Memory is not a filesystem read/search group.
         let mut v5b = ChatView::default();
         v5b.on_event(&LoopEvent::ToolStarted {
             id: "m1".into(),
@@ -2487,8 +2418,9 @@ mod tests {
         v5b.on_event(&LoopEvent::ToolFinished { id: "m2".into(), is_error: false, result_len: 50, result: None });
         let (settled5b, live5b) = v5b.render_split(100, false);
         let all5b: Vec<_> = settled5b.iter().cloned().chain(live5b).collect();
-        assert_eq!(all5b.len(), 1, "Consecutive memory_read calls must consolidate into a single line");
-        assert!(all5b.iter().any(|(_, t)| t.contains("Read memory") && t.contains("[project, global]")));
+        assert_eq!(all5b.len(), 2, "memory reads remain separate");
+        assert!(all5b.iter().any(|(_, t)| t.contains("Read memory") && t.contains("[project]")));
+        assert!(all5b.iter().any(|(_, t)| t.contains("Read memory") && t.contains("[global]")));
 
         let mut v6 = ChatView::default();
         v6.on_event(&LoopEvent::ToolStarted {
@@ -2766,8 +2698,7 @@ mod tests {
     }
 
     #[test]
-    fn a_headed_edit_card_still_says_what_it_did_to_the_tree() {
-        // The header used to replace the card, losing "Edited main.rs +1 -1".
+    fn model_intent_stays_inside_the_card_and_never_replaces_action_target_or_size() {
         let mut chat = ChatView::default();
         chat.push_user("add a line");
         chat.on_event(&LoopEvent::ToolStarted {
@@ -2776,25 +2707,17 @@ mod tests {
             args_json: r#"{"header":"Add a second println to main","path":"src/main.rs","edits":[{"old_string":"one","new_string":"one\ntwo"}]}"#.into(),
         });
         chat.on_event(&LoopEvent::ToolFinished { id: "e".into(), is_error: false, result_len: 1, result: Some("ok".into()) });
-        let (settled, live) = chat.render_split(110, ReasoningExpansion::default());
-        let dump: String = settled.iter().chain(live.iter()).map(|(_, t)| strip_ansi(t)).collect::<Vec<_>>().join("\n");
-        assert!(dump.contains("Add a second println to main"), "{dump}");
-        assert!(dump.contains("main.rs +2 -1"), "the facts are gone:\n{dump}");
-
-        // A header that names the file gets only what it did not say.
-        let mut chat = ChatView::default();
-        chat.push_user("edit it");
-        chat.on_event(&LoopEvent::ToolStarted {
-            id: "e".into(),
-            name: "edit_file".into(),
-            args_json: r#"{"header":"Fix the loop in main.rs","path":"main.rs","edits":[{"old_string":"one","new_string":"two"}]}"#.into(),
-        });
-        let (settled, live) = chat.render_split(110, ReasoningExpansion::default());
-        let dump: String = settled.iter().chain(live.iter()).map(|(_, t)| strip_ansi(t)).collect::<Vec<_>>().join("\n");
-        assert!(dump.contains("Fix the loop in main.rs"), "{dump}");
-        assert!(dump.contains("+1 -1"), "{dump}");
-        assert!(!dump.contains("main.rs · main.rs"), "said twice:\n{dump}");
+        let (settled, live) = chat.render_split(110, ReasoningExpansion::none());
+        let dump = settled.iter().chain(live.iter()).map(|(_, t)| strip_ansi(t)).collect::<Vec<_>>().join("\n");
+        assert!(dump.contains("Edited src/main.rs") && dump.contains("requested +2 -1"), "{dump}");
+        assert!(!dump.contains("Add a second println to main"), "intent does not replace the compact facts");
+        let (settled, live) = chat.render_split(110, ReasoningExpansion::all());
+        let dump = settled.iter().chain(live.iter()).map(|(_, t)| strip_ansi(t)).collect::<Vec<_>>().join("\n");
+        assert!(dump.contains("Add a second println to main") && dump.contains("src/main.rs"), "{dump}");
+        assert!(dump.contains("Requested change · original diff not retained"), "a replay does not invent a real diff: {dump}");
+        assert_eq!(dump.chars().filter(|c| *c == '╭').count(), 1, "one coherent card");
     }
+
 
     #[test]
     fn a_header_that_already_names_the_file_is_not_made_to_repeat_it() {
@@ -2807,7 +2730,7 @@ mod tests {
         });
         let (settled, live) = chat.render_split(110, ReasoningExpansion::default());
         let dump: String = settled.iter().chain(live.iter()).map(|(_, t)| strip_ansi(t)).collect::<Vec<_>>().join("\n");
-        assert!(dump.contains("Read main.rs"), "{dump}");
+        assert!(dump.contains("Reading main.rs"), "{dump}");
         assert!(!dump.contains("main.rs · main.rs"), "said twice:\n{dump}");
     }
 
@@ -2822,8 +2745,11 @@ mod tests {
         });
         let (settled, live) = chat.render_split(110, ReasoningExpansion::default());
         let dump: String = settled.iter().chain(live.iter()).map(|(_, t)| strip_ansi(t)).collect::<Vec<_>>().join("\n");
-        assert!(dump.contains("List the files in the project"), "{dump}");
+        assert!(!dump.contains("List the files in the project"), "collapsed rows keep the actual command");
         assert!(dump.contains("ls -1"), "{dump}");
+        let (settled, live) = chat.render_split(110, ReasoningExpansion::all());
+        let dump = settled.iter().chain(live.iter()).map(|(_, t)| strip_ansi(t)).collect::<Vec<_>>().join("\n");
+        assert!(dump.contains("List the files in the project") && dump.contains("$ ls -1"), "{dump}");
     }
 
     #[test]
@@ -2835,7 +2761,7 @@ mod tests {
         chat.on_event(&LoopEvent::ToolFinished { id: "a".into(), is_error: false, result_len: 1, result: Some("x".into()) });
         let (settled, live) = chat.render_split(100, ReasoningExpansion::default());
         let dump: String = settled.iter().chain(live.iter()).map(|(_, t)| strip_ansi(t)).collect::<Vec<_>>().join("\n");
-        assert!(dump.contains("Searched the project"), "{dump}");
+        assert!(dump.contains("Analyzed . · 1 entry"), "the exact directory and its result stay visible: {dump}");
         assert!(!dump.contains("Searched search"), "{dump}");
     }
 
@@ -3296,7 +3222,7 @@ hm".into()));
 
 
     #[test]
-    fn a_tool_line_reads_as_the_model_explained_it() {
+    fn compact_facts_remain_true_when_the_model_supplies_an_intent_header() {
         let mut v = ChatView::default();
         let args = r#"{"header":"Add the missing null check to parser.rs","path":"src/parser.rs","edits":[]}"#;
         v.on_event(&LoopEvent::ToolStarted {
@@ -3305,28 +3231,22 @@ hm".into()));
             args_json: args.into(),
         });
         let collapsed = |v: &ChatView| -> String {
-            v.render_split(120, ReasoningExpansion::default())
-                .0
-                .iter()
-                .chain(v.render_split(120, ReasoningExpansion::default()).1.iter())
-                .map(|(_, t)| strip_ansi(t))
-                .collect::<Vec<_>>()
-                .join("\n")
+            let (settled, live) = v.render_split(120, ReasoningExpansion::none());
+            settled.iter().chain(live.iter()).map(|(_, t)| strip_ansi(t)).collect::<Vec<_>>().join("\n")
         };
         let running = collapsed(&v);
-        assert!(running.contains("Add the missing null check to parser.rs"), "{running}");
-        assert!(!running.contains("Editing"), "the header replaces the generated line: {running}");
-
+        assert!(running.contains("Editing src/parser.rs"), "{running}");
+        assert!(!running.contains("Add the missing null check"), "the model's intent stays in the body");
         v.on_event(&LoopEvent::ToolFinished {
             id: "1".into(),
             is_error: true,
             result_len: 5,
             result: Some("error: no such file".into()),
         });
-        // The expanded diff renders under the line; check the whole frame.
         let failed = collapsed(&v);
-        assert!(failed.contains("Add the missing null check to parser.rs · failed"), "{failed}");
-        assert!(!failed.contains("Failed to"), "{failed}");
+        assert!(failed.contains("× Failed to edit src/parser.rs · no such file"), "{failed}");
+        let opened = v.render(120).iter().map(|(_, t)| strip_ansi(t)).collect::<Vec<_>>().join("\n");
+        assert!(opened.contains("Add the missing null check to parser.rs"), "intent is still retained: {opened}");
     }
 
     /// A child that finished, as the app hears about it.
@@ -3396,7 +3316,8 @@ hm".into()));
             name: "run_shell".into(),
             args_json: r#"{"command":"cargo test"}"#.into(),
         });
-        let line = strip_ansi(&v.render(120)[0].1);
+        let (settled, live) = v.render_split(120, ReasoningExpansion::none());
+        let line = strip_ansi(&settled.iter().chain(live.iter()).next().unwrap().1);
         assert!(line.contains("Running"), "{line}");
         assert!(line.contains("cargo test"), "{line}");
     }
@@ -3853,8 +3774,206 @@ hm".into()));
         assert!(plain_expanded.contains("Read") && plain_expanded.contains("src/main.rs"));
         assert!(expanded_text.contains("\x1b[48;2;22;38;60m"), "Read view must have soft blue background");
 
-        assert!(plain_expanded.contains("Analyzed .audit"));
+        assert!(plain_expanded.contains("list_dir · .audit"));
         assert!(plain_expanded.contains("2026-09-07-a0-skeleton.md"));
+    }
+
+    fn tool_rows(chat: &ChatView, width: usize, expansion: ReasoningExpansion) -> Vec<String> {
+        let (settled, live) = chat.render_split(width, expansion);
+        settled.iter().chain(live.iter()).map(|(_, row)| strip_ansi(row)).collect()
+    }
+
+    #[test]
+    fn full_tool_expansion_keeps_every_retained_shell_line_past_the_old_fifteen_line_cap() {
+        let mut chat = ChatView::default();
+        chat.push_user("check it");
+        chat.tool_started("run_shell", r#"{"command":"cargo test"}"#, None);
+        let output = format!("exit code: 0\noutput:\n{}", (1..=45).map(|i| format!("retained shell line {i}")).collect::<Vec<_>>().join("\n"));
+        chat.tool_finished(false, Some(&output));
+        let folded = tool_rows(&chat, 100, ReasoningExpansion::none());
+        let header = folded.iter().position(|row| row.contains("Ran cargo test")).unwrap();
+        let Some(Click::Fold(i)) = chat.owner_at(header) else { panic!("the entire folded row opens its call") };
+        assert!(chat.toggle_line(i, ReasoningExpansion::none()));
+        let preview = tool_rows(&chat, 100, ReasoningExpansion::none());
+        let cut = preview.iter().position(|row| row.contains("click to show all")).unwrap();
+        assert_eq!(chat.owner_at(cut), Some(Click::Expand(i)));
+        assert!(chat.owner_at(cut - 1).is_none(), "body text is not a fold");
+        assert_eq!(preview.iter().filter(|row| row.starts_with('╭')).count(), 1);
+        assert_eq!(preview.iter().filter(|row| row.starts_with('╰')).count(), 1);
+        assert!(!preview.iter().any(|row| row.contains("retained shell line 45")));
+        assert!(chat.show_full(i));
+        let full = tool_rows(&chat, 100, ReasoningExpansion::none());
+        for n in 1..=45 {
+            assert!(full.iter().any(|row| row.contains(&format!("retained shell line {n}"))), "line {n} did not survive full expansion");
+        }
+        assert!(!full.iter().any(|row| row.contains("click to show all")));
+        assert_eq!(chat.tool_copy_text(i).as_deref(), Some(output.as_str()), "copy is raw retained data, not the preview");
+        let close = full.iter().enumerate().find_map(|(row, text)| {
+            (0..visible_width(text)).find_map(|col| {
+                let zone = chat.tool_action_zone_at(row, col)?;
+                (zone.action == ToolAction::Close(i)).then_some(zone)
+            })
+        }).unwrap();
+        assert_eq!(chat.tool_action_at(close.row, close.from), Some(ToolAction::Close(i)));
+        assert!(chat.close_tool_card(i));
+        assert!(!chat.lines[i].full, "close resets the full flag immediately");
+        assert!(chat.toggle_line(i, ReasoningExpansion::none()));
+        assert!(tool_rows(&chat, 100, ReasoningExpansion::none()).iter().any(|row| row.contains("click to show all")), "reopening is a preview");
+    }
+
+    #[test]
+    fn an_old_grouped_line_still_toggles_as_one_block_with_one_shell() {
+        let mut chat = ChatView::default();
+        let mut line = ChatLine::with_details(LineKind::Tool, "  ▸ Ran 2 commands ›", "{\"command\":\"ls\"}\n\n---\n\n{\"command\":\"pwd\"}");
+        line.tool_group = Some(ToolGroupKind::Command { count: 2, last_cmd: "pwd".into(), is_running: false });
+        line.tool_name = Some("run_shell".into());
+        line.tool_result = Some((1..=40).map(|n| format!("old retained line {n}")).collect::<Vec<_>>().join("\n"));
+        chat.lines.push(line);
+        let folded = tool_rows(&chat, 100, ReasoningExpansion::none());
+        assert_eq!(folded.len(), 1);
+        assert_eq!(chat.owner_at(0), Some(Click::Fold(0)));
+        assert!(chat.toggle_line(0, ReasoningExpansion::none()));
+        let preview = tool_rows(&chat, 100, ReasoningExpansion::none());
+        assert_eq!(preview.iter().filter(|row| row.starts_with('╭')).count(), 1);
+        let cut = preview.iter().position(|row| row.contains("click to show all")).unwrap();
+        assert_eq!(chat.owner_at(cut), Some(Click::Expand(0)));
+        assert!(chat.show_full(0));
+        assert!(tool_rows(&chat, 100, ReasoningExpansion::none()).iter().any(|row| row.contains("old retained line 40")));
+        assert!(chat.toggle_line(0, ReasoningExpansion::none()));
+        assert!(!chat.lines[0].full);
+        assert!(chat.toggle_line(0, ReasoningExpansion::none()));
+        assert!(tool_rows(&chat, 100, ReasoningExpansion::none()).iter().any(|row| row.contains("click to show all")));
+    }
+
+    #[test]
+    fn adjacent_read_search_records_share_one_shell_and_a_single_preview_cut() {
+        let mut chat = ChatView::default();
+        chat.tool_started("read_file", r#"{"path":"src/config.rs","offset":20}"#, None);
+        let read = (21..=60).map(|n| format!("{n:>6}\tread {n}")).collect::<Vec<_>>().join("\n");
+        chat.tool_finished(false, Some(&read));
+        chat.tool_started("grep", r#"{"pattern":"needle"}"#, None);
+        chat.tool_finished(false, Some("src/config.rs:42:needle"));
+        assert_eq!(chat.lines.len(), 1);
+        let preview = tool_rows(&chat, 100, ReasoningExpansion::all());
+        assert_eq!(preview.iter().filter(|row| row.starts_with('╭')).count(), 1);
+        assert_eq!(preview.iter().filter(|row| row.contains("click to show all")).count(), 1);
+        assert!(chat.show_full(0));
+        let full = tool_rows(&chat, 100, ReasoningExpansion::all());
+        assert!(full.iter().any(|row| row.contains("read 60")) && full.iter().any(|row| row.contains("needle")));
+        assert!(full.iter().any(|row| row.contains("read_file · src/config.rs")));
+        assert!(full.iter().any(|row| row.contains("grep · \"needle\"")));
+        let row = full.iter().position(|row| row.contains("read 60")).unwrap();
+        assert!(chat.owner_at(row).is_none());
+    }
+
+    #[test]
+    fn tool_controls_use_visible_cells_and_survive_settled_cache_growth_and_resize() {
+        let mut chat = ChatView::default();
+        chat.tool_started("run_shell", r#"{"command":"printf 日本語"}"#, None);
+        chat.tool_finished(false, Some("日本語 output"));
+        for _ in 0..2 {
+            let rows = tool_rows(&chat, 80, ReasoningExpansion::all());
+            let copy = rows.iter().enumerate().find_map(|(row, text)| {
+                (0..visible_width(text)).find_map(|col| match chat.tool_action_zone_at(row, col) {
+                    Some(zone) if zone.action == ToolAction::Copy(0) => Some(zone),
+                    _ => None,
+                })
+            }).unwrap();
+            for col in copy.from..copy.to { assert_eq!(chat.tool_action_at(copy.row, col), Some(ToolAction::Copy(0))); }
+            assert!(chat.tool_action_at(copy.row, copy.to).is_none(), "zone end is exclusive");
+        }
+        // The settled prefix is cached, then a separate command arrives live
+        // and settles. Its zones must be offset by all preceding rows.
+        chat.tool_started("run_shell", r#"{"command":"pwd"}"#, None);
+        let live = tool_rows(&chat, 80, ReasoningExpansion::all());
+        let second = live.iter().position(|row| row.starts_with('╭') && row.contains("pwd")).unwrap();
+        let close = (0..visible_width(&live[second])).find_map(|col| match chat.tool_action_zone_at(second, col) {
+            Some(zone) if zone.action == ToolAction::Close(1) => Some(zone),
+            _ => None,
+        }).unwrap();
+        assert_eq!(close.row, second);
+        chat.tool_finished(false, Some("/work"));
+        for width in [24, 40, 80] {
+            let rows = tool_rows(&chat, width, ReasoningExpansion::all());
+            assert!(rows.iter().all(|row| visible_width(row) <= width), "{width}: {rows:?}");
+            for i in 0..2 {
+                assert!(rows.iter().enumerate().any(|(row, text)| {
+                    (0..visible_width(text)).any(|col| chat.tool_action_at(row, col) == Some(ToolAction::Close(i)))
+                }));
+            }
+        }
+    }
+
+    #[test]
+    fn a_failed_read_detaches_from_a_cached_group_and_its_click_owners_are_rebuilt() {
+        let mut chat = ChatView::default();
+        chat.tool_started("read_file", r#"{"path":"a.rs"}"#, None);
+        chat.tool_finished(false, Some("     1\tfirst"));
+        chat.tool_started("grep", r#"{"pattern":"first"}"#, None);
+        chat.tool_finished(false, Some("a.rs:1:first"));
+        let _ = tool_rows(&chat, 80, ReasoningExpansion::all());
+        chat.tool_started("read_file", r#"{"path":"missing.rs"}"#, None);
+        chat.tool_finished(true, Some("error: no such file"));
+        let rows = tool_rows(&chat, 80, ReasoningExpansion::all());
+        assert_eq!(chat.lines.len(), 2);
+        assert_eq!(rows.iter().filter(|row| row.starts_with('╭')).count(), 2);
+        let failed = rows.iter().position(|row| row.starts_with('╭') && row.contains("missing.rs")).unwrap();
+        assert_eq!(chat.owner_at(failed), Some(Click::Fold(1)));
+        assert!(rows.iter().any(|row| row.contains("no such file")));
+        assert!(!rows.iter().any(|row| row.contains("1 failed")), "the failure has its own card, not a group tail");
+    }
+
+    #[test]
+    fn raw_arguments_are_optional_and_do_not_reappear_as_a_default_json_wall() {
+        let mut chat = ChatView::default();
+        let args = r#"{"query":"select 1","opaque":{"secret_marker":"not in default body"}}"#;
+        chat.tool_started("mcp__sqlite__query", args, None);
+        chat.tool_finished(false, Some("answer: 1"));
+        let rows = tool_rows(&chat, 100, ReasoningExpansion::all());
+        assert!(!rows.iter().any(|row| row.contains("secret_marker")));
+        assert!(rows.iter().any(|row| row.contains("answer: 1")));
+        assert_eq!(chat.tool_arguments(0), Some(vec![("mcp__sqlite__query".into(), args.into())]));
+        assert!(chat.toggle_tool_arguments(0));
+        assert!(tool_rows(&chat, 100, ReasoningExpansion::none()).iter().any(|row| row.contains("secret_marker")));
+        assert!(chat.close_tool_card(0));
+        assert!(!chat.lines[0].tool_arguments_open);
+        assert!(chat.toggle_line(0, ReasoningExpansion::none()));
+        assert!(!tool_rows(&chat, 100, ReasoningExpansion::none()).iter().any(|row| row.contains("secret_marker")));
+    }
+
+    #[test]
+    fn a_retained_ellipsis_is_output_not_a_false_show_full_control() {
+        let mut chat = ChatView::default();
+        chat.tool_started("run_shell", r#"{"command":"printf output"}"#, None);
+        chat.tool_finished(false, Some("… a literal output line"));
+        let rows = tool_rows(&chat, 80, ReasoningExpansion::all());
+        let at = rows.iter().position(|row| row.contains("literal output line")).unwrap();
+        assert!(chat.owner_at(at).is_none());
+        assert!(chat.tool_action_at(at, 3).is_none());
+    }
+
+    #[test]
+    fn optional_elapsed_is_shown_only_when_a_measured_duration_is_supplied() {
+        let mut chat = ChatView::default();
+        chat.tool_started("run_shell", r#"{"command":"cargo test"}"#, None);
+        chat.tool_finished(false, Some("exit code: 0"));
+        let unknown = tool_rows(&chat, 80, ReasoningExpansion::none());
+        assert!(unknown[0].ends_with("exit 0"), "{unknown:?}");
+        assert!(chat.set_last_tool_elapsed_ms(3200));
+        let measured = tool_rows(&chat, 80, ReasoningExpansion::none());
+        assert!(measured[0].ends_with("· 3.2s"), "{measured:?}");
+    }
+
+    #[test]
+    fn the_full_card_shows_retained_notes_but_never_claims_removed_tool_data() {
+        let mut chat = ChatView::default();
+        chat.tool_started("grep", r#"{"pattern":"needle"}"#, None);
+        chat.tool_finished(false, Some("src/lib.rs:1:needle\n...[limit 200 reached]"));
+        assert!(chat.show_full(0));
+        let rows = tool_rows(&chat, 100, ReasoningExpansion::all());
+        assert!(rows.iter().any(|row| row.contains("...[limit 200 reached]")));
+        assert!(!rows.iter().any(|row| row.contains("more lines")), "the UI cannot recover the tool's removed matches");
+        assert!(rows.iter().any(|row| row.contains("1 match")), "only retained matches are counted");
     }
 
     #[test]
@@ -3993,25 +4112,19 @@ hm".into()));
         assert_eq!(kept, diff, "a diff a card can show must not be cut");
     }
 
-    /// A change that only adds is not "+3 -0": the zero reads as a line taken
-    /// away. Only the part that is there is written.
     #[test]
-    fn the_header_counts_the_change_to_the_file_not_the_arguments() {
-        let args = serde_json::json!({
-            "path": "notes.md",
-            "edits": [{ "old_string": "first line\n", "new_string": "first line\nsecond line\n" }],
-        });
-        assert_eq!(
-            call_facts("edit_file", &args, None).as_deref(),
-            Some("notes.md +2 -1"),
-            "with no file to read, all that can be counted is what the model asked for"
-        );
-        let diff = "--- notes.md\n+++ notes.md\n@@ -1,3 +1,4 @@\n # Notes\n \n first line\n+second line\n";
-        assert_eq!(
-            call_facts("edit_file", &args, Some(diff)).as_deref(),
-            Some("notes.md +1"),
-            "with the file, the card says what the file gains, and no zero that was not a change"
-        );
+    fn the_card_counts_a_real_diff_and_labels_argument_derived_sizes_as_requested() {
+        let args = r#"{"path":"notes.md","edits":[{"old_string":"first line\n","new_string":"first line\nsecond line\n"}]}"#;
+        let mut replayed = ChatView::default();
+        replayed.tool_started("edit_file", args, None);
+        replayed.tool_finished(false, Some("ok"));
+        assert!(tool_rows(&replayed, 100, ReasoningExpansion::none())[0].contains("notes.md · requested +2 -1"));
+        let mut real = ChatView::default();
+        real.tool_started("edit_file", args, Some("--- notes.md\n+++ notes.md\n@@ -1,3 +1,4 @@\n # Notes\n \n first line\n+second line\n".into()));
+        real.tool_finished(false, Some("ok"));
+        let row = &tool_rows(&real, 100, ReasoningExpansion::none())[0];
+        assert!(row.contains("notes.md · +1"), "{row}");
+        assert!(!row.contains("-0") && !row.contains("requested"));
     }
 
     #[test]
@@ -4222,11 +4335,12 @@ mod bench_tmp {
             added: 0,
             deleted: 0,
             diff: None,
+            elapsed_ms: None,
         };
         let n = 10_000;
         let t = Instant::now();
         for _ in 0..n {
-            let _ = render_single_tool_card(&call, 120, false, None);
+            let _ = render_single_tool_body(&call, false);
         }
         println!("tool card: {:.1} ms for {n} cards", t.elapsed().as_secs_f64() * 1000.0);
 

@@ -103,7 +103,9 @@ fn thinking_and_tool_calls_do_not_look_the_same() {
     let thought = rows.iter().find(|(k, _)| *k == LineKind::Reasoning).expect("a thought").1.clone();
     let call = rows.iter().find(|(k, _)| *k == LineKind::Tool).expect("a tool call").1.clone();
     assert!(thought.trim_start().starts_with('•'), "a thought is not marked as one: {thought:?}");
-    assert!(call.trim_start().starts_with('▸'), "a tool call is not marked as one: {call:?}");
+    // The collapsed call is one compact row: its own gutter mark, then the
+    // state marker and what the call did.
+    assert!(call.trim_start().starts_with('›'), "a tool call is not marked as one: {call:?}");
 }
 
 #[test]

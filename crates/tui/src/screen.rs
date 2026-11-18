@@ -7,7 +7,8 @@
 
 use std::io::Write as _;
 
-use unicode_width::UnicodeWidthChar;
+use unicode_segmentation::UnicodeSegmentation;
+use unicode_width::UnicodeWidthStr;
 
 use crate::{clip_ansi, terminal_safe, visible_width};
 
@@ -19,24 +20,14 @@ fn columns_of(text: &str, left: usize, right: usize) -> Option<(usize, usize)> {
     let mut column = 0usize;
     let mut start = None;
     let mut end = None;
-    for (i, c) in text.chars().enumerate() {
-        let w = c.width().unwrap_or(0);
-        if w == 0 {
-            if start.is_some() {
-                end = Some(i);
-            }
-            continue;
-        }
-        let next = column + w;
-        if start.is_none() && next > left {
-            start = Some(i);
-        }
-        if column <= right {
-            end = Some(i);
-        }
+    for (i, g) in text.grapheme_indices(true) {
+        let w = g.width();
+        let next = column.saturating_add(w);
+        if start.is_none() && next > left { start = Some(i); }
+        if column <= right && start.is_some() { end = Some(i + g.len()); }
         column = next;
     }
-    start.zip(end).filter(|(start, end)| start <= end)
+    start.zip(end).filter(|(start, end)| start < end)
 }
 
 /// A terminal that knows the mode shows the frame only once complete; others
@@ -79,8 +70,11 @@ impl Screen {
     /// Cutting every row to the same columns copied a narrow band out of the
     /// middle of a selection that was shown whole.
     pub fn text_in(&self, top: u16, bottom: u16, left: u16, right: u16) -> String {
-        let (top, bottom) = (top.min(bottom) as usize, top.max(bottom) as usize);
-        let (left, right) = (left.min(right) as usize, left.max(right) as usize);
+        let (top, left, bottom, right) = if (top, left) <= (bottom, right) {
+            (top as usize, left as usize, bottom as usize, right as usize)
+        } else {
+            (bottom as usize, right as usize, top as usize, left as usize)
+        };
         let mut out = String::new();
         for y in top..=bottom {
             if y != top {
@@ -98,13 +92,11 @@ impl Screen {
                 (0, usize::MAX)
             };
             if let Some((start, end)) = columns_of(&plain, from, to) {
-                let piece: String = plain.chars().skip(start).take(end + 1 - start).collect();
-                // A row keeps its indentation and loses the padding that runs
-                // to the edge of the screen.
-                out.push_str(piece.trim_end());
+                let piece = &plain[start..end];
+                out.push_str(piece.trim_end_matches(' '));
             }
         }
-        out.trim().to_string()
+        out
     }
 
     /// Draws `rows` from the top of a `width` x `height` screen and parks the
@@ -432,6 +424,16 @@ mod tests {
         s.compose(&rows(&["aaaaa", "bbbbb", "ccccc"]), None, 10, 3);
         assert_eq!(s.text_in(0, 2, 1, 2), "aaaa\nbbbbb\nccc");
         assert_eq!(s.text_in(2, 0, 2, 1), "aaaa\nbbbbb\nccc", "dragging upwards reads the same way");
+    }
+
+    #[test]
+    fn diagonal_selections_keep_endpoint_pairs_and_graphemes() {
+        let mut screen = Screen::new();
+        screen.compose(&rows(&["0123456789", "abcdefghij"]), None, 20, 3);
+        assert_eq!(screen.text_in(0, 1, 5, 1), "56789\nab");
+        assert_eq!(screen.text_in(1, 0, 1, 5), "56789\nab");
+        screen.compose(&rows(&["  👨‍👩‍👧‍👦xy"]), None, 20, 3);
+        assert_eq!(screen.text_in(0, 0, 0, 4), "  👨‍👩‍👧‍👦x");
     }
 
     #[test]

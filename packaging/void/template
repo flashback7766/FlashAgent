@@ -7,7 +7,7 @@ short_desc="Fast, local-first autonomous AI coding agent in pure Rust"
 maintainer="flashback7766 <https://github.com/flashback7766>"
 license="MIT"
 homepage="https://github.com/flashback7766/FlashAgent"
-distfiles="https://github.com/flashback7766/FlashAgent/archive/refs/tags/v${version}.tar.gz"
+distfiles="https://github.com/flashback7766/FlashAgent/archive/refs/tags/__FLASHAGENT_TAG__.tar.gz"
 
 post_install() {
 	vlicense LICENSE

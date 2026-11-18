@@ -47,24 +47,14 @@ pub enum ServerKind {
     Other,
 }
 
-/// A context window as people name it: 128_000 and 131_072 are both 128K,
-/// a million is 1M. Divided by 1024 throughout, a million read "977k", while
-/// the status line said "1M" for the same model.
+/// Decimal labels for both occupancy and capacity; adjacent counts never
+/// change units merely because one happens to be a power of two.
 pub fn token_count_label(tokens: usize) -> String {
     if tokens >= 1_000_000 {
-        // 2_000_000 read "1.9M" when every million was 1_048_576.
-        let m = if tokens.is_multiple_of(1_048_576) { (tokens / 1_048_576) as f64 } else { tokens as f64 / 1_000_000.0 };
-        let text = format!("{m:.1}");
+        let text = format!("{:.1}", tokens as f64 / 1_000_000.0);
         format!("{}M", text.strip_suffix(".0").unwrap_or(&text))
-    } else if tokens >= 1024 {
-        // A round thousand or a power of two is named exactly.
-        if tokens.is_multiple_of(1000) {
-            format!("{}K", tokens / 1_000)
-        } else if tokens.is_multiple_of(1024) {
-            format!("{}K", tokens / 1024)
-        } else {
-            format!("{}K", (tokens + 500) / 1_000)
-        }
+    } else if tokens >= 1000 {
+        format!("{}K", tokens.saturating_add(500) / 1000)
     } else {
         tokens.to_string()
     }
@@ -962,7 +952,11 @@ pub fn parse_gemini_models(data: &serde_json::Value) -> Vec<DiscoveredModel> {
                 thinking: gemini_profile(&id, thinks),
                 supports_tools: true,
                 supports_vision: true,
-                limits: Default::default(),
+                limits: ModelLimits {
+                    prompt: context,
+                    output: m.get("outputTokenLimit").and_then(|v| v.as_u64()).and_then(|n| usize::try_from(n).ok()),
+                    ..Default::default()
+                },
                 id,
             })
         })
@@ -1845,10 +1839,10 @@ mod tests {
         assert_eq!(m.display_name.as_deref(), Some("Gemma 4 E2B Instruct QAT UD"));
         assert!(m.is_loaded);
         assert_eq!(m.context_length, Some(131072));
-        assert_eq!(m.context_display().as_deref(), Some("128k ctx"));
+        assert_eq!(m.context_display().as_deref(), Some("131k ctx"));
         let mut m_64k = m.clone();
         m_64k.context_length = Some(65536);
-        assert_eq!(m_64k.context_display().as_deref(), Some("64k ctx"));
+        assert_eq!(m_64k.context_display().as_deref(), Some("66k ctx"));
         m_64k.context_length = Some(64000);
         assert_eq!(m_64k.context_display().as_deref(), Some("64k ctx"));
         let mut m_128k = m.clone();

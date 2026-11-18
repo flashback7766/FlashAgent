@@ -357,7 +357,7 @@ impl Decoder {
                 cost: usage["cost"].as_f64(),
                 cost_details: usage.pointer("/cost_details/upstream_inference_cost").and_then(Value::as_f64)
                     .map(|upstream_cost| CostDetails { upstream_cost: Some(upstream_cost) }),
-                allowance: usage.pointer("/opencode/allowance").and_then(Value::as_f64).filter(|v| v.is_finite() && *v >= 0.0),
+                allowance: crate::types::allowance_in(usage),
                 ..Default::default()
             })));
         }

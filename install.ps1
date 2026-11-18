@@ -171,9 +171,11 @@ function Install-FlashAgent {
         Invoke-WebRequest -Uri $DownloadUrl -OutFile $TempZip -UseBasicParsing -Headers $Headers
 
         # 6. Check the download against the release's SHA256SUMS, as the in-app
-        # updater does. Releases from before the manifest existed have none:
-        # that is a warning. A manifest that lacks the file or disagrees with it
-        # stops the install.
+        # updater does. The manifest is the only integrity check a release has,
+        # so a release that lacks one is not installed unless the user says so:
+        # releases from before b700 have none, and FLASHAGENT_ALLOW_UNVERIFIED=1
+        # is how an old build can still be installed on purpose. A manifest
+        # that lacks the file or disagrees with it stops the install.
         $AssetName = [uri]::UnescapeDataString(($DownloadUrl -split '/')[-1])
         $SumsUrl = $DownloadUrl.Substring(0, $DownloadUrl.LastIndexOf('/')) + "/SHA256SUMS"
         $haveSums = $true
@@ -183,7 +185,13 @@ function Install-FlashAgent {
             $haveSums = $false
         }
         if (-not $haveSums) {
-            Write-Host "Warning: this release has no SHA256SUMS (older releases lack it); the download is not verified." -ForegroundColor Yellow
+            if ($env:FLASHAGENT_ALLOW_UNVERIFIED -eq "1") {
+                Write-Host "Warning: this release has no SHA256SUMS; installing it unverified because FLASHAGENT_ALLOW_UNVERIFIED=1." -ForegroundColor Yellow
+            } else {
+                throw ("This release has no SHA256SUMS, so the download cannot be verified.`n" +
+                    "Nothing was installed. Releases from b700 on carry the manifest; set`n" +
+                    "FLASHAGENT_ALLOW_UNVERIFIED=1 to install an older one anyway.")
+            }
         } else {
             # GitHub may rewrite '+' in an asset name; compare with it normalised too.
             $wanted = $AssetName -replace '\+', '.'

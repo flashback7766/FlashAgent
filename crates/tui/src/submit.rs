@@ -1,26 +1,6 @@
 use super::*;
 use flashagent_tui::i18n::{tr, tr_fill};
 
-/// Messages typed while a compaction owns the history. The history is with the
-/// task (`std::mem::take` in `compact_command`), so a turn started now would
-/// begin from nothing: the words wait here and go out together once the summary
-/// is back. A static rather than an `App` field because `App` lives in main.rs,
-/// which must not change for this.
-static COMPACT_QUEUE: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
-
-/// Typed while the context was being compacted: it waits for the summary.
-fn queue_compacted_message(text: String) {
-    let mut queue = COMPACT_QUEUE.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-    queue.push(text);
-}
-
-/// Everything typed during the compaction, oldest first. Empty when nothing
-/// waited.
-pub(crate) fn take_compacted_messages() -> Vec<String> {
-    let mut queue = COMPACT_QUEUE.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-    std::mem::take(&mut *queue)
-}
-
 const HELP_COMMANDS: &[(&str, &str)] = &[
     ("/goal <task>", "an autonomous run; its limits are in Settings \u{2192} Goal"),
     ("/resume", "pick a saved session from this folder and continue it"),
@@ -263,8 +243,8 @@ impl App {
     /// together once the summary is back.
     fn queue_while_compacting(&mut self, line: &str) -> Flow {
         let text = line.trim().to_string();
-        if !text.is_empty() {
-            queue_compacted_message(text);
+        if !text.is_empty() || !self.attachments.is_empty() {
+            self.compacted_messages.push((text, std::mem::take(&mut self.attachments)));
         }
         self.input.take();
         self.notice(tr("Compaction is still running \u{b7} your message is queued and will be sent when it finishes"));
@@ -277,26 +257,32 @@ impl App {
     /// saved or not. With no turn under way it is one new turn; with one
     /// running, the words ride it as steering.
     pub(crate) fn send_queued_after_compaction(&mut self, cx: &LoopCtx<'_>) {
-        let queued = take_compacted_messages();
-        if queued.is_empty() {
-            return;
-        }
-        let joined = queued.join("\n\n");
+        let queued = std::mem::take(&mut self.compacted_messages);
+        if queued.is_empty() { return; }
+        let joined = queued.iter().map(|(text, _)| text.as_str()).collect::<Vec<_>>().join("\n\n");
+        let pictures: Vec<Attachment> = queued.into_iter().flat_map(|(_, pictures)| pictures).collect();
         if self.running {
             if let Some(tx) = self.active_steer_tx.clone() {
-                let _ = tx.send(flashagent_core::Steer::text(joined.clone()));
-                self.pending_steers.push((joined, Vec::new()));
+                let steer = flashagent_core::Steer { text: joined.clone(), images: pictures.iter().map(|p| p.data_url.clone()).collect() };
+                if tx.send(steer).is_ok() {
+                    self.pending_steers.push((joined, pictures));
+                } else {
+                    self.compacted_messages.push((joined, pictures));
+                }
             } else {
-                // No channel: the words go back to the prompt rather than away.
-                let draft = self.input.take();
-                self.input.set(if draft.trim().is_empty() { joined } else { format!("{joined}\n\n{draft}") });
+                self.compacted_messages.push((joined, pictures));
             }
             self.renderer.request_reprint();
             return;
         }
         let draft = self.input.take();
-        self.input.set(if draft.trim().is_empty() { joined } else { format!("{joined}\n\n{draft}") });
+        let draft_pictures = std::mem::take(&mut self.attachments);
+        self.input.set(joined);
+        self.attachments = pictures;
         self.send_prompt(cx);
+        self.input.set(draft);
+        self.attachments = draft_pictures;
+        self.renderer.request_reprint();
     }
 
     /// Enter on a `/command` while a turn runs. False when the line is not one
@@ -971,6 +957,10 @@ impl App {
     /// task: the interface keeps drawing, keeps taking keys, and the line under
     /// the prompt says what is happening instead of the app looking frozen.
     fn compact_command(&mut self, cx: &LoopCtx<'_>, focus: &str) {
+        self.compact_command_with_growth(cx, focus, true);
+    }
+
+    pub(crate) fn compact_command_with_growth(&mut self, cx: &LoopCtx<'_>, focus: &str, allow_growth: bool) {
         if self.compacting {
             self.notice(tr("A compaction is already running"));
             return;
@@ -999,9 +989,9 @@ impl App {
         self.chat.start_compaction_card();
         self.renderer.request_reprint();
 
-        // The task owns the history until it is done; there is nothing to send
-        // a turn with in the meantime, and a turn would have nothing to keep.
-        let mut history = std::mem::take(&mut self.history);
+        // Keep the original available for autosave and cancellation. New turns
+        // wait while the task owns a separate working copy.
+        let mut history = self.history.clone();
         // What the window holds now: the number the summary is measured
         // against, and what the card says it freed.
         let used = self.context_usage.total_used();
@@ -1020,25 +1010,26 @@ impl App {
         let model = self.current_model.clone();
         let session = cx.session_id.clone();
         let tx = cx.tx.clone();
+        let cancel = Arc::new(AtomicBool::new(false));
+        self.compaction_cancel = Some(cancel.clone());
         tokio::spawn(async move {
             let sink = SummarySink::ui(tx.clone());
-            let result =
-                compact_context_with_sink(
+            let work = compact_context_with_sink(
                 source.as_ref(),
                 &mut history,
                 crate::compact::Compaction {
-                    focus_prompt: focus.as_deref(),
-                    archive_path: &archive,
-                    real_used: Some(used),
-                    room: Some(room),
-                    allow_growth: true,
-                    model: &model,
+                    focus_prompt: focus.as_deref(), archive_path: &archive, real_used: Some(used),
+                    room: Some(room), allow_growth, model: &model,
                 },
                 Some(&sink),
-            )
-            .await;
-            let saved = result.as_ref().map(|r| r.saved);
-            let _ = tx.send(UiEvent::Compacted { session, history, saved, card: result });
+            );
+            let result = tokio::select! {
+                result = work => result,
+                _ = async {
+                    while !cancel.load(Ordering::Relaxed) { tokio::time::sleep(std::time::Duration::from_millis(25)).await; }
+                } => None,
+            };
+            let _ = tx.send(UiEvent::Compacted { session, history, card: result });
         });
     }
 
@@ -1349,6 +1340,7 @@ impl App {
         }
         self.chat.truncate_before_nth_last_user(taken_back);
         self.renderer.scroll_to_bottom();
+        self.context_usage.invalidate_server();
         update_context_usage(&self.current_model, &mut self.context_usage, &self.history, cx.memory_block, &self.chat, cx.perm);
         self.suggested_prompt = None;
         self.latest_suggestion = None;
@@ -1462,11 +1454,14 @@ mod tests {
     }
 
     #[test]
-    fn messages_queued_during_compaction_keep_their_order() {
-        assert!(take_compacted_messages().is_empty());
-        queue_compacted_message("first".into());
-        queue_compacted_message("second".into());
-        assert_eq!(take_compacted_messages(), ["first", "second"]);
-        assert!(take_compacted_messages().is_empty());
+    fn messages_queued_during_compaction_keep_their_order_and_leave_new_drafts_alone() {
+        let mut app = crate::tests::test_app();
+        app.input.set("first");
+        app.queue_while_compacting("first");
+        app.input.set("second");
+        app.queue_while_compacting("second");
+        app.input.set("not submitted");
+        assert_eq!(app.compacted_messages.iter().map(|(text, _)| text.as_str()).collect::<Vec<_>>(), ["first", "second"]);
+        assert_eq!(app.input.text(), "not submitted");
     }
 }

@@ -32,6 +32,19 @@ pub use subagents::{agent_tools, BuiltinSubagentFactory, CompositeTools, ToolSub
 
 /// Hard cap on a tool result fed back to the model.
 const MAX_OUTPUT_CHARS: usize = 32_000;
+/// A byte budget before the final character cap, even for non-ASCII output.
+const MAX_OUTPUT_BYTES: usize = MAX_OUTPUT_CHARS * 4;
+const MAX_LINE_BYTES: usize = 8 * 1024 * 1024;
+
+/// Append without first allocating a whole long line or result chunk.
+fn push_capped(out: &mut String, text: &str, max: usize) -> bool {
+    let mut end = text.len().min(max.saturating_sub(out.len()));
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    out.push_str(&text[..end]);
+    end == text.len()
+}
 
 /// Surfaced as tool results (`is_error`), never as panics.
 #[derive(Debug, thiserror::Error)]
@@ -76,7 +89,7 @@ pub struct BuiltinToolsConfig {
     /// Set while `/goal` runs.
     pub is_goal_mode: Option<Arc<AtomicBool>>,
     pub web_enabled: Option<bool>,
-    /// Small windows get fewer tools.
+    /// Kept for source compatibility; schema budgets no longer depend on it.
     pub context_window: Option<usize>,
     pub mcp_manager: Option<Arc<mcp::McpManager>>,
     /// Tools the owner has switched off. They are not offered, and a call to
@@ -93,13 +106,54 @@ enum Answer {
     Picture(ToolOutput),
 }
 
+/// One edit plan supplies both the approval diff and the eventual writes.
+struct PreparedEdit {
+    files: Result<Vec<fs_tools::PlannedFile>, ToolError>,
+    diff: Option<String>,
+    single: bool,
+}
+
+impl PreparedEdit {
+    fn commit(self) -> Result<String, ToolError> {
+        self.files.and_then(|files| {
+            let summary = fs_tools::write_planned(&files)?;
+            Ok(if self.single {
+                format!("applied {} edit(s) to {}", files[0].replacements, files[0].path)
+            } else {
+                summary
+            })
+        })
+    }
+}
+
+#[async_trait]
+impl flashagent_core::loop_::PreparedWrite for PreparedEdit {
+    fn preview(&self) -> Option<String> {
+        self.diff.clone()
+    }
+
+    fn error(&self) -> Option<String> {
+        self.files.as_ref().err().map(|e| truncate_output(format!("error: {e}")))
+    }
+
+    async fn execute(self: Box<Self>) -> ToolOutput {
+        text_output((*self).commit())
+    }
+}
+
+fn text_output(result: Result<String, ToolError>) -> ToolOutput {
+    match result {
+        Ok(text) => ToolOutput { content: truncate_output(text), is_error: false, images: Vec::new() },
+        Err(e) => ToolOutput { content: truncate_output(format!("error: {e}")), is_error: true, images: Vec::new() },
+    }
+}
+
 /// Everything the offered tool list depends on.
 ///
 /// Two calls with the same key offer the same tools, so the list is measured
 /// once and kept until one of these changes.
 #[derive(PartialEq, Eq)]
 struct SpecsKey {
-    window: Option<usize>,
     prompt_tokens: usize,
     model: String,
     web: bool,
@@ -122,7 +176,6 @@ pub struct BuiltinTools {
     question_gate: Option<Arc<dyn QuestionGate>>,
     is_goal_mode: Arc<AtomicBool>,
     web_enabled: Arc<AtomicBool>,
-    context_window: Arc<std::sync::RwLock<Option<usize>>>,
     /// What the system prompt actually costs, in tokens. The schemas are given
     /// what a tier leaves once this has taken its share, and the prompt is not
     /// something a tier may shrink, so this number decides how many schemas
@@ -162,7 +215,6 @@ impl BuiltinTools {
             question_gate: config.question_gate,
             is_goal_mode: config.is_goal_mode.unwrap_or_else(|| Arc::new(AtomicBool::new(false))),
             web_enabled: Arc::new(AtomicBool::new(config.web_enabled.unwrap_or(true))),
-            context_window: Arc::new(std::sync::RwLock::new(config.context_window)),
             prompt_tokens: Arc::new(std::sync::atomic::AtomicUsize::new(
                 flashagent_core::budget::PROMPT_CEILING,
             )),
@@ -219,12 +271,8 @@ impl BuiltinTools {
         self.vision_supported.load(Ordering::Relaxed)
     }
 
-    /// Decides how many tools are offered.
-    pub fn set_context_window(&self, window: Option<usize>) {
-        if let Ok(mut lock) = self.context_window.write() {
-            *lock = window;
-        }
-    }
+    /// Compatibility setter for callers from before schema budgets became flat.
+    pub fn set_context_window(&self, _window: Option<usize>) {}
 
     /// What the system prompt measured this session, in tokens.
     pub fn set_prompt_tokens(&self, tokens: usize) {
@@ -250,7 +298,6 @@ impl BuiltinTools {
     /// Everything the offered list depends on.
     fn specs_key(&self) -> SpecsKey {
         SpecsKey {
-            window: self.context_window.read().ok().and_then(|c| *c),
             prompt_tokens: self.prompt_tokens.load(Ordering::Relaxed),
             model: self.model_name.read().ok().map(|m| m.clone()).unwrap_or_default(),
             web: self.web_enabled.load(Ordering::Relaxed),
@@ -271,7 +318,6 @@ impl BuiltinTools {
     fn measured_specs(&self) -> Vec<ToolSpec> {
         use flashagent_core::registry::{self, Handler};
 
-        let ctx = self.context_window.read().ok().and_then(|c| *c);
         // One toolset for every model: the budget trims it if it must, the
         // owner switches tools off by hand.
         let core = true;
@@ -300,14 +346,10 @@ impl BuiltinTools {
             })
             .collect();
 
-        // What the window earns. The prompt has already taken its share and is
-        // not negotiable, so the schemas are what a tier has left: on a small
-        // window the optional end of the list goes first, and the tools a task
-        // cannot happen without are offered whatever it costs.
-        // `Full` is the user asking for the whole toolset whatever the window says,
-        // so the ladder does not apply to it.
+        // Required tools stay; optional schemas fit the allowance left by the
+        // measured prompt and MCP share.
         {
-        let budget = flashagent_core::budget::Budget::for_window(ctx);
+        let budget = flashagent_core::budget::Budget::for_window(None);
         let model_name = self.model_name.read().ok().map(|m| m.clone()).unwrap_or_default();
         let allowance = budget.tool_allowance(self.prompt_tokens.load(Ordering::Relaxed));
         let measured: Vec<(&str, bool, usize)> = specs
@@ -337,6 +379,27 @@ impl BuiltinTools {
         specs
     }
 
+    fn prepare_edit(&self, call: &ToolCall) -> PreparedEdit {
+        let args = parse_args::<EditArgs>(&call.args_json, &call.name);
+        let single = args.as_ref().is_ok_and(|a| a.files.is_empty());
+        let files = args.and_then(|args| {
+            if args.files.is_empty() {
+                if args.path.trim().is_empty() || args.edits.is_empty() {
+                    return Err(ToolError::Other("edit_file needs a path and edits, or files to edit several".into()));
+                }
+                fs_tools::plan_edit(&self.cwd, &args.path, &args.edits)
+            } else {
+                fs_tools::plan_edits(&self.cwd, &args.targets())
+            }
+        });
+        let diff = files.as_ref().ok().map(|files| {
+            files.iter().map(|file| {
+                flashagent_core::unified(Some(&file.original), &file.new, &self.shown_path(&file.path), 3)
+            }).collect::<Vec<_>>().join("\n")
+        });
+        PreparedEdit { files, diff, single }
+    }
+
     /// `None` when the call is not a write or the file cannot be read. Which
     /// diff a call needs is declared next to its schema, so a new tool that
     /// changes files is shown on the card without anyone remembering this.
@@ -350,36 +413,7 @@ impl BuiltinTools {
                 let old = fs_tools::read_raw(&self.cwd, path);
                 Some(flashagent_core::unified(old.as_deref(), new, &self.shown_path(path), 3))
             }
-            Preview::Edit => {
-                let args: EditArgs = serde_json::from_value(v.clone()).ok()?;
-                // A batch is shown whole, one diff per file. A file named twice
-                // (also as `./a.txt`) is shown from its original to what both
-                // parts make of it, as edit_files writes it: previewing each part
-                // on its own hid the second one.
-                let mut files: Vec<(std::path::PathBuf, String, String, Option<String>)> = Vec::new();
-                let edited = |path: &str, text: String, edits: &[fs_tools::EditChunk]| fs_tools::apply_edits(path, text, edits).ok().map(|(new, _)| new);
-                for (path, edits) in args.targets() {
-                    let key = fs_tools::same_file_key(&self.cwd, &path);
-                    match files.iter_mut().find(|f| f.0 == key) {
-                        Some(earlier) => earlier.3 = earlier.3.take().and_then(|text| edited(&path, text, &edits)),
-                        None => {
-                            if let Some(old) = fs_tools::read_raw(&self.cwd, &path) {
-                                let new = edited(&path, old.clone(), &edits);
-                                files.push((key, path, old, new));
-                            }
-                        }
-                    }
-                }
-                let diffs: Vec<String> = files
-                    .iter()
-                    .filter_map(|(_, path, old, new)| Some(flashagent_core::unified(Some(old), new.as_ref()?, &self.shown_path(path), 3)))
-                    .collect();
-                if diffs.is_empty() {
-                    None
-                } else {
-                    Some(diffs.join("\n"))
-                }
-            }
+            Preview::Edit => self.prepare_edit(call).diff,
             Preview::Patch => {
                 let path = v.get("path")?.as_str()?;
                 let patch_text = v.get("patch")?.as_str()?;
@@ -424,16 +458,7 @@ impl BuiltinTools {
                 let a: WriteArgs = parse_args(&call.args_json, &call.name)?;
                 fs_tools::write_file(&self.cwd, &a.path, &a.content).map(Answer::Text)
             }
-            Handler::EditFile => {
-                let a: EditArgs = parse_args(&call.args_json, &call.name)?;
-                if a.files.is_empty() {
-                    if a.path.trim().is_empty() || a.edits.is_empty() {
-                        return Err(ToolError::Other("edit_file needs a path and edits, or files to edit several".into()));
-                    }
-                    return fs_tools::edit_file(&self.cwd, &a.path, &a.edits).map(Answer::Text);
-                }
-                fs_tools::edit_files(&self.cwd, &a.targets()).map(Answer::Text)
-            }
+            Handler::EditFile => self.prepare_edit(call).commit().map(Answer::Text),
             Handler::PatchFile => {
                 let a: PatchArgs = parse_args(&call.args_json, &call.name)?;
                 patch::patch_file(&self.cwd, &a.path, &a.patch).map(Answer::Text)
@@ -571,34 +596,27 @@ impl WritePreview for BuiltinTools {
         self.preview_for(call)
     }
 
-    /// Only when every file is inside the project, by the same rule the
-    /// permissions use (`~`, `..` and symlinks resolved): the error quotes a
-    /// line of the file, which for one outside would be a read nobody approved.
+    fn prepare(&self, call: &ToolCall) -> Option<Box<dyn flashagent_core::loop_::PreparedWrite>> {
+        if call.name != "edit_file" {
+            return None;
+        }
+        let args: EditArgs = parse_args(&call.args_json, &call.name).ok()?;
+        if args.targets().iter().any(|(path, _)| !flashagent_core::path_is_inside(&self.cwd, path)) {
+            return None;
+        }
+        Some(Box::new(self.prepare_edit(call)))
+    }
+
+    /// A quoted near match outside the project would itself be an unapproved read.
     fn doomed(&self, call: &ToolCall) -> Option<String> {
         if call.name != "edit_file" {
             return None;
         }
-        let v = flashagent_llm::effective_args(&call.args_json, &call.name)?;
-        let args: EditArgs = serde_json::from_value(v).ok()?;
-        let targets = args.targets();
-        if targets.iter().any(|(path, _)| !flashagent_core::path_is_inside(&self.cwd, path)) {
+        let args: EditArgs = parse_args(&call.args_json, &call.name).ok()?;
+        if args.targets().iter().any(|(path, _)| !flashagent_core::path_is_inside(&self.cwd, path)) {
             return None;
         }
-        // A file named twice in a batch, also as `./a.txt`, gets its second
-        // edits on the result of the first.
-        let mut texts: std::collections::HashMap<std::path::PathBuf, String> = std::collections::HashMap::new();
-        for (path, edits) in targets {
-            let key = fs_tools::same_file_key(&self.cwd, &path);
-            let text = match texts.remove(&key) {
-                Some(text) => text,
-                None => fs_tools::read_raw(&self.cwd, &path)?,
-            };
-            match fs_tools::apply_edits(&path, text, &edits) {
-                Ok((edited, _)) => texts.insert(key, edited),
-                Err(e) => return Some(format!("error: {e}")),
-            };
-        }
-        None
+        self.prepare_edit(call).files.err().map(|e| truncate_output(format!("error: {e}")))
     }
 }
 
@@ -619,7 +637,7 @@ impl ToolExec for BuiltinTools {
             Ok(Answer::Text(text)) => ToolOutput { content: truncate_output(text), is_error: false, images: Vec::new() },
             // The picture is the answer: it goes to the model as it is.
             Ok(Answer::Picture(out)) => out,
-            Err(e) => ToolOutput { content: format!("error: {e}"), is_error: true, images: Vec::new() },
+            Err(e) => text_output(Err(e)),
         }
     }
 
@@ -947,6 +965,41 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_prepared_batch_rejects_changes_made_after_the_approval_diff() {
+        let (dir, tools) = batch_tools("stale-prepared", &[("a.txt", "one\n"), ("b.txt", "two\n")]);
+        let call = batch_call("edit_file", serde_json::json!({ "files": [
+            { "path": "a.txt", "edits": [ { "old_string": "one", "new_string": "ONE" } ] },
+            { "path": "b.txt", "edits": [ { "old_string": "two", "new_string": "TWO" } ] }
+        ] }));
+        let prepared = tools.prepare(&call).expect("a prepared edit");
+        assert!(prepared.preview().unwrap().contains("+TWO"));
+        std::fs::write(dir.join("b.txt"), "two\nexternal\n").unwrap();
+        let out = prepared.execute().await;
+        assert!(out.is_error && out.content.contains("nothing was changed"), "{}", out.content);
+        assert_eq!(std::fs::read_to_string(dir.join("a.txt")).unwrap(), "one\n");
+        assert_eq!(std::fs::read_to_string(dir.join("b.txt")).unwrap(), "two\nexternal\n");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn failed_or_oversized_batches_never_preview_only_the_valid_files() {
+        let (dir, tools) = batch_tools("invalid-preview", &[("a.txt", "one\n"), ("b.txt", "two\n")]);
+        let bad = batch_call("edit_file", serde_json::json!({ "files": [
+            { "path": "a.txt", "edits": [ { "old_string": "one", "new_string": "ONE" } ] },
+            { "path": "b.txt", "edits": [ { "old_string": "missing", "new_string": "TWO" } ] }
+        ] }));
+        assert!(tools.write_preview(&bad).is_none(), "a partial diff would hide the failed edit");
+        assert!(tools.prepare(&bad).unwrap().error().unwrap().contains("b.txt"));
+        let files: Vec<_> = (0..21).map(|_| serde_json::json!({
+            "path": "a.txt", "edits": [{"old_string": "one", "new_string": "one"}]
+        })).collect();
+        let large = batch_call("edit_file", serde_json::json!({"files": files}));
+        assert!(tools.write_preview(&large).is_none());
+        assert!(tools.doomed(&large).unwrap().contains("at most 20"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
     async fn several_files_are_read_in_one_call_and_a_missing_one_does_not_stop_the_rest() {
         let (dir, tools) = batch_tools("read", &[("a.txt", "one\n"), ("b.txt", "two\n")]);
         let out = tools
@@ -964,6 +1017,16 @@ mod tests {
     }
 
     use super::*;
+
+    #[tokio::test]
+    async fn long_error_results_are_truncated_too() {
+        let tools = BuiltinTools::new(BuiltinToolsConfig { cwd: testing::tempdir(), ..Default::default() }).unwrap();
+        let call = ToolCall { id: "t".into(), name: "read_file".into(), args_json: "x".repeat(MAX_OUTPUT_BYTES) };
+        let out = tools.execute(&call).await;
+        assert!(out.is_error);
+        assert!(out.content.contains("truncated"));
+        assert!(out.content.chars().count() < MAX_OUTPUT_CHARS + 100, "{} chars retained", out.content.chars().count());
+    }
 
     #[tokio::test]
     async fn hostile_args_become_errors_not_panics() {
@@ -1198,6 +1261,9 @@ mod tests {
         let second = tools.specs();
         assert_eq!(first.len(), second.len());
         assert_eq!(tools.specs_measured(), 1, "the schemas were measured again for the same list");
+        tools.set_context_window(Some(1_000_000));
+        tools.specs();
+        assert_eq!(tools.specs_measured(), 1, "flat schema budgets must not remeasure on a window change");
 
         // Something that changes the list is measured again.
         tools.set_model_name("gpt-4");

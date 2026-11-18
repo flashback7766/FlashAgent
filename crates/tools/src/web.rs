@@ -179,9 +179,7 @@ pub async fn fetch_text(url: &str) -> Result<String, ToolError> {
                 first.ip()
             )));
         }
-        let mut builder = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(30))
-            .redirect(reqwest::redirect::Policy::none());
+        let mut builder = guarded_client_builder(reqwest::Client::builder());
         if literal.is_none() {
             builder = builder.resolve(&bare, first);
         }
@@ -213,6 +211,14 @@ pub async fn fetch_text(url: &str) -> Result<String, ToolError> {
     }
 }
 
+fn guarded_client_builder(builder: reqwest::ClientBuilder) -> reqwest::ClientBuilder {
+    builder
+        .timeout(std::time::Duration::from_secs(30))
+        .redirect(reqwest::redirect::Policy::none())
+        // A system proxy resolves the URL itself and bypasses the checked IP.
+        .no_proxy()
+}
+
 /// The local address the permission layer approved: the host and the port.
 ///
 /// The port is part of it: `http://127.0.0.1:8080` is the program on port
@@ -240,6 +246,12 @@ fn downgrades(scheme: &str, next: &reqwest::Url) -> bool {
 /// not be held in memory whole first.
 const MAX_FETCH_BYTES: usize = 2 * 1024 * 1024;
 
+fn append_body(bytes: &mut Vec<u8>, chunk: &[u8]) -> bool {
+    let keep = chunk.len().min(MAX_FETCH_BYTES.saturating_sub(bytes.len()));
+    bytes.extend_from_slice(&chunk[..keep]);
+    keep < chunk.len() || bytes.len() >= MAX_FETCH_BYTES
+}
+
 async fn read_fetched(mut resp: reqwest::Response) -> Result<String, ToolError> {
     let status = resp.status();
     let content_type = resp
@@ -249,19 +261,25 @@ async fn read_fetched(mut resp: reqwest::Response) -> Result<String, ToolError> 
         .unwrap_or("")
         .to_string();
     let mut bytes = Vec::new();
+    let mut truncated = false;
     while let Some(chunk) = resp.chunk().await.map_err(|e| ToolError::Other(format!("read body: {e}")))? {
-        bytes.extend_from_slice(&chunk);
-        if bytes.len() >= MAX_FETCH_BYTES {
+        if append_body(&mut bytes, &chunk) {
+            truncated = true;
             break;
         }
     }
     let body = String::from_utf8_lossy(&bytes).into_owned();
     if !status.is_success() {
-        return Err(ToolError::Other(format!("HTTP {status}: {}", truncate_body(&body, 500))));
+        let note = if truncated { " [body truncated]" } else { "" };
+        return Err(ToolError::Other(format!("HTTP {status}: {}{note}", truncate_body(&body, 500))));
     }
     let is_html = content_type.contains("html")
         || (content_type.is_empty() && body.trim_start().starts_with('<'));
-    Ok(if is_html { html_to_text(&body) } else { body })
+    let mut text = if is_html { html_to_text(&body) } else { body };
+    if truncated {
+        text.push_str(&format!("\n...[truncated body at {MAX_FETCH_BYTES} bytes]"));
+    }
+    Ok(text)
 }
 
 pub async fn search(
@@ -538,6 +556,39 @@ fn describe_unusable_page(body: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn the_guarded_client_bypasses_an_implicit_proxy_and_uses_the_pinned_ip() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        // A reqwest proxy has a private custom matcher; a closure models the
+        // system proxy without changing process-wide environment in parallel tests.
+        let proxy = reqwest::Proxy::custom(|_: &reqwest::Url| Some("http://127.0.0.1:9"));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = [0u8; 1024];
+            let _ = socket.read(&mut request).await;
+            socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 6\r\nConnection: close\r\n\r\npinned").await.unwrap();
+        });
+        let client = guarded_client_builder(reqwest::Client::builder().proxy(proxy)).resolve("pinned.invalid", address).build().unwrap();
+        let result = client.get(format!("http://pinned.invalid:{}/", address.port())).send().await;
+        if result.is_err() {
+            server.abort();
+        }
+        let body = result.expect("a proxy must not replace the checked endpoint").text().await.unwrap();
+        server.await.unwrap();
+        assert_eq!(body, "pinned");
+        assert!(!format!("{:?}", guarded_client_builder(reqwest::Client::builder()).build().unwrap()).contains("proxies:"), "guarded fetch inherited system proxies");
+    }
+
+    #[test]
+    fn a_body_chunk_is_cut_before_extending_the_buffer() {
+        let mut bytes = vec![b'a'; MAX_FETCH_BYTES - 3];
+        assert!(append_body(&mut bytes, b"0123456789"));
+        assert_eq!(bytes.len(), MAX_FETCH_BYTES);
+        assert!(bytes.ends_with(b"012"));
+    }
 
     #[tokio::test]
     async fn only_http_is_fetched() {

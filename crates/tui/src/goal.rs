@@ -169,7 +169,7 @@ impl GoalLedger {
     pub fn on_event(&mut self, ev: &LoopEvent) -> bool {
         match ev {
             LoopEvent::StepStarted { step, .. } => self.step = *step,
-            LoopEvent::Usage(u) => self.output_tokens += u.completion.unwrap_or(0),
+            LoopEvent::Usage(u) => self.output_tokens = self.output_tokens.saturating_add(u.completion.unwrap_or(0).max(0)),
             LoopEvent::ToolStarted { id, name, args_json } => {
                 let subject = subject_of(name, args_json);
                 let files = files_of(name, args_json);
