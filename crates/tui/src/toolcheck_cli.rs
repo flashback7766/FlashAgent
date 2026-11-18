@@ -187,7 +187,7 @@ pub(crate) async fn run_tool_check_cli(config: &AppConfig, all_models: bool, onl
 /// answer to both halves of the prompt.
 pub(crate) async fn collect_first_tool_call(
     stream: &mut futures::stream::BoxStream<'static, Result<flashagent_llm::LlmEvent, flashagent_llm::LlmError>>,
-) -> Result<Result<(Option<(String, String)>, String), String>, String> {
+) -> Result<(Option<(String, String)>, String), String> {
     use futures::StreamExt;
     let mut parts: Vec<(usize, String, String)> = Vec::new();
     let mut text = String::new();
@@ -212,7 +212,7 @@ pub(crate) async fn collect_first_tool_call(
     }
     parts.sort_by_key(|(index, _, _)| *index);
     let first = parts.iter().find(|(_, name, _)| !name.is_empty()).map(|p| (p.1.clone(), p.2.clone()));
-    Ok(Ok((first, text)))
+    Ok((first, text))
 }
 
 pub(crate) async fn run_tool_call_probe(source: &BackendSource) -> String {
@@ -236,8 +236,8 @@ pub(crate) async fn run_tool_call_probe(source: &BackendSource) -> String {
         let mut stream = source.turn_with_options(&messages, std::slice::from_ref(&probe), &opts).await.map_err(|e| e.to_string())?;
         collect_first_tool_call(&mut stream).await
     };
-    let (native, text) = match run.await {
-        Err(_) => return "FAIL: no answer within 120s".into(),
+    let (native, text) = match tokio::time::timeout(TOOL_TEST_TURN_TIMEOUT, run).await {
+        Err(_) => return format!("FAIL: no answer within {}s", TOOL_TEST_TURN_TIMEOUT.as_secs()),
         Ok(Err(e)) => return format!("FAIL: {e}"),
         Ok(Ok(parts)) => parts,
     };
@@ -289,7 +289,7 @@ mod tests {
             Ok(flashagent_llm::LlmEvent::ToolCallDelta { index: 0, name: Some("report_status".into()), args_delta: "{\"code\": 42 }".into(), id: None }),
             Ok(flashagent_llm::LlmEvent::ToolCallDelta { index: 1, name: None, args_delta: "text".into(), id: None }),
         ]);
-        let (first, _) = collect_first_tool_call(&mut stream).await.expect("the test wrote the stream").ok().unwrap();
+        let (first, _) = collect_first_tool_call(&mut stream).await.expect("the test wrote the stream");
         let (name, args) = first.unwrap();
         assert_eq!(name, "report_status");
         assert_eq!(args, "{\"code\": 42 }");
@@ -301,7 +301,7 @@ mod tests {
             Ok(flashagent_llm::LlmEvent::ToolCallDelta { index: 0, name: Some("lead".into()), args_delta: "{}".into(), id: None }),
             Ok(flashagent_llm::LlmEvent::ToolCallDelta { index: 1, name: Some("report_status".into()), args_delta: "{}".into(), id: None }),
         ]);
-        let (first, _) = collect_first_tool_call(&mut stream).await.expect("the test wrote the stream").ok().unwrap();
+        let (first, _) = collect_first_tool_call(&mut stream).await.expect("the test wrote the stream");
         assert_eq!(first.unwrap().0, "lead");
     }
 }

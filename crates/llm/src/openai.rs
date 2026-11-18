@@ -209,6 +209,7 @@ pub(crate) async fn stream(
     let busy = client.busy();
     let url = format!("{}/chat/completions", api_base(client));
     let headers = headers(client);
+    let model = client.model();
     let mut learned = client.learned.read().clone();
     let known = learned.clone();
     let mut fields = learned.fields.unwrap_or(Fields::All);
@@ -259,11 +260,13 @@ pub(crate) async fn stream(
             }
         }
     };
-    Ok(pump(resp, busy, Decoder::default()))
+    Ok(pump(resp, busy, Decoder { model, ..Default::default() }))
 }
 
 #[derive(Default)]
 struct Decoder {
+    model: String,
+    usage: Option<crate::types::Usage>,
     sse: SseDecoder,
     parser: ChunkParser,
     /// Unknown until the first byte that is not blank: `{` is a server that
@@ -313,7 +316,14 @@ impl Decoder {
             // Tool calls written as text are caught by the loop's scanner, not here.
             self.parser.feed_value(chunk, &mut events);
         }
-        events.into_iter().map(Ok).collect()
+        events.into_iter().filter_map(|event| {
+            if let LlmEvent::Usage(snapshot) = event {
+                self.usage.get_or_insert_with(Default::default).merge_latest(snapshot);
+                None
+            } else {
+                Some(Ok(event))
+            }
+        }).collect()
     }
 }
 
@@ -346,6 +356,11 @@ impl WireDecoder for Decoder {
         let mut out = self.payloads(payloads);
         if !self.failed {
             out.extend(self.parser.finish().into_iter().map(Ok));
+            if let Some(mut usage) = self.usage.take() {
+                usage.completion_measurement = self.parser.measurement(&usage);
+                if !self.model.is_empty() { self.parser.calibrate(&self.model, &usage); }
+                out.push(Ok(LlmEvent::Usage(usage)));
+            }
             // No finish reason and no `[DONE]`: the body stopped mid-answer.
             // Servers that ignore `stream: true` are covered too, as their
             // one reply carries a finish reason or this says the same.

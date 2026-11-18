@@ -66,7 +66,6 @@ const ENGLISH_ON_PURPOSE: &[(&str, &str)] = &[
         "No crash report was written. Turn on \"Crash reports\" in Settings if you want one.",
         "written to stderr before the interface has chosen a language",
     ),
-    ("Failed to", "the model writes this line, the interface reads it back"),
     ("Ran 3 commands", "the model writes this line, the interface reads it back"),
     ("Evaluating Command Output", "a stage the model writes, read back by the interface"),
     ("Evaluating Explored Context", "a stage the model writes, read back by the interface"),
@@ -87,7 +86,8 @@ const ENGLISH_ON_PURPOSE: &[(&str, &str)] = &[
         "You are a tool-calling test harness. Respond only by calling the provided tool.",
         "a prompt to the model",
     ),
-    ("FAIL: no answer within 120s", "the report of the tool test, for the developer who ran it"),
+    ("The preceding tool results are part of the conversation to summarize.", "a bridge in the compaction request, read by the model"),
+    ("exit code:", "a marker in raw shell output, not an interface label"),
     ("\nThe tool-calling check is done.", "the report of the tool test, for the developer who ran it"),
     (
         "\nContinue the current task from this summary and the retained messages that follow. If an exact prior message or tool result is needed, read the archive in the session file named below, under its \"archive\" field, subject to normal file permissions. Verify changeable facts before acting.",

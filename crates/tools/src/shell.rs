@@ -884,6 +884,18 @@ impl ShellRegistry {
         self.shared.tasks.lock().values().filter(|t| t.state == TaskState::Running).count()
     }
 
+    /// The ids of the tasks still running, for a caller that has to remember
+    /// whose work they are. Ids only grow within a run.
+    pub fn running_ids(&self) -> Vec<u32> {
+        self.shared
+            .tasks
+            .lock()
+            .iter()
+            .filter(|(_, t)| t.state == TaskState::Running)
+            .map(|(id, _)| *id)
+            .collect()
+    }
+
     /// Oldest first.
     pub fn tasks(&self) -> Vec<TaskInfo> {
         self.shared

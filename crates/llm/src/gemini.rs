@@ -426,11 +426,8 @@ struct Decoder {
     /// Function calls so far, which is also the index of the next.
     calls: usize,
     replay: Replay,
-    /// Every chunk repeats the running totals; the last one is sent, once.
+    /// The latest cumulative counters; published once when the body ends.
     usage: Option<Usage>,
-    /// Whether the counts have already gone out, so a frame repeating them after
-    /// the finish reason is not added to them a second time.
-    usage_sent: bool,
     thought: crate::parse::ThoughtTags,
     done: bool,
     /// The stream has already ended in a failure of its own, so a body that
@@ -478,7 +475,6 @@ impl Decoder {
 
     fn flush_usage(&mut self, out: &mut Vec<Result<LlmEvent, LlmError>>) {
         if let Some(usage) = self.usage.take() {
-            self.usage_sent = true;
             out.push(Ok(LlmEvent::Usage(usage)));
         }
     }
@@ -505,19 +501,8 @@ impl Decoder {
             return true;
         };
         self.malformed.ok();
-        let was_done = self.done;
         if let Some(usage) = chunk.get("usageMetadata").and_then(read_usage) {
-            // Several Gemini-compatible gateways end the turn with a frame
-            // carrying nothing but the counts. It arrives after the finish
-            // reason, and reading it is what keeps the token budget and the
-            // compaction threshold honest. One already reported is not a second
-            // bill: keeping it here made `finish` send it again.
-            if !self.usage_sent {
-                self.usage = Some(usage);
-                if was_done {
-                    self.flush_usage(out);
-                }
-            }
+            self.usage.get_or_insert_with(Default::default).merge_latest(usage);
         }
         if self.done {
             return true;
@@ -561,12 +546,7 @@ impl Decoder {
                 return false;
             }
         };
-        // The counts go out with the terminal frame, as they always have, so the
-        // order a reader sees them in does not change. A frame that carries
-        // them again afterwards is ignored; one that carries them for the first
-        // time here is read above, which is the gateway shape that used to
-        // leave the turn's budget understated.
-        self.flush_usage(out);
+        // Usage may follow the finish reason; publish its last snapshot at EOF.
         out.push(Ok(LlmEvent::Done(finish)));
         self.done = true;
         true
@@ -609,24 +589,24 @@ impl Decoder {
 }
 
 fn read_usage(meta: &Value) -> Option<Usage> {
-    let count = |key: &str| meta.get(key).and_then(Value::as_i64);
-    let prompt = count("promptTokenCount").map(|p| p + count("toolUsePromptTokenCount").unwrap_or(0));
+    let count = |key: &str| meta.get(key).and_then(Value::as_i64).filter(|n| *n >= 0);
+    let prompt = count("promptTokenCount").map(|p| p.saturating_add(count("toolUsePromptTokenCount").unwrap_or(0)));
     // Thoughts are generated and paid for like the answer.
     let completion = match (count("candidatesTokenCount"), count("thoughtsTokenCount")) {
         (None, None) => None,
-        (answer, thoughts) => Some(answer.unwrap_or(0) + thoughts.unwrap_or(0)),
+        (answer, thoughts) => Some(answer.unwrap_or(0).saturating_add(thoughts.unwrap_or(0))),
     };
     (prompt.is_some() || completion.is_some())
         .then_some(Usage {
             prompt,
             completion,
+            completion_measurement: crate::types::CompletionMeasurement::Unavailable,
             cached: count("cachedContentTokenCount"),
             mtp: None,
             cost: None,
             cost_details: None,
             // The gateway's own count of the plan allowance the turn used.
-            allowance: meta.pointer("/opencode/allowance").and_then(Value::as_f64).filter(|v| v.is_finite() && *v >= 0.0),
-            ..Default::default()
+            allowance: crate::types::allowance_in(meta),
         })
 }
 
@@ -1136,7 +1116,19 @@ mod tests {
             }),
         ]);
         let usages: Vec<Usage> = ok_events(decode(&[&stream])).into_iter().filter_map(|e| if let LlmEvent::Usage(u) = e { Some(u) } else { None }).collect();
-        assert_eq!(usages, vec![Usage { prompt: Some(100), completion: Some(50), cached: Some(64), mtp: None, cost: None, cost_details: None, ..Default::default() }]);
+        assert_eq!(usages, vec![Usage { prompt: Some(100), completion: Some(50), completion_measurement: crate::types::CompletionMeasurement::Unavailable, cached: Some(64), mtp: None, cost: None, cost_details: None, ..Default::default() }]);
+    }
+
+    #[test]
+    fn final_usage_after_a_partial_snapshot_replaces_it() {
+        let stream = sse(&[
+            json!({"candidates":[{"content":{"parts":[{"text":"hello"}]}}],"usageMetadata":{"promptTokenCount":100,"candidatesTokenCount":1}}),
+            json!({"candidates":[{"finishReason":"STOP"}]}),
+            json!({"usageMetadata":{"promptTokenCount":100,"candidatesTokenCount":80,"thoughtsTokenCount":20}}),
+        ]);
+        let usages: Vec<Usage> = ok_events(decode(&[&stream])).into_iter().filter_map(|event| if let LlmEvent::Usage(usage) = event { Some(usage) } else { None }).collect();
+        assert_eq!(usages.len(), 1);
+        assert_eq!(usages[0].completion, Some(100));
     }
 
     /// The same counts repeated in a frame after the terminal one are the same
@@ -1170,7 +1162,7 @@ mod tests {
         let usages: Vec<Usage> = events.into_iter().filter_map(|e| if let LlmEvent::Usage(u) = e { Some(u) } else { None }).collect();
         assert_eq!(
             usages,
-            vec![Usage { prompt: Some(100), completion: Some(20), cached: None, mtp: None, cost: None, cost_details: None, ..Default::default() }],
+            vec![Usage { prompt: Some(100), completion: Some(20), completion_measurement: crate::types::CompletionMeasurement::Unavailable, cached: None, mtp: None, cost: None, cost_details: None, ..Default::default() }],
             "the later counts are the ones the turn is billed on, and nothing is counted twice"
         );
     }
@@ -1326,7 +1318,7 @@ mod tests {
                 events,
                 vec![
                     LlmEvent::TextDelta("Hello".into()),
-                    LlmEvent::Usage(Usage { prompt: Some(5), completion: Some(1), cached: None, mtp: None, cost: None, cost_details: None, ..Default::default() }),
+                    LlmEvent::Usage(Usage { prompt: Some(5), completion: Some(1), completion_measurement: crate::types::CompletionMeasurement::Unavailable, cached: None, mtp: None, cost: None, cost_details: None, ..Default::default() }),
                     LlmEvent::Done(FinishReason::Stop),
                 ]
             );

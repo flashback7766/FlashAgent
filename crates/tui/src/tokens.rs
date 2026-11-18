@@ -81,6 +81,7 @@ impl TokenTracker {
     pub(crate) fn on_turn_start(&mut self, model: String, estimated_prompt_tokens: usize) {
         self.model = model;
         self.total_model_tokens = 0;
+        self.reported_usage = false;
         self.request_tokens = 0;
         // The children's session total carries over on purpose: a child still
         // running when this turn started keeps its earlier tokens to its earlier
@@ -139,14 +140,15 @@ impl TokenTracker {
                 }
             }
         }
-        let count = flashagent_llm::count_tokens(&self.model, text).max(1);
-        self.request_tokens += count;
-        self.total_model_tokens += count;
-        self.window.push_back((now, count));
+        let count = flashagent_llm::count_tokens(&self.model, &self.request_text);
+        let previous = self.request_tokens;
+        self.request_tokens = count;
+        self.total_model_tokens = self.total_model_tokens.saturating_sub(previous).saturating_add(count);
+        self.window.push_back((now, count.saturating_sub(previous)));
     }
 
     pub(crate) fn on_usage(&mut self, usage: &flashagent_llm::Usage) {
-        if usage.completion.is_some() || usage.prompt.is_some() {
+        if usage.completion.is_some_and(|n| n >= 0) {
             self.reported_usage = true;
         }
         // The server counted what the model wrote, and the app has what it
@@ -165,14 +167,13 @@ impl TokenTracker {
         if let Some(mtp) = usage.mtp.filter(|m| m.total_draft_tokens > 0) {
             self.draft_acceptance = Some(mtp.acceptance_rate());
         }
-        if let (Some(c), Some(p)) = (usage.cached, usage.prompt) {
-            if p > 0 {
-                self.last_f_keep = Some((c as f64 / p as f64).clamp(0.0, 1.0));
-                if let Some(ttft) = self.last_ttft {
-                    self.prefill_tracker.record(&self.model, p as usize, c as usize, ttft);
-                    let eval = (p as usize).saturating_sub(c as usize).max(1);
-                    self.last_prefill_speed = Some(eval as f64 / ttft.as_secs_f64().max(0.001));
-                }
+        if let (Some(c), Some(p)) = (usage.cached.filter(|n| *n >= 0), usage.prompt.filter(|n| *n > 0)) {
+            let cached = c.min(p) as usize;
+            self.last_f_keep = Some(cached as f64 / p as f64);
+            if let Some(ttft) = self.last_ttft {
+                self.prefill_tracker.record(&self.model, p as usize, cached, ttft);
+                let eval = (p as usize).saturating_sub(cached).max(1);
+                self.last_prefill_speed = Some(eval as f64 / ttft.as_secs_f64().max(0.001));
             }
         }
         if let Some(p) = usage.prompt {
@@ -185,27 +186,12 @@ impl TokenTracker {
         // request. It is a difference and not a total: the turn's total already
         // holds every earlier request, and taking the server's figure as the
         // turn's total is what made a long turn report only its last step.
-        if let Some(c) = usage.completion {
-            if c > 0 {
-                let comp = c as usize;
-                if comp > self.request_tokens {
-                    let diff = comp - self.request_tokens;
-                    let now = std::time::Instant::now();
-                    if self.first_token_time.is_none() {
-                        self.first_token_time = Some(now);
-                    }
-                    self.window.push_back((now, diff));
-                    self.request_tokens = comp;
-                    self.total_model_tokens += diff;
-                } else {
-                    // The server counted less than the deltas did, which happens
-                    // when a draft model was rejected. The total follows it down
-                    // by the same amount, so it stays the same figure the server
-                    // would report for the request.
-                    self.total_model_tokens -= self.request_tokens - comp;
-                    self.request_tokens = comp;
-                }
-            }
+        if let Some(c) = usage.completion.filter(|c| *c >= 0) {
+            let comp = c as usize;
+            self.total_model_tokens = self.total_model_tokens.saturating_sub(self.request_tokens).saturating_add(comp);
+            self.request_tokens = comp;
+            // Samples describe visible arrival speed, not a burst of hidden
+            // tokens revealed by the final usage frame.
         }
     }
 
@@ -217,6 +203,21 @@ impl TokenTracker {
         self.request_tokens = 0;
         self.request_text.clear();
         self.request_had_tool = false;
+        self.reported_usage = false;
+        self.first_token_time = None;
+        self.turn_start_time = Some(std::time::Instant::now());
+        self.window.clear();
+        self.last_f_keep = None;
+    }
+
+    pub(crate) fn on_identity_change(&mut self) {
+        self.reported_usage = false;
+        self.server_prompt = None;
+        self.prompt_tokens = None;
+        self.last_f_keep = None;
+        self.last_ttft = None;
+        self.last_prefill_speed = None;
+        self.window.clear();
     }
 
     /// A tool call's name and arguments. Where the server prices the request it
@@ -242,14 +243,14 @@ impl TokenTracker {
     /// difference since it started and nothing twice.
     pub(crate) fn on_subagent_usage(&mut self, session_total: usize) {
         if session_total > self.subagent_seen {
-            self.subagent_tokens += session_total - self.subagent_seen;
+            self.subagent_tokens = self.subagent_tokens.saturating_add(session_total - self.subagent_seen);
         }
         self.subagent_seen = session_total;
     }
 
     /// What this turn has generated: the parent's own output and its children's.
     pub(crate) fn turn_output(&self) -> usize {
-        self.total_model_tokens + self.subagent_tokens
+        self.total_model_tokens.saturating_add(self.subagent_tokens)
     }
 
     /// Puts back what the children had already produced, for a turn the app

@@ -818,7 +818,7 @@ impl Tokens {
             }
         }
         // The gateway's own count of the plan allowance the turn used.
-        if let Some(counted) = usage.pointer("/opencode/allowance").and_then(Value::as_f64).filter(|v| v.is_finite() && *v >= 0.0) {
+        if let Some(counted) = crate::types::allowance_in(usage) {
             self.allowance = Some(counted);
         }
     }
@@ -1023,15 +1023,15 @@ impl Decoder {
         if self.tokens.seen {
             let t = &self.tokens;
             out.push(Ok(LlmEvent::Usage(Usage {
-                prompt: Some(t.input + t.written + t.read),
-                completion: Some(t.output),
+                prompt: Some(t.input.max(0).saturating_add(t.written.max(0)).saturating_add(t.read.max(0))),
+                completion: Some(t.output.max(0)),
+                completion_measurement: crate::types::CompletionMeasurement::Unavailable,
                 cached: Some(t.read),
                 mtp: None,
                 // Anthropic prices per token, not per turn, and this is a stream:
                 // there is no account total to read here.
                 cost: None, cost_details: None,
                 allowance: t.allowance,
-                ..Default::default()
             })));
         }
         // Without a stop reason and without a `message_stop`, the body stopped
@@ -1665,7 +1665,7 @@ mod tests {
             json!({ "type": "message_stop" }),
         ]);
         let usage: Vec<Usage> = events(&transcript, 64).into_iter().filter_map(|e| if let LlmEvent::Usage(u) = e { Some(u) } else { None }).collect();
-        assert_eq!(usage, [Usage { prompt: Some(4320), completion: Some(42), cached: Some(4000), mtp: None, cost: None, cost_details: None, ..Default::default() }], "once, at the end: the loop adds every report up");
+        assert_eq!(usage, [Usage { prompt: Some(4320), completion: Some(42), completion_measurement: crate::types::CompletionMeasurement::Unavailable, cached: Some(4000), mtp: None, cost: None, cost_details: None, ..Default::default() }], "once, at the end: the loop adds every report up");
     }
 
     #[test]

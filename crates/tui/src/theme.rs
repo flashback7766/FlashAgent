@@ -64,13 +64,8 @@ pub fn active() -> ColorTheme {
     current().base
 }
 
-/// Borrows the frame unchanged under the built-in `Dark` theme.
-pub fn recolor(frame: &str) -> Cow<'_, str> {
-    recolor_with(current(), frame)
-}
-
-/// Testable without touching the global choice or terminal detection.
-pub fn recolor_for(theme: ColorTheme, frame: &str) -> Cow<'_, str> {
+#[cfg(test)]
+fn recolor_for(theme: ColorTheme, frame: &str) -> Cow<'_, str> {
     recolor_with(ResolvedTheme::builtin(theme), frame)
 }
 

@@ -126,14 +126,6 @@ pub struct McpTool {
     pub annotations: Option<McpToolAnnotations>,
 }
 
-impl McpTool {
-    /// The server's claim, informational only. Permissions never use it (see
-    /// `McpManager::is_tool_read_only`).
-    pub fn claims_read_only(&self) -> bool {
-        self.annotations.as_ref().and_then(|a| a.read_only).unwrap_or(false)
-    }
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ToolsListResult {
     #[serde(default)]
@@ -188,27 +180,31 @@ impl CallToolResult {
     pub fn plain_text(&self) -> String {
         let mut out = String::new();
         for item in &self.content {
-            if let Some(ref text) = item.text {
-                if !out.is_empty() {
-                    out.push('\n');
-                }
-                out.push_str(text);
-            } else if let Some(ref data) = item.data {
-                if !out.is_empty() {
-                    out.push('\n');
-                }
-                out.push_str(&format!("[Binary data: {} bytes, mime: {:?}]", data.len(), item.mime_type));
+            let summary;
+            let text = if let Some(text) = &item.text {
+                text.as_str()
+            } else if let Some(data) = &item.data {
+                summary = format!("[Binary data: {} bytes, mime: {:?}]", data.len(), item.mime_type);
+                &summary
             } else if let Some(resource) = &item.resource {
-                if !out.is_empty() {
-                    out.push('\n');
-                }
                 if let Some(text) = &resource.text {
-                    out.push_str(text);
+                    text.as_str()
                 } else if let Some(blob) = &resource.blob {
-                    out.push_str(&format!("[Binary resource: {} bytes]", blob.len()));
+                    summary = format!("[Binary resource: {} bytes]", blob.len());
+                    &summary
                 } else if let Some(uri) = &resource.uri {
-                    out.push_str(uri);
+                    uri.as_str()
+                } else {
+                    continue;
                 }
+            } else {
+                continue;
+            };
+            let complete = (out.is_empty() || crate::push_capped(&mut out, "\n", crate::MAX_OUTPUT_BYTES))
+                && crate::push_capped(&mut out, text, crate::MAX_OUTPUT_BYTES);
+            if !complete {
+                out.push_str(&format!("\n...[truncated at {} bytes]", crate::MAX_OUTPUT_BYTES));
+                break;
             }
         }
         if out.is_empty() {
@@ -218,7 +214,7 @@ impl CallToolResult {
                 "[Tool executed successfully with no output]".into()
             }
         } else {
-            out
+            crate::truncate_output(out)
         }
     }
 }
@@ -251,7 +247,9 @@ mod tests {
         let res: ToolsListResult = serde_json::from_str(raw).expect("parse tools list");
         assert_eq!(res.tools.len(), 1);
         assert_eq!(res.tools[0].name, "read_query");
-        assert!(res.tools[0].claims_read_only());
+        assert_eq!(res.tools[0].annotations.as_ref().and_then(|a| a.read_only), Some(true));
+        let serialized = serde_json::to_string(&res.tools[0]).unwrap();
+        assert!(serialized.contains("readOnlyHint"), "the current spelling must be serialized: {serialized}");
     }
 
     #[test]
@@ -259,6 +257,22 @@ mod tests {
         let raw = r#"{"content":[{"type":"resource","resource":{"uri":"file:///a.md","text":"the file body"}}]}"#;
         let res: CallToolResult = serde_json::from_str(raw).expect("parse the result");
         assert_eq!(res.plain_text(), "the file body");
+    }
+
+    #[test]
+    fn long_mcp_text_and_error_content_are_bounded_and_marked() {
+        for error in [false, true] {
+            let res = CallToolResult {
+                content: vec![ContentItem {
+                    content_type: "text".into(), text: Some("界".repeat(crate::MAX_OUTPUT_BYTES)),
+                    data: None, mime_type: None, resource: None,
+                }],
+                is_error: Some(error),
+            };
+            let out = res.plain_text();
+            assert!(out.contains("truncated"));
+            assert!(out.chars().count() < crate::MAX_OUTPUT_CHARS + 100);
+        }
     }
 
     #[test]

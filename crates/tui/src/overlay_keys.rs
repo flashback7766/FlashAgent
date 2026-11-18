@@ -797,13 +797,15 @@ impl App {
         let previous_model = self.current_model.clone();
         let previous_effort = self.current_effort.clone();
         self.current_model = model.to_string();
+        self.context_usage.invalidate_server();
+        self.token_tracker.on_identity_change();
         cx.source.set_model(&self.current_model);
         cx.source.set_effort_bias(self.effort_memory.steps(&self.current_model));
         cx.tools_arc.set_vision_supported(model_sees_images(cx.source, &self.current_model));
         if let Some(m) = cx.source.discovery().and_then(|d| d.models.into_iter().find(|m| m.id == self.current_model)) {
             self.current_context = m.context_display();
-            if let Some(len) = m.context_length.or(m.max_context_length) {
-                self.context_usage.total_capacity = len.max(1024);
+            if let Some(len) = m.prompt_budget() {
+                self.context_usage.total_capacity = len;
                 cx.tools_arc.set_context_window(Some(len));
             }
             // The picked effort survives the switch only where the new model
@@ -820,8 +822,8 @@ impl App {
             }
             // A listed model that names no window keeps the fallback, not the
             // window of the model just left: 1M on an 8k model overflows.
-            if m.context_length.or(m.max_context_length).is_none() {
-                self.context_usage.total_capacity = crate::provider_switch::UNKNOWN_CONTEXT;
+            if m.prompt_budget().is_none() {
+                self.context_usage.total_capacity = self.config.active_profile().context_window.unwrap_or(crate::provider_switch::UNKNOWN_CONTEXT);
                 cx.tools_arc.set_context_window(Some(crate::provider_switch::UNKNOWN_CONTEXT));
             }
         } else {

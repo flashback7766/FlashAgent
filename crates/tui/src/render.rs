@@ -1749,7 +1749,7 @@ impl Renderer {
             width, height, card_key, card_start, paint_start, input_line_idx, text_cursor, border_color: &border_color, selection: st.selection,
             card_lines,
             owner_at: &|i| chat.owner_at(i),
-            zone_at: &|row, col| chat.welcome_zone_at(row, col),
+            zone_at: &|row, col| chat.tool_action_zone_at(row, col).map(|zone| (zone.from, zone.to)).or_else(|| chat.welcome_zone_at(row, col)),
             hover_chat: st.hover_chat,
             hover_gauge: st.hover_gauge,
             hover_marker: st.hover_marker,
@@ -1800,9 +1800,15 @@ impl Renderer {
     // The chat is anchored to the bottom: the rows above the room are not
     // drawn at all, and the card's first row moves up by that many.
     let chat_skipped = chat_len.saturating_sub(chat_room);
-    if self.scroll_offset > 0 && chat_len > self.total_lines {
-        // New lines arrived under a view scrolled back: it stays on what is read.
-        self.scroll_offset += chat_len - self.total_lines;
+    let growth = chat_len.saturating_sub(self.total_lines);
+    let old_room = self.chat_view.1.saturating_add(usize::from(self.scroll_offset > 0));
+    if self.scroll_offset > 0 {
+        self.scroll_offset = self.scroll_offset.saturating_add(growth);
+        self.scroll_offset = if old_room > chat_room {
+            self.scroll_offset.saturating_add(old_room - chat_room)
+        } else {
+            self.scroll_offset.saturating_sub(chat_room - old_room)
+        };
     }
     self.total_lines = chat_len;
     // A row of the room goes to the line that says the view is scrolled, so the

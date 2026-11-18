@@ -113,7 +113,9 @@ mkdir -p "${VOID_DIR}/bin" "${VOID_DIR}/share/applications" "${VOID_DIR}/share/i
 cp "${BINARY}" "${VOID_DIR}/bin/flashagent"
 cp "${ROOT_DIR}/packaging/desktop/flashagent.desktop" "${VOID_DIR}/share/applications/"
 cp "${ROOT_DIR}/packaging/desktop/flashagent.png" "${VOID_DIR}/share/icons/"
-sed -e "s/^version=.*/version=${RAW_VER}/" "${ROOT_DIR}/packaging/void/template" > "${VOID_DIR}/xbps/template"
+# A beta tag is `bNNN` and a stable one is `vX.Y.Z+bNNN`; prefixing either
+# with `v` produced a tag that does not exist (`vb701`).
+sed -e "s/^version=.*/version=${RAW_VER}/" -e "s/__FLASHAGENT_TAG__/${VERSION}/" "${ROOT_DIR}/packaging/void/template" > "${VOID_DIR}/xbps/template"
 cp "${ROOT_DIR}/LICENSE" "${ROOT_DIR}/README.md" "${VOID_DIR}/"
 tar -czf "${DIST_DIR}/flashagent-${VERSION}-void-linux-x86_64.tar.gz" -C /tmp flashagent-void
 rm -rf "${VOID_DIR}"

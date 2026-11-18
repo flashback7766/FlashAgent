@@ -62,6 +62,10 @@ const fn strings(name: &'static str, description: &'static str) -> Param {
     Param { name, kind: Kind::Strings, description, choices: &[], optional: false }
 }
 
+const fn opt_str(name: &'static str, description: &'static str) -> Param {
+    Param { name, kind: Kind::Str, description, choices: &[], optional: true }
+}
+
 const fn opt_int(name: &'static str, description: &'static str) -> Param {
     Param { name, kind: Kind::Int, description, choices: &[], optional: true }
 }
@@ -219,7 +223,7 @@ const FILES: Param = list(
 );
 
 const EDITS_ITEM: &[Param] = &[
-    s(
+    opt_str(
         "old_string",
         "Text to replace, copied exactly from the file with its indentation and line breaks; it must match once unless replace_all. Not needed when the edit names lines",
     ),
@@ -898,7 +902,11 @@ mod tests {
     fn a_list_entry_requires_only_what_it_needs() {
         let schema: serde_json::Value = serde_json::from_str(&find("edit_file").unwrap().schema_json()).unwrap();
         let item = &schema["properties"]["edits"]["items"];
-        assert_eq!(item["required"], serde_json::json!(["old_string", "new_string"]));
+        // A line-range edit names its lines instead of its text, so the model
+        // must not be made to send an empty `old_string` just to satisfy the
+        // schema; the tool itself refuses an edit that names neither.
+        assert_eq!(item["required"], serde_json::json!(["new_string"]));
+        assert!(item["properties"]["old_string"].is_object(), "the field is still offered");
         assert!(item["properties"]["replace_all"].is_object(), "the field is still offered");
         // A plain list of strings stays a list of strings, not a list of
         // nameless objects.

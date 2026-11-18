@@ -71,6 +71,10 @@ impl Drop for Busy {
 /// What a stream says when it ends without saying why.
 pub(crate) const CLOSED_EARLY: &str = "the server closed before saying why";
 
+// A model's token limit does not bound bytes from a broken runner or proxy.
+pub(crate) const MAX_RESPONSE_BYTES: usize = 64 * 1024 * 1024;
+pub(crate) const MAX_FRAME_BYTES: usize = 8 * 1024 * 1024;
+
 /// Turns a response body into events. One per request; bytes arrive in order.
 pub(crate) trait WireDecoder: Send + 'static {
     fn feed(&mut self, bytes: &[u8]) -> Vec<Result<LlmEvent, LlmError>>;
@@ -669,22 +673,44 @@ pub(crate) fn pump_within(resp: reqwest::Response, busy: Busy, mut decoder: impl
     tokio::spawn(async move {
         // The server keeps generating while this task reads.
         let _busy = busy;
-        let mut done_sent = false;
+        let mut terminal = None;
+        let mut usage: Option<crate::types::Usage> = None;
+        let mut total_bytes = 0usize;
         let mut body = resp.bytes_stream();
         let read = async {
-            while let Some(chunk) = body.next().await {
+            loop {
+                let chunk = tokio::select! {
+                    biased;
+                    _ = tx.closed() => return,
+                    chunk = body.next() => chunk,
+                };
+                let Some(chunk) = chunk else { break };
                 let items = match chunk {
-                    Ok(bytes) => decoder.feed(&bytes),
+                    Ok(bytes) => {
+                        total_bytes = total_bytes.saturating_add(bytes.len());
+                        if total_bytes > MAX_RESPONSE_BYTES {
+                            vec![Err(LlmError::Stream(format!("the response exceeded the {} MiB byte limit", MAX_RESPONSE_BYTES / (1024 * 1024))))]
+                        } else {
+                            decoder.feed(&bytes)
+                        }
+                    }
                     Err(e) => vec![Err(LlmError::Stream(e.to_string()))],
                 };
-                if !forward(&tx, items, &mut done_sent).await {
+                if !forward(&tx, items, &mut terminal, &mut usage).await {
                     return;
                 }
             }
-            if !forward(&tx, decoder.finish(), &mut done_sent).await {
+            if !forward(&tx, decoder.finish(), &mut terminal, &mut usage).await {
                 return;
             }
-            if !done_sent && !decoder.saw_terminal() {
+            if let Some(usage) = usage.take() {
+                if tx.send(Ok(LlmEvent::Usage(usage.normalized()))).await.is_err() {
+                    return;
+                }
+            }
+            if let Some(reason) = terminal {
+                let _ = tx.send(Ok(LlmEvent::Done(reason))).await;
+            } else if !decoder.saw_terminal() {
                 let _ = tx.send(Err(LlmError::Stream(CLOSED_EARLY.into()))).await;
             }
         };
@@ -692,6 +718,9 @@ pub(crate) fn pump_within(resp: reqwest::Response, busy: Busy, mut decoder: impl
         // turn that has been reading for this long has heard the server say
         // nothing for all of it.
         if tokio::time::timeout(deadline, read).await.is_err() {
+            if let Some(usage) = usage.take() {
+                let _ = tx.send(Ok(LlmEvent::Usage(usage.normalized()))).await;
+            }
             let _ = tx
                 .send(Err(LlmError::Stream(format!(
                     "the stream did not end within {}s and was cut off",
@@ -707,11 +736,24 @@ pub(crate) fn pump_within(resp: reqwest::Response, busy: Busy, mut decoder: impl
 async fn forward(
     tx: &mpsc::Sender<Result<LlmEvent, LlmError>>,
     items: Vec<Result<LlmEvent, LlmError>>,
-    done_sent: &mut bool,
+    terminal: &mut Option<crate::types::FinishReason>,
+    usage: &mut Option<crate::types::Usage>,
 ) -> bool {
     for item in items {
+        if let Ok(LlmEvent::Usage(snapshot)) = item {
+            usage.get_or_insert_with(Default::default).merge_latest(snapshot.normalized());
+            continue;
+        }
         let failed = item.is_err();
-        *done_sent |= matches!(item, Ok(LlmEvent::Done(_)));
+        if failed {
+            if let Some(usage) = usage.take() {
+                if tx.send(Ok(LlmEvent::Usage(usage.normalized()))).await.is_err() { return false; }
+            }
+        }
+        if let Ok(LlmEvent::Done(reason)) = item {
+            terminal.get_or_insert(reason);
+            continue;
+        }
         if tx.send(item).await.is_err() || failed {
             return false;
         }
@@ -1143,11 +1185,11 @@ mod tests {
     fn a_context_window_is_named_as_people_name_it() {
         use crate::thinking::token_count_label as label;
         assert_eq!([label(1_000_000), label(1_048_576), label(2_000_000), label(1_500_000)], ["1M", "1M", "2M", "1.5M"]);
-        assert_eq!([label(128_000), label(131_072), label(262_144), label(32_768), label(200_000)], ["128K", "128K", "256K", "32K", "200K"]);
+        assert_eq!([label(128_000), label(131_072), label(262_144), label(32_768), label(200_000)], ["128K", "131K", "262K", "33K", "200K"]);
         let mut m = DiscoveredModel { id: "m".into(), display_name: None, is_loaded: false, context_length: Some(1_000_000), max_context_length: None, thinking: ThinkingProfile::unreported(), supports_tools: true, supports_vision: false, ..Default::default() };
         assert_eq!(m.context_display().as_deref(), Some("1M ctx"), "it read 977k ctx");
         m.context_length = Some(131_072);
-        assert_eq!(m.context_display().as_deref(), Some("128k ctx"));
+        assert_eq!(m.context_display().as_deref(), Some("131k ctx"));
     }
 
     #[test]

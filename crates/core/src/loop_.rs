@@ -23,6 +23,8 @@ pub trait LlmSource: Send + Sync {
         tools: &[ToolSpec],
     ) -> Result<BoxStream<'static, Result<LlmEvent, LlmError>>, LlmError>;
 
+    fn token_model(&self) -> String { String::new() }
+
     async fn turn_with_options(
         &self,
         messages: &[ChatMessage],
@@ -54,9 +56,21 @@ pub trait ToolExec: Send + Sync {
     fn as_any(&self) -> &dyn std::any::Any;
 }
 
+/// A file change prepared against the version shown on its approval card.
+#[async_trait]
+pub trait PreparedWrite: Send {
+    fn preview(&self) -> Option<String>;
+    fn error(&self) -> Option<String> { None }
+    async fn execute(self: Box<Self>) -> ToolOutput;
+}
+
 /// Unified diff of what a write/edit call would change, for the approval preview.
 pub trait WritePreview: Send + Sync {
     fn write_preview(&self, call: &ToolCall) -> Option<String>;
+
+    fn prepare(&self, _call: &ToolCall) -> Option<Box<dyn PreparedWrite>> {
+        None
+    }
 
     /// The error a write would certainly end in (an edit whose old_string is
     /// not in the file), so nobody is asked to approve it first.
@@ -445,6 +459,7 @@ impl AgentLoop {
     ) -> Result<(SharedHistory, DoneReason), LoopError> {
         let mut history = GrowingHistory::new(shared);
         let specs = tools.specs();
+        let token_model = llm.token_model();
         let known_tools: HashSet<String> = specs.iter().map(|s| s.name.clone()).collect();
         let schemas: std::collections::HashMap<&str, serde_json::Value> =
             specs.iter().filter_map(|s| serde_json::from_str(&s.parameters_json).ok().map(|v| (s.name.as_str(), v))).collect();
@@ -464,6 +479,7 @@ impl AgentLoop {
         // What the last request said the prompt was, and the step before which
         // compaction may be asked again.
         let mut last_prompt_tokens: Option<usize> = None;
+        let mut last_prompt_baseline: Option<usize> = None;
         let mut compact_not_before: u32 = 0;
         // A stalled scratchpad reply and the nudge answering it: sent with the next
         // request only, and stored only if the answer is bound to them.
@@ -483,6 +499,16 @@ impl AgentLoop {
         // and calls another tool is stopped at the very next boundary.
         let mut grace: u32 = 0;
         loop {
+            if self.cancel.load(Ordering::Relaxed) {
+                held_answer_back(&mut transient, &mut history);
+                events(LoopEvent::Done(DoneReason::Cancelled));
+                return Ok((history.into_shared(), DoneReason::Cancelled));
+            }
+            if let Some(reason) = self.budget_spent(tokens_used, output_tokens, started) {
+                held_answer_back(&mut transient, &mut history);
+                events(LoopEvent::Done(reason));
+                return Ok((history.into_shared(), reason));
+            }
             if let Some(limit) = self.config.max_steps {
                 // Saturating: a caller may legitimately set `u32::MAX` as "no
                 // limit", and `limit + grace` would wrap to 0 and stop the run
@@ -535,11 +561,15 @@ impl AgentLoop {
             // between prompts. Not before the first request: a turn that has not
             // asked anything has nothing of its own to shorten.
             if let Some(compactor) = self.compactor.as_ref().filter(|_| step > 1 && step >= compact_not_before) {
-                if compactor.will_compact(&history, last_prompt_tokens) {
+                let estimated = estimate_request_tokens(&token_model, &history, &specs);
+                let prompt_tokens = last_prompt_tokens.map(|seen| {
+                    seen.saturating_add(estimated.saturating_sub(last_prompt_baseline.unwrap_or(estimated)))
+                });
+                if compactor.will_compact(&history, prompt_tokens) {
                     events(LoopEvent::CompactionStarted);
                 }
                 let done = tokio::select! {
-                    done = compactor.compact(&mut history, last_prompt_tokens) => done,
+                    done = compactor.compact(&mut history, prompt_tokens) => done,
                     _ = wait_cancel(&self.cancel) => {
                         held_answer_back(&mut transient, &mut history);
                         events(LoopEvent::Done(DoneReason::Cancelled));
@@ -558,7 +588,6 @@ impl AgentLoop {
                         // The UI reads this handle when it resets the context gauge.
                         events(LoopEvent::Compacted { saved });
                         // The old figure describes a history that is gone.
-                        last_prompt_tokens = None;
                         // A reminder that was waiting for the next request died
                         // with the clear below, and the counter already spent
                         // it. The turn still owes the model its one reminder.
@@ -586,6 +615,14 @@ impl AgentLoop {
                 assembled = history.iter().chain(&transient).cloned().collect();
                 &assembled
             };
+            let estimated_prompt = estimate_request_tokens(&token_model, request, &specs);
+            // A continuation writes the rest of an answer, not a new analysis.
+            // Off resolves to the lowest supported preset when disabling is not
+            // possible; a manually chosen effort returns on the next normal step.
+            if continuing {
+                turn_opts.thinking = flashagent_llm::ThinkingEffort::Off;
+                turn_opts.custom_effort = None;
+            }
             let opened = tokio::select! {
                 res = llm.turn_with_options(request, &specs, &turn_opts) => res,
                 _ = wait_cancel(&self.cancel) => {
@@ -604,6 +641,8 @@ impl AgentLoop {
             turn_opts = self.config.base_turn_options.clone();
             let mut assistant_text = String::new();
             let mut assistant_reasoning = String::new();
+            let mut raw_text = String::new();
+            let mut request_usage: Option<flashagent_llm::Usage> = None;
             let mut replay: Option<serde_json::Value> = None;
             // Kept by the server's index, which is only a label: a huge one must not
             // make room for every number below it.
@@ -668,6 +707,7 @@ impl AgentLoop {
                 };
                 match item {
                     LlmEvent::TextDelta(t) => {
+                        raw_text.push_str(&t);
                         let t = match held.as_mut() {
                             Some(buf) => {
                                 buf.push_str(&t);
@@ -689,7 +729,7 @@ impl AgentLoop {
                     }
                     LlmEvent::ReasoningDelta(t) => {
                         assistant_reasoning.push_str(&t);
-                        events(LoopEvent::ReasoningDelta(t));
+                        if !continuing { events(LoopEvent::ReasoningDelta(t)); }
                         if reasoning_watch.is_looping(&assistant_reasoning) {
                             clean_repetition_loop(&mut assistant_reasoning);
                             break;
@@ -710,13 +750,7 @@ impl AgentLoop {
                         call.args_json.push_str(&args_delta);
                     }
                     LlmEvent::Usage(u) => {
-                        let (charged, completion, prompt) = usage_counts(u.prompt, u.completion);
-                        tokens_used += charged;
-                        output_tokens += completion;
-                        if let Some(prompt) = prompt {
-                            last_prompt_tokens = Some(prompt);
-                        }
-                        events(LoopEvent::Usage(u));
+                        merge_request_usage(&mut request_usage, u);
                     }
                     LlmEvent::Replay(state) => replay = Some(state),
                     LlmEvent::Done(reason) => {
@@ -725,6 +759,22 @@ impl AgentLoop {
                     }
                 }
             }
+            let raw_output = raw_text + &assistant_reasoning;
+            let estimated_output = flashagent_llm::count_tokens(&token_model, &raw_output).saturating_add(
+                indexed_calls.iter().fold(0usize, |sum, (_, call)| {
+                    sum.saturating_add(flashagent_llm::count_tokens(&token_model, &call.name))
+                        .saturating_add(flashagent_llm::count_tokens(&token_model, &call.args_json))
+                }),
+            );
+            let accounted_prompt = request_usage.and_then(|u| u.prompt).filter(|n| *n >= 0)
+                .unwrap_or_else(|| i64::try_from(estimated_prompt).unwrap_or(i64::MAX));
+            let accounted_output = request_usage.and_then(|u| u.completion).filter(|n| *n >= 0)
+                .unwrap_or_else(|| i64::try_from(estimated_output).unwrap_or(i64::MAX));
+            tokens_used = tokens_used.saturating_add(accounted_prompt).saturating_add(accounted_output);
+            output_tokens = output_tokens.saturating_add(accounted_output);
+            last_prompt_tokens = usize::try_from(accounted_prompt).ok();
+            last_prompt_baseline = Some(estimated_prompt);
+            if let Some(usage) = request_usage { events(LoopEvent::Usage(usage)); }
             drain_held(&mut held, &prefix, &known_tools, &mut scanner, &mut assistant_text, &mut text_calls, &mut events);
             for ev in scanner.finish() {
                 absorb_scanned(ev, &known_tools, &mut assistant_text, &mut text_calls, &mut events);
@@ -1320,7 +1370,7 @@ fn announces_a_tool_call(text: &str) -> bool {
 const MAX_CONTINUATIONS: usize = 3;
 
 /// Never stored, like the stall nudge.
-const CONTINUE_NUDGE: &str = "Your previous reply was cut off by the output length limit. Continue it from exactly where it stopped. Do not repeat anything already written, do not start over, and do not mention the interruption.";
+const CONTINUE_NUDGE: &str = "Your previous reply was cut off by the output length limit. Continue the answer directly from exactly where it stopped, without another reasoning section. Do not repeat anything already written, do not start over, and do not mention the interruption.";
 
 /// Long enough to tell whether the model began by repeating its last words.
 const CONTINUATION_HOLDBACK: usize = 80;
@@ -1594,13 +1644,37 @@ fn extract_draft_from_steps(text: &str) -> Option<String> {
     None
 }
 
-/// What a usage frame contributes to the turn and to the prompt estimate. A
-/// gateway that reports a negative count must not become a prompt larger than
-/// any window: read as `usize`, -1 asked for compaction on every step.
+fn merge_request_usage(current: &mut Option<flashagent_llm::Usage>, mut snapshot: flashagent_llm::Usage) {
+    snapshot.prompt = snapshot.prompt.filter(|n| *n >= 0);
+    snapshot.completion = snapshot.completion.filter(|n| *n >= 0);
+    snapshot.cached = snapshot.cached.filter(|n| *n >= 0);
+    current.get_or_insert_with(Default::default).merge_latest(snapshot);
+}
+
+fn estimate_request_tokens(model: &str, messages: &[ChatMessage], tools: &[ToolSpec]) -> usize {
+    let messages = messages.iter().fold(0usize, |sum, message| {
+        let mut count = flashagent_llm::count_tokens(model, &message.content).saturating_add(4);
+        if let Some(reasoning) = &message.reasoning {
+            count = count.saturating_add(flashagent_llm::count_tokens(model, reasoning));
+        }
+        for call in &message.tool_calls {
+            count = count.saturating_add(flashagent_llm::count_tokens(model, &call.name))
+                .saturating_add(flashagent_llm::count_tokens(model, &call.args_json));
+        }
+        sum.saturating_add(count)
+    });
+    tools.iter().fold(messages, |sum, tool| {
+        sum.saturating_add(flashagent_llm::count_tokens(model, &tool.name))
+            .saturating_add(flashagent_llm::count_tokens(model, &tool.description))
+            .saturating_add(flashagent_llm::count_tokens(model, &tool.parameters_json))
+    })
+}
+
+#[cfg(test)]
 fn usage_counts(prompt: Option<i64>, completion: Option<i64>) -> (i64, i64, Option<usize>) {
     let prompt = prompt.filter(|p| *p > 0);
     let completion = completion.unwrap_or(0).max(0);
-    (prompt.unwrap_or(0) + completion, completion, prompt.map(|p| p as usize))
+    (prompt.unwrap_or(0).saturating_add(completion), completion, prompt.and_then(|p| usize::try_from(p).ok()))
 }
 
 /// A call whose arguments were still arriving when the stream ended is dropped
@@ -3324,6 +3398,79 @@ mod tests {
             }
         });
         (history, done, shown)
+    }
+
+    #[test]
+    fn automatic_continuations_disable_thinking_and_hide_unavoidable_reasoning() {
+        struct Continued {
+            turns: std::sync::Mutex<Vec<MockTurn>>,
+            options: std::sync::Mutex<Vec<flashagent_llm::TurnOptions>>,
+        }
+        #[async_trait]
+        impl LlmSource for Continued {
+            async fn turn(&self, _: &[ChatMessage], _: &[ToolSpec]) -> Result<BoxStream<'static, Result<LlmEvent, LlmError>>, LlmError> {
+                let turn = self.turns.lock().unwrap().remove(0);
+                Ok(Box::pin(futures::stream::iter(turn.events)))
+            }
+            async fn turn_with_options(&self, messages: &[ChatMessage], tools: &[ToolSpec], options: &flashagent_llm::TurnOptions) -> Result<BoxStream<'static, Result<LlmEvent, LlmError>>, LlmError> {
+                self.options.lock().unwrap().push(options.clone());
+                self.turn(messages, tools).await
+            }
+        }
+        let llm = Continued {
+            turns: std::sync::Mutex::new(vec![
+                cut_turn("The answer begins"),
+                MockTurn { events: vec![
+                    Ok(LlmEvent::ReasoningDelta("Unavoidable continuation thought.".into())),
+                    Ok(LlmEvent::TextDelta(" and ends here.".into())),
+                    Ok(LlmEvent::Usage(flashagent_llm::Usage { completion: Some(50), ..Default::default() })),
+                    Ok(LlmEvent::Done(FinishReason::Stop)),
+                ] },
+            ]),
+            options: std::sync::Mutex::new(Vec::new()),
+        };
+        let config = LoopConfig {
+            base_turn_options: flashagent_llm::TurnOptions { thinking: flashagent_llm::ThinkingEffort::High, custom_effort: Some("xhigh".into()), ..Default::default() },
+            ..Default::default()
+        };
+        let l = AgentLoop::new(config, Arc::new(AtomicBool::new(false)));
+        let mut events = Vec::new();
+        let (history, done) = run_loop(&l, &llm, &MockTools::new(), |event| events.push(event));
+        assert_eq!(done, DoneReason::Completed);
+        let options = llm.options.lock().unwrap();
+        assert_eq!(options[0].custom_effort.as_deref(), Some("xhigh"));
+        assert_eq!(options[1].thinking, flashagent_llm::ThinkingEffort::Off);
+        assert_eq!(options[1].custom_effort, None);
+        assert!(!events.iter().any(|event| matches!(event, LoopEvent::ReasoningDelta(_))));
+        assert!(events.iter().any(|event| matches!(event, LoopEvent::Usage(u) if u.completion == Some(50))));
+        assert_eq!(history[1].content, "The answer begins and ends here.");
+        assert_eq!(history[1].reasoning.as_deref(), Some("Unavoidable continuation thought."));
+    }
+
+    #[test]
+    fn a_spent_output_budget_does_not_start_a_text_continuation() {
+        let llm = MockLlm { turns: std::sync::Mutex::new(vec![
+            MockTurn { events: vec![
+                Ok(LlmEvent::TextDelta("The partial answer.".into())),
+                Ok(LlmEvent::Usage(flashagent_llm::Usage { completion: Some(100), ..Default::default() })),
+                Ok(LlmEvent::Done(FinishReason::Length)),
+            ] },
+            text_turn("Never requested."),
+        ]) };
+        let l = AgentLoop::new(LoopConfig { max_output_tokens: Some(50), ..Default::default() }, Arc::new(AtomicBool::new(false)));
+        let (history, done) = run_loop(&l, &llm, &MockTools::new(), |_| {});
+        assert_eq!(done, DoneReason::TokenBudget);
+        assert_eq!(llm.turns.lock().unwrap().len(), 1);
+        assert_eq!(history.last().unwrap().content, "The partial answer.");
+    }
+
+    #[test]
+    fn missing_usage_still_spends_the_output_budget() {
+        let llm = MockLlm { turns: std::sync::Mutex::new(vec![tool_turn("shell", "a"), text_turn("Never requested.")]) };
+        let l = AgentLoop::new(LoopConfig { max_output_tokens: Some(1), ..Default::default() }, Arc::new(AtomicBool::new(false)));
+        let (_, done) = run_loop(&l, &llm, &MockTools::new(), |_| {});
+        assert_eq!(done, DoneReason::TokenBudget);
+        assert_eq!(llm.turns.lock().unwrap().len(), 1);
     }
 
     #[test]

@@ -859,7 +859,8 @@ fn a_tool_turn_runs_the_tool_and_hands_its_result_back_to_the_model() {
 
     term.type_text("what do the notes say?");
     term.send(ENTER);
-    term.wait_for("Read the notes file", WAIT);
+    // The collapsed row names the exact target it read, not the model's note.
+    term.wait_for("Read notes.txt", WAIT);
     term.wait_for("The notes say the code is 4217.", WAIT);
 
     let turns = server.turns();
@@ -1623,14 +1624,17 @@ fn what_a_running_tool_is_doing_is_said_once() {
 
     term.type_text("check the marker");
     term.send(ENTER);
-    term.wait_for(header, WAIT);
+    term.wait_for(&format!("Running {slow}"), WAIT);
 
     let screen = term.screen();
     assert_eq!(
-        screen.matches(header).count(),
+        screen.matches(slow).count(),
         1,
-        "the header is on screen twice:\n{screen}"
+        "the running command is on screen twice:\n{screen}"
     );
+    // The compact row shows what the call does, not the note the model wrote
+    // for the user: the note has its own place when the card is opened.
+    assert!(!screen.contains(header), "the note is quoted in the compact row:\n{screen}");
 }
 
 /// Shown only while a turn runs.
@@ -2113,17 +2117,17 @@ fn compaction_refreshes_the_gauge_before_another_prompt() {
     term.wait_for("First answer.", WAIT);
     term.wait_gone(RUNNING_HINT, WAIT);
     ask(&term, "the current question", "Second answer.");
-    term.wait_for("26K/32K", WAIT);
+    term.wait_for("26K/33K", WAIT);
 
     term.type_text("/compact");
     term.send(ENTER);
     term.wait_for("Session compacted", WAIT);
     // The footer and gauge can arrive in separate PTY reads of the same frame.
-    term.wait_gone("26K/32K", Duration::from_secs(2));
+    term.wait_gone("26K/33K", Duration::from_secs(2));
     let screen = term.wait_for("Session compacted", WAIT);
-    assert!(!screen.contains("26K/32K"), "the old request still owns the gauge after compaction, before any new input:\n{screen}");
+    assert!(!screen.contains("26K/33K"), "the old request still owns the gauge after compaction, before any new input:\n{screen}");
     assert!(!screen.contains("Context compacted:"), "the summary card has a second, yellow success message:\n{screen}");
-    assert!(screen.contains("/32K"), "the context gauge disappeared:\n{screen}");
+    assert!(screen.contains("/33K"), "the context gauge disappeared:\n{screen}");
     assert_eq!(server.turns().len(), 2, "the gauge must refresh without another model turn");
 }
 
@@ -2145,12 +2149,12 @@ fn automatic_compaction_refreshes_the_gauge_and_keeps_the_archive() {
     paste(&term, "the current question");
     term.send(ENTER);
     term.wait_for("Writing a summary", WAIT);
-    term.wait_for("26K/32K", WAIT);
+    term.wait_for("26K/33K", WAIT);
     term.wait_for("conversation… 1.", WAIT);
     term.wait_for("Session compacted", WAIT);
-    term.wait_gone("26K/32K", Duration::from_secs(2));
+    term.wait_gone("26K/33K", Duration::from_secs(2));
     let screen = term.wait_for("Session compacted", WAIT);
-    assert!(!screen.contains("26K/32K"), "automatic compaction kept the old server count:\n{screen}");
+    assert!(!screen.contains("26K/33K"), "automatic compaction kept the old server count:\n{screen}");
     assert!(!screen.contains("Context compacted:"), "automatic compaction has a duplicate status:\n{screen}");
     let sessions = home.sessions();
     let saved: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(sessions.first().expect("the session was saved")).unwrap()).unwrap();
@@ -2167,13 +2171,13 @@ fn failed_compaction_keeps_the_previous_gauge() {
     let home = Home::new();
     let term = ready_with(&home, &server, serde_json::json!({ "auto_compact_context": false, "context_warn_threshold": 95 }));
     ask(&term, "the question", "Only answer.");
-    term.wait_for("26K/32K", WAIT);
+    term.wait_for("26K/33K", WAIT);
     let session = home.sessions().into_iter().next().expect("the session was saved");
     let before: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&session).unwrap()).unwrap();
     term.type_text("/compact");
     term.send(ENTER);
     let screen = term.wait_for("Session compaction failed", WAIT);
-    assert!(screen.contains("26K/32K"), "a failed summary must not lower the unchanged window:\n{screen}");
+    assert!(screen.contains("26K/33K"), "a failed summary must not lower the unchanged window:\n{screen}");
     let after: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&session).unwrap()).unwrap();
     assert_eq!(after["messages"], before["messages"], "an empty summary must not replace the conversation");
     assert_eq!(after.get("archive"), before.get("archive"));

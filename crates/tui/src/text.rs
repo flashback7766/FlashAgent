@@ -115,8 +115,20 @@ pub fn terminal_safe(text: &str) -> String {
             // Colour and weight only: `ESC[>4;2m` also ends in `m` and changes
             // how the terminal reports keys.
             let sgr = piece.strip_prefix("\x1b[").and_then(|p| p.strip_suffix('m'));
-            if sgr.is_some_and(|params| params.chars().all(|c| c.is_ascii_digit() || c == ';' || c == ':')) {
-                out.push_str(piece);
+            if let Some(params) = sgr.filter(|params| params.chars().all(|c| c.is_ascii_digit() || c == ';' || c == ':')) {
+                let codes: Vec<&str> = params.split(';').collect();
+                let mut i = 0;
+                let mut safe = true;
+                while i < codes.len() {
+                    let code = codes[i].split(':').next().unwrap_or("").parse::<u16>().unwrap_or(0);
+                    if matches!(code, 5 | 6 | 8) { safe = false; break; }
+                    // Extended colour values are channels, not SGR attributes.
+                    if matches!(code, 38 | 48 | 58) && !codes[i].contains(':') {
+                        i += match codes.get(i + 1).copied() { Some("2") => 4, Some("5") => 2, _ => 0 };
+                    }
+                    i += 1;
+                }
+                if safe { out.push_str(piece); }
             }
             continue;
         }

@@ -55,7 +55,7 @@ impl App {
             UiEvent::ServerSilent(url) => self.server_silent = self.provider_switch.is_none() && url == cx.source.0.base_url(),
             UiEvent::CompactionDelta(delta) => self.chat.append_compaction_delta(&delta),
             UiEvent::CompactionReset => self.chat.restart_compaction_card(),
-            UiEvent::Compacted { session, history, saved, card } => self.on_compacted(cx, &session, history, saved, card),
+            UiEvent::Compacted { session, history, card } => self.on_compacted(cx, &session, history, card),
             UiEvent::Loop { turn_id, event } => self.on_loop_event(cx, turn_id, &event),
             UiEvent::Finished { turn_id, result } => return self.finish_turn(cx, turn_id, result).await,
             UiEvent::Resize(cols, rows) => {
@@ -278,6 +278,7 @@ impl App {
             handle.abort();
         }
         self.running = false;
+        self.restore_unsent_steering();
         self.turn_started = None;
         self.cancel_requested = None;
         self.aborted_turn = Some(self.turn_counter);
@@ -336,7 +337,6 @@ impl App {
         cx: &LoopCtx<'_>,
         session: &str,
         history: Vec<ChatMessage>,
-        _saved: Option<usize>,
         card: Option<CompactionResult>,
     ) {
         // The compaction task outlives the screen it was started from: a result
@@ -366,6 +366,7 @@ impl App {
         }
         self.history = history;
         self.compacting = false;
+        self.compaction_cancel = None;
         match card {
             Some(result) => self.record_compaction(result),
             None => self.chat.fail_compaction_card(flashagent_tui::i18n::tr("the conversation is unchanged")),
@@ -396,7 +397,7 @@ impl App {
         self.chat.finish_compaction_card(&result);
         self.archive.extend(result.archive);
         self.chat.forget_counted_context();
-        self.context_usage.server_seen = None;
+        self.context_usage.invalidate_server();
         self.renderer.request_reprint();
     }
 
@@ -439,7 +440,7 @@ impl App {
         // A cloud listing names no active model, but it does name the one in use.
         let resolved = Self::resolve_discovered_model(&disc, &self.current_model);
         if let Some(active) = resolved {
-            let new_ctx_len = active.prompt_budget().unwrap_or(131_072);
+            let new_ctx_len = active.prompt_budget().or(self.config.active_profile().context_window).unwrap_or(0);
             let new_ctx_disp = active.context_display();
             let model_changed = active.id != self.current_model;
             let ctx_changed = self.context_usage.total_capacity != new_ctx_len || self.current_context != new_ctx_disp;
@@ -449,7 +450,7 @@ impl App {
                 let old_ctx_len = self.context_usage.total_capacity;
                 self.current_model = active.id.clone();
                 self.current_context = new_ctx_disp;
-                self.context_usage.total_capacity = new_ctx_len.max(1024);
+                self.context_usage.total_capacity = new_ctx_len;
                 cx.tools_arc.set_prompt_tokens(self.prompt_tokens);
                 cx.tools_arc.set_context_window(Some(new_ctx_len));
                 cx.source.set_model(&self.current_model);
@@ -629,6 +630,7 @@ impl App {
                 // answer of the turn before, which is what made a regenerate
                 // measure its text against the answer it replaced.
                 self.token_tracker.on_request_start();
+                self.context_request_tokens = self.context_usage.local_used();
                 if *step > 1 {
                     self.turn_phase = TurnPhase::AfterTool;
                 }
@@ -641,6 +643,7 @@ impl App {
                 // chat template. The bar stands on it until the turn ends.
                 if let Some(p) = u.prompt.filter(|p| *p > 0) {
                     self.context_usage.server_seen = Some(p as usize);
+                    self.context_usage.server_baseline = Some(self.context_request_tokens);
                 }
                 // Only what the server priced. A local backend reports nothing,
                 // and the ledger stays silent rather than inventing a bill.
@@ -916,7 +919,9 @@ impl App {
             if let Some(row) = self.renderer.chat_row_at(m.row) {
                 // A thought or tool call lights its row; a welcome-card
                 // button lights its own cells.
-                if self.chat.owner_at(row).is_some() || self.chat.welcome_button_at(row, m.column as usize).is_some() {
+                if self.chat.owner_at(row).is_some() || self.chat.welcome_button_at(row, m.column as usize).is_some()
+                    || self.chat.tool_action_at(row, m.column as usize).is_some()
+                {
                     return Some(HoverTarget::Chat(m.row, m.column));
                 }
             }
@@ -972,7 +977,7 @@ impl App {
                 if self.overlay.is_some() {
                     // The card's own ✕ closes what Esc closes.
                     if self.renderer.overlay_close_hit(m.row, m.column) {
-                        self.dismiss_overlay();
+                        self.handle_overlay_key(cx, KeyCode::Esc, KeyModifiers::NONE).await;
                         return;
                     }
                     // The row answers for a moment even where nothing else
@@ -1035,6 +1040,27 @@ impl App {
             }
             self.renderer.request_reprint();
             return;
+        }
+        if let Some(row) = self.renderer.chat_row_at(m.row) {
+            if let Some(zone) = self.chat.tool_action_zone_at(row, m.column as usize) {
+                self.selection_anchor = None;
+                self.selection_head = None;
+                self.zone_flash = Some((m.row, zone.from, zone.to, flashagent_tui::anim::now_ms()));
+                let before = self.count_chat_rows();
+                match zone.action {
+                    flashagent_tui::ToolAction::Close(i) => { self.chat.close_tool_card(i); }
+                    flashagent_tui::ToolAction::Arguments(i) => { self.chat.toggle_tool_arguments(i); }
+                    flashagent_tui::ToolAction::Copy(i) => {
+                        if let Some(text) = self.chat.tool_copy_text(i) {
+                            let copied = flashagent_tui::clipboard::set_clipboard_text(&text);
+                            self.copy_toast = Some((tr(if copied { "Copied tool output" } else { "Clipboard copy failed" }).to_string(), std::time::Instant::now()));
+                        }
+                    }
+                }
+                self.settle_block(before);
+                self.renderer.request_reprint();
+                return;
+            }
         }
         // What the scrollbar, a subagent row and the card left behind is the
         // transcript's: a selection starts here and nowhere else, so a drag

@@ -1,30 +1,9 @@
-//! How many tokens a text is, for the model it is sent to.
+//! Token estimates for the model a request is sent to.
 //!
-//! One place, one rule. Everything that counts tokens (the budget for the
-//! tool schemas, the bar that says how full the window is, the trigger for
-//! compaction, the speed on the status line) goes through
-//! [`count_tokens`]. Before this there were three rules side by side: a
-//! character count divided by four for the conversation, the same for the
-//! compaction, and a real tokenizer for the budget. The bar and the budget
-//! could therefore be two different numbers for the same text, and for
-//! Russian they were: the character rule counts bytes, and a Russian letter
-//! is two of them.
-//!
-//! The counter for a model is the closest thing to that model's own
-//! tokenizer that can be had without asking the owner to point at a file:
-//!
-//! 1. The model's own table, for the models whose tokenizer ships with the
-//!    app: the OpenAI family. Exact.
-//! 2. The generic table, `o200k_base`, for every other model. It is the
-//!    closest of the tables that ship, and much closer than `cl100k_base`
-//!    was: measured against a Qwen tokenizer over 39 real texts, `cl100k`
-//!    was out by 12% on average and by 80% at worst, `o200k` by 6% and 30%.
-//! 3. What the model was measured to be, on top of that table. Every server
-//!    says how many tokens it wrote, and the app knows the text it wrote, so
-//!    the app can measure the model and keep the measurement. The
-//!    measurement is kept per model and per kind of text (words in the
-//!    Latin script, words in another script, and the punctuation between
-//!    them) because the same sentence costs a third more in Russian.
+//! The UI, schema budgets and compaction use [`count_tokens`]. Known OpenAI
+//! families use their matching table; other models use `o200k_base`, corrected
+//! by samples whose visible text has a matching server count. Chat framing,
+//! images and opaque reasoning need separate accounting.
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -48,40 +27,12 @@ fn get_o200k() -> Option<&'static CoreBPE> {
     O200K.get_or_init(|| tiktoken_rs::o200k_base().ok()).as_ref()
 }
 
-/// Which table a model is counted with.
-///
-/// The OpenAI family has its own tables and they are exact, so they are
-/// used as they are. Every other model gets `o200k_base`: it is the table
-/// that was measured to be the closest of the ones that ship.
+/// Older GPT-3.5/GPT-4 models use cl100k; newer and unknown models use o200k.
 fn table_for(model: &str) -> Option<&'static CoreBPE> {
     let lower = model.to_ascii_lowercase();
-    let is_openai = lower.contains("gpt-")
-        || lower.contains("chatgpt")
-        || lower.contains("o1-")
-        || lower.contains("o1_")
-        || lower.contains("o3-")
-        || lower.contains("o3_")
-        || lower.contains("o4-mini")
-        || lower.starts_with("o1")
-        || lower.starts_with("o3")
-        || lower.starts_with("o4");
-    if is_openai {
-        // The newer OpenAI models use o200k, the older ones cl100k.
-        let newer = lower.contains("gpt-4o")
-            || lower.contains("gpt-4.1")
-            || lower.contains("gpt-5")
-            || lower.contains("gpt-4.1-")
-            || lower.starts_with("o1")
-            || lower.starts_with("o3")
-            || lower.starts_with("o4");
-        if newer {
-            get_o200k()
-        } else {
-            get_cl100k()
-        }
-    } else {
-        get_o200k()
-    }
+    let older = lower.contains("gpt-3.5")
+        || lower.contains("gpt-4") && !lower.contains("gpt-4o") && !lower.contains("gpt-4.1");
+    if older { get_cl100k() } else { get_o200k() }
 }
 
 /// The count a table gives, without the model's own measurement on top.
@@ -95,40 +46,28 @@ fn table_count(model: &str, text: &str) -> usize {
     }
 }
 
-/// Counts of texts that were counted already.
-///
-/// The bar that says how full the window is is redrawn on every token of the
-/// answer, and it counts the whole conversation each time. A tokenizer is
-/// fast, but a hundred kilobytes of conversation is a couple of milliseconds,
-/// and a few dozen tokens a second is a tenth of the machine's time. The
-/// messages of a conversation do not change once they are written, so their
-/// counts are kept.
-struct Cache {
-    /// The model the counts belong to: a count is the model's, not the text's.
-    model: String,
-    entries: HashMap<u64, usize>,
+/// Counts belong to a model and a calibration revision. Updating a measurement
+/// and invalidating its cached counts are one operation.
+#[derive(Default)]
+struct Counts {
+    measurements: HashMap<String, Measurement>,
+    revision: u64,
+    entries: HashMap<(String, u64), usize>,
 }
 
-impl Cache {
+impl Counts {
     const LIMIT: usize = 8192;
 
-    fn get(&self, key: u64) -> Option<usize> {
-        self.entries.get(&key).copied()
-    }
-
-    fn put(&mut self, key: u64, tokens: usize) {
-        if self.entries.len() >= Self::LIMIT {
-            // The cache is a convenience, not a record: dropping it costs a
-            // recount and nothing else.
-            self.entries.clear();
-        }
-        self.entries.insert(key, tokens);
+    fn set(&mut self, model: &str, measurement: Measurement) {
+        self.measurements.insert(model.to_string(), measurement);
+        self.revision = self.revision.wrapping_add(1);
+        self.entries.retain(|(name, _), _| name != model);
     }
 }
 
-fn cache() -> &'static RwLock<Cache> {
-    static CACHE: OnceLock<RwLock<Cache>> = OnceLock::new();
-    CACHE.get_or_init(|| RwLock::new(Cache { model: String::new(), entries: HashMap::new() }))
+fn counts() -> &'static RwLock<Counts> {
+    static COUNTS: OnceLock<RwLock<Counts>> = OnceLock::new();
+    COUNTS.get_or_init(|| RwLock::new(Counts::default()))
 }
 
 /// A short hash of the model and the text, to tell one text from another
@@ -163,12 +102,6 @@ impl Default for Measurement {
     fn default() -> Self {
         Measurement { ascii: 1.0, other: 1.0, punct: 1.0, samples: 0 }
     }
-}
-
-/// Every model that has been measured, by name.
-fn registry() -> &'static RwLock<HashMap<String, Measurement>> {
-    static REG: OnceLock<RwLock<HashMap<String, Measurement>>> = OnceLock::new();
-    REG.get_or_init(|| RwLock::new(HashMap::new()))
 }
 
 /// What a text is made of, as a tokenizer sees it.
@@ -215,51 +148,59 @@ pub fn count_tokens(model: &str, text: &str) -> usize {
     if text.is_empty() {
         return 0;
     }
-    let key = key_of(model, text);
-    let cached = cache().read().ok().and_then(|c| if c.model == model { c.get(key) } else { None });
-    if let Some(tokens) = cached {
-        return tokens;
-    }
-    let table = table_count(model, text);
-    let tokens = match measurement_of(model) {
-        None => table,
-        Some(m) => {
-            let (ascii, other, punct) = classes(text);
-            let total = (ascii + other + punct) as f64;
-            if total <= 0.0 {
-                table
-            } else {
-                let factor =
-                    (ascii as f64 * m.ascii + other as f64 * m.other + punct as f64 * m.punct) / total;
-                let scaled = (table as f64 * factor).round();
-                if scaled < 0.0 { 0 } else { scaled as usize }
+    let key = (model.to_string(), key_of(model, text));
+    let (measurement, revision) = match counts().read() {
+        Ok(state) => {
+            if let Some(&tokens) = state.entries.get(&key) {
+                return tokens;
             }
+            (state.measurements.get(model).copied(), state.revision)
+        }
+        Err(_) => (None, 0),
+    };
+    let table = table_count(model, text);
+    let (ascii, other, punct) = classes(text);
+    let scaled = |measurement: Option<Measurement>| {
+        let total = (ascii + other + punct) as f64;
+        match measurement.filter(|_| total > 0.0) {
+            Some(m) => {
+                let factor = (ascii as f64 * m.ascii + other as f64 * m.other + punct as f64 * m.punct) / total;
+                (table as f64 * factor).round().max(0.0) as usize
+            }
+            None => table,
         }
     };
-    if let Ok(mut c) = cache().write() {
-        if c.model != model {
-            c.model = model.to_string();
-            c.entries.clear();
+    let mut tokens = scaled(measurement);
+    if let Ok(mut state) = counts().write() {
+        // A sample may arrive while the table is counted. Reapply its factor
+        // before publishing, rather than repopulating an invalidated cache.
+        if state.revision != revision {
+            tokens = scaled(state.measurements.get(model).copied());
         }
-        c.put(key, tokens);
+        if state.entries.len() >= Counts::LIMIT {
+            state.entries.clear();
+        }
+        state.entries.insert(key, tokens);
     }
     tokens
 }
 
 /// The measurement kept for a model, if there is one.
 pub fn measurement_of(model: &str) -> Option<Measurement> {
-    registry().read().ok().and_then(|r| r.get(model).copied())
+    counts().read().ok().and_then(|state| state.measurements.get(model).copied())
 }
 
 /// Every measurement, for saving.
 pub fn measurements() -> Vec<(String, Measurement)> {
-    registry().read().map(|r| r.iter().map(|(k, v)| (k.clone(), *v)).collect()).unwrap_or_default()
+    counts().read().map(|state| state.measurements.iter().map(|(k, v)| (k.clone(), *v)).collect()).unwrap_or_default()
 }
 
 /// Puts a measurement in, as it was saved.
 pub fn set_measurement(model: &str, m: Measurement) {
-    if let Ok(mut r) = registry().write() {
-        r.insert(model.to_string(), m);
+    if credible(m.ascii) && credible(m.other) && credible(m.punct) {
+        if let Ok(mut state) = counts().write() {
+            state.set(model, m);
+        }
     }
 }
 
@@ -323,7 +264,8 @@ pub fn note_measured(model: &str, text: &str, tokens: usize) {
     if total <= 0.0 {
         return;
     }
-    let mut m = measurement_of(model).unwrap_or_default();
+    let Ok(mut state) = counts().write() else { return };
+    let mut m = state.measurements.get(model).copied().unwrap_or_default();
     let current = (ascii as f64 * m.ascii + other as f64 * m.other + punct as f64 * m.punct) / total;
     let diff = observed - current;
     // Each kind of text moves by how much of the text it is: a Russian
@@ -338,13 +280,8 @@ pub fn note_measured(model: &str, text: &str, tokens: usize) {
     m.ascii = m.ascii.clamp(OBSERVED_FLOOR, OBSERVED_CEILING);
     m.other = m.other.clamp(OBSERVED_FLOOR, OBSERVED_CEILING);
     m.punct = m.punct.clamp(OBSERVED_FLOOR, OBSERVED_CEILING);
-    m.samples += 1;
-    set_measurement(model, m);
-    // The counts that were kept were counted with the old measurement, and
-    // the measurement has just moved.
-    if let Ok(mut c) = cache().write() {
-        c.entries.clear();
-    }
+    m.samples = m.samples.saturating_add(1);
+    state.set(model, m);
 }
 
 /// Where the measurements are kept between runs, so a model that was measured
@@ -528,6 +465,30 @@ mod tests {
             err(after) < err(before),
             "the count moved away from the server's number: {before} -> {after}, wanted {real}"
         );
+    }
+
+    #[test]
+    fn replacing_a_measurement_invalidates_a_cached_count() {
+        let model = "calibration-replaced-for-test";
+        let text = "alpha beta gamma delta epsilon";
+        let before = count_tokens(model, text);
+        set_measurement(model, Measurement { ascii: 1.5, other: 1.5, punct: 1.5, samples: 1 });
+        assert_eq!(count_tokens(model, text), (before as f64 * 1.5).round() as usize);
+    }
+
+    #[test]
+    fn alternating_models_keep_each_others_cached_counts() {
+        let text = "a count shared by two models";
+        let a = count_tokens("cached-model-a", text);
+        count_tokens("cached-model-b", text);
+        let state = counts().read().unwrap();
+        assert_eq!(state.entries.get(&("cached-model-a".to_string(), key_of("cached-model-a", text))), Some(&a));
+    }
+
+    #[test]
+    fn newer_openai_families_do_not_fall_back_to_the_old_table() {
+        let text = "Привет, мир! Newer models use the newer table.";
+        assert_eq!(table_count("gpt-6.1-sol", text), table_count("gpt-4o", text));
     }
 
     #[test]

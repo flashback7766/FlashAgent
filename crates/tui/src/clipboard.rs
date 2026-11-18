@@ -1,19 +1,52 @@
-//! Clipboard via OSC 52, arboard, and OS tools (wl-clipboard, xclip, xsel,
-//! pbcopy/pbpaste).
+//! Clipboard via arboard, OS tools (wl-clipboard, xclip, xsel, pbcopy/pbpaste)
+//! and OSC 52.
 
+use std::io::IsTerminal as _;
 use std::io::Write as _;
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, Stdio};
+use std::sync::mpsc;
+use std::time::{Duration, Instant};
 
 pub use flashagent_core::base64_encode;
 
-pub fn set_clipboard_text(text: &str) -> bool {
-    // OSC 52 works in tmux, Kitty, Alacritty, WezTerm, Windows Terminal. The
-    // escape is fire-and-forget: a terminal that ignores it still took the
-    // write, and there is no answer to wait for. What can be known is whether
-    // anything was written at all, and the old `true` promised more than that.
-    let b64 = base64_encode(text.as_bytes());
-    let osc52 = write!(std::io::stdout(), "\x1b]52;c;{b64}\x07").is_ok() && std::io::stdout().flush().is_ok();
+/// How long a clipboard backend may take before the event loop stops waiting
+/// for it. Copying is normally instant; a backend that is not answering (an X11
+/// owner that never replies, a clipboard daemon that holds the selection) must
+/// not freeze the whole UI.
+const BACKEND_WAIT: Duration = Duration::from_millis(500);
 
+/// Runs `op` on a helper thread and gives up after `timeout`. `None` means the
+/// operation did not answer in time; the thread is left to finish on its own so
+/// a half-done write is not torn down underneath a backend.
+fn within<T: Send + 'static>(timeout: Duration, op: impl FnOnce() -> T + Send + 'static) -> Option<T> {
+    let (tx, rx) = mpsc::channel();
+    std::thread::Builder::new()
+        .name("clipboard".into())
+        .spawn(move || {
+            let _ = tx.send(op());
+        })
+        .ok()?;
+    rx.recv_timeout(timeout).ok()
+}
+
+/// Waits for a short-lived clipboard tool, without letting a process that never
+/// exits hold the caller. A non-zero exit is a failure, not a copy.
+fn wait_briefly(child: &mut Child) -> bool {
+    let deadline = Instant::now() + BACKEND_WAIT;
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => return status.success(),
+            Ok(None) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(5)),
+            _ => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return false;
+            }
+        }
+    }
+}
+
+fn set_via_backends(text: &str) -> bool {
     if let Ok(mut cb) = arboard::Clipboard::new() {
         if cb.set_text(text.to_string()).is_ok() {
             return true;
@@ -27,7 +60,7 @@ pub fn set_clipboard_text(text: &str) -> bool {
                 if let Some(mut stdin) = child.stdin.take() {
                     let _ = stdin.write_all(text.as_bytes());
                 }
-                if child.wait().is_ok() {
+                if wait_briefly(&mut child) {
                     return true;
                 }
             }
@@ -42,7 +75,7 @@ pub fn set_clipboard_text(text: &str) -> bool {
             if let Some(mut stdin) = child.stdin.take() {
                 let _ = stdin.write_all(text.as_bytes());
             }
-            if child.wait().is_ok() {
+            if wait_briefly(&mut child) {
                 return true;
             }
         }
@@ -56,7 +89,7 @@ pub fn set_clipboard_text(text: &str) -> bool {
             if let Some(mut stdin) = child.stdin.take() {
                 let _ = stdin.write_all(text.as_bytes());
             }
-            if child.wait().is_ok() {
+            if wait_briefly(&mut child) {
                 return true;
             }
         }
@@ -68,7 +101,7 @@ pub fn set_clipboard_text(text: &str) -> bool {
             if let Some(mut stdin) = child.stdin.take() {
                 let _ = stdin.write_all(text.as_bytes());
             }
-            if child.wait().is_ok() {
+            if wait_briefly(&mut child) {
                 return true;
             }
         }
@@ -80,16 +113,36 @@ pub fn set_clipboard_text(text: &str) -> bool {
             if let Some(mut stdin) = child.stdin.take() {
                 let _ = stdin.write_all(text.as_bytes());
             }
-            if child.wait().is_ok() {
+            if wait_briefly(&mut child) {
                 return true;
             }
         }
     }
 
-    osc52
+    false
 }
 
-pub fn get_clipboard_text() -> Option<String> {
+/// The OSC 52 escape, the only clipboard path that works without a display
+/// server or a helper tool. The escape is fire-and-forget: a terminal that
+/// ignores it still took the write, and there is no answer to wait for. What
+/// can be known is whether anything was written at all.
+fn write_osc52(text: &str) -> bool {
+    if !std::io::stdout().is_terminal() {
+        return false;
+    }
+    let b64 = base64_encode(text.as_bytes());
+    write!(std::io::stdout(), "\x1b]52;c;{b64}\x07").is_ok() && std::io::stdout().flush().is_ok()
+}
+
+pub fn set_clipboard_text(text: &str) -> bool {
+    let owned = text.to_string();
+    let copied = within(BACKEND_WAIT, move || set_via_backends(&owned)).unwrap_or(false);
+    // A backend that answered nothing gets the escape as a last try; the
+    // terminal is the one surface that cannot be left waiting.
+    copied || write_osc52(text)
+}
+
+fn read_via_backends() -> Option<String> {
     if let Ok(mut cb) = arboard::Clipboard::new() {
         if let Ok(s) = cb.get_text() {
             if !s.is_empty() {
@@ -171,6 +224,10 @@ pub fn get_clipboard_text() -> Option<String> {
     None
 }
 
+pub fn get_clipboard_text() -> Option<String> {
+    within(BACKEND_WAIT, read_via_backends).flatten()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -182,6 +239,36 @@ mod tests {
         assert_eq!(base64_encode(b"fo"), "Zm8=");
         assert_eq!(base64_encode(b"foo"), "Zm9v");
         assert_eq!(base64_encode(b"Hello, world!"), "SGVsbG8sIHdvcmxkIQ==");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_tool_that_exits_non_zero_is_not_a_successful_copy() {
+        let mut failed = Command::new("sh").arg("-c").arg("exit 3").spawn().unwrap();
+        assert!(!wait_briefly(&mut failed));
+        let mut worked = Command::new("sh").arg("-c").arg("exit 0").spawn().unwrap();
+        assert!(wait_briefly(&mut worked));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_tool_that_never_exits_is_killed_instead_of_holding_the_event_loop() {
+        let mut child = Command::new("sleep").arg("5").spawn().unwrap();
+        let started = Instant::now();
+        assert!(!wait_briefly(&mut child));
+        assert!(started.elapsed() < Duration::from_secs(2), "waited {:?}", started.elapsed());
+    }
+
+    #[test]
+    fn a_backend_that_does_not_answer_cannot_hold_the_caller() {
+        let started = Instant::now();
+        let slow = within(Duration::from_millis(50), || {
+            std::thread::sleep(Duration::from_millis(500));
+            true
+        });
+        assert_eq!(slow, None);
+        assert!(started.elapsed() < Duration::from_millis(400), "waited {:?}", started.elapsed());
+        assert_eq!(within(Duration::from_secs(1), || Some("text".to_string())), Some(Some("text".to_string())));
     }
 }
 
@@ -260,7 +347,15 @@ pub fn image_media_type(path: &std::path::Path) -> Option<&'static str> {
 
 /// Through the platform tools rather than a decoder, so the file arrives
 /// exactly as copied.
+/// A picture can be several megabytes moving through an X11 selection, so it
+/// gets more room than a one-line text copy, but not an unbounded wait.
+const IMAGE_WAIT: Duration = Duration::from_millis(1_500);
+
 pub fn get_clipboard_image() -> Option<ClipboardImage> {
+    within(IMAGE_WAIT, read_image_backend).flatten()
+}
+
+fn read_image_backend() -> Option<ClipboardImage> {
     #[cfg(target_os = "windows")]
     {
         // Windows has no clipboard tool that writes the picture to stdout;

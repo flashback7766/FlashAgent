@@ -136,6 +136,15 @@ fn est_tokens(model: &str, text: &str) -> usize {
     flashagent_llm::count_tokens(model, text) + 4
 }
 
+fn message_tokens(model: &str, message: &ChatMessage) -> usize {
+    let mut total = est_tokens(model, &message.content);
+    if let Some(reasoning) = &message.reasoning { total = total.saturating_add(est_tokens(model, reasoning)); }
+    for call in &message.tool_calls {
+        total = total.saturating_add(est_tokens(model, &call.name)).saturating_add(est_tokens(model, &call.args_json));
+    }
+    total.saturating_add(message.images.len().saturating_mul(1_024))
+}
+
 /// The conversation split into pieces that each fit in one request, at message
 /// boundaries. `None` when it already fits: one request is cheaper than two,
 /// and the cache likes a prefix.
@@ -144,7 +153,7 @@ fn split_into_chunks<'a>(conversation: &'a [ChatMessage], room: usize, model: &s
         return None;
     }
     let limit = room * CHUNK_SHARE / 100;
-    let total: usize = conversation.iter().map(|m| est_tokens(model, &m.content)).sum();
+    let total: usize = conversation.iter().map(|m| message_tokens(model, m)).sum();
     if total <= limit {
         return None;
     }
@@ -152,7 +161,7 @@ fn split_into_chunks<'a>(conversation: &'a [ChatMessage], room: usize, model: &s
     let mut start = 0;
     let mut used = 0;
     for (i, m) in conversation.iter().enumerate() {
-        let t = est_tokens(model, &m.content);
+        let t = message_tokens(model, m);
         if used + t > limit && i > start {
             chunks.push(&conversation[start..i]);
             start = i;
@@ -397,7 +406,7 @@ fn finish_summary(
     // A summary that is not smaller than that frees nothing. An automatic
     // compaction does not happen then; one the person asked for does, and says
     // that the window did not get smaller.
-    let replaced_tokens: usize = history[1..split_idx].iter().map(|m| est_tokens(model, &m.content)).sum::<usize>()
+    let replaced_tokens: usize = history[1..split_idx].iter().map(|m| message_tokens(model, m)).sum::<usize>()
         + prior_summary.as_deref().map_or(0, |s| est_tokens(model, s));
     let mut summary = summary;
     if est_tokens(model, &summary) >= replaced_tokens {
@@ -415,7 +424,8 @@ fn finish_summary(
     new_history.extend(keep_prompt);
     new_history.extend_from_slice(&history[split_idx..]);
 
-    let after_tokens: usize = new_history.iter().map(|m| est_tokens(model, &m.content)).sum();
+    let after_tokens: usize = new_history.iter().map(|m| message_tokens(model, m)).sum();
+    if !allow_growth && after_tokens >= before_tokens { return None; }
     // The exact words of the turns the summary replaces go with the session,
     // so a session is one file: the model can still read what was summarized
     // away, and nothing has to be kept in two places at once.
@@ -472,7 +482,7 @@ async fn summarize_before(
 ) -> Option<flashagent_tui::CompactionResult> {
     let Cut { split_idx, keep_prompt, focus_prompt, detail, real_used, allow_growth, room, model } = cut;
 
-    let before_tokens: usize = history.iter().map(|m| est_tokens(model, &m.content)).sum();
+    let before_tokens: usize = history.iter().map(|m| message_tokens(model, m)).sum();
 
     // Fold a previous summary in, so repeated compaction never forgets older turns.
     let (base_system, prior_summary) = match history[0].content.find(COMPACTED_MARK) {
@@ -745,12 +755,22 @@ fn add_usage(a: Option<flashagent_llm::Usage>, b: Option<flashagent_llm::Usage>)
         (None, Some(y)) => Some(y),
         (None, None) => None,
     };
+    out.allowance = match (out.allowance, other.allowance) {
+        (Some(a), Some(b)) => Some(a + b),
+        (a, b) => a.or(b),
+    };
+    out.cost_details = match (out.cost_details, other.cost_details) {
+        (Some(a), Some(b)) => Some(flashagent_llm::types::CostDetails { upstream_cost: match (a.upstream_cost, b.upstream_cost) {
+            (Some(a), Some(b)) => Some(a + b), (a, b) => a.or(b),
+        }}),
+        (a, b) => a.or(b),
+    };
     out
 }
 
 fn add_opt(a: Option<i64>, b: Option<i64>) -> Option<i64> {
     match (a, b) {
-        (Some(x), Some(y)) => Some(x + y),
+        (Some(x), Some(y)) => Some(x.saturating_add(y)),
         (Some(x), None) => Some(x),
         (None, Some(y)) => Some(y),
         (None, None) => None,
@@ -907,11 +927,13 @@ async fn ask_for_summary(
     let mut cut_off = false;
     let mut finished = false;
     let mut usage = None;
+    let overall = tokio::time::Instant::now() + std::time::Duration::from_secs(600);
     loop {
         // After the finish reason, the usage chunk may still be one event away.
         // Breaking at Done loses the only real token count the card can show;
         // a short grace period catches it without waiting out a dead stream.
         let budget = if finished { std::time::Duration::from_secs(2) } else { std::time::Duration::from_secs(120) };
+        let budget = budget.min(overall.saturating_duration_since(tokio::time::Instant::now()));
         match tokio::time::timeout(budget, stream.next()).await {
             Ok(Some(Ok(flashagent_llm::LlmEvent::TextDelta(d)))) if !finished => {
                 if let Some(sink) = sink {
@@ -953,12 +975,22 @@ pub(crate) fn compaction_request(
 ) -> Vec<ChatMessage> {
     let instruction = summary_instruction(prior_summary, focus_prompt, detail, retry);
     let mut msgs: Vec<ChatMessage> = conversation.to_vec();
-    // A user message may not follow a tool result: providers that check the
-    // pairing reject the request. Dropping the dangling tail only shortens the
-    // prefix, which cannot cost a cache hit, and those results are being
-    // summarized rather than acted on.
-    while matches!(msgs.last(), Some(m) if m.role == flashagent_llm::Role::Tool) {
-        msgs.pop();
+    let mut calls = std::collections::HashSet::new();
+    // Part boundaries may separate calls from results. Unpaired records become
+    // clearly labelled data instead of being dropped from the summary input.
+    for message in &mut msgs {
+        if message.role == flashagent_llm::Role::Assistant {
+            for call in &message.tool_calls { calls.insert(call.id.clone()); }
+        } else if message.role == flashagent_llm::Role::Tool
+            && !message.tool_call_id.as_ref().is_some_and(|id| calls.contains(id))
+        {
+            message.role = flashagent_llm::Role::User;
+            message.content = format!("Earlier tool result (conversation data):\n{}", message.content);
+            message.tool_call_id = None;
+        }
+    }
+    if msgs.last().is_some_and(|m| m.role == flashagent_llm::Role::Tool) {
+        msgs.push(ChatMessage::assistant("The preceding tool results are part of the conversation to summarize."));
     }
     msgs.push(ChatMessage::user(instruction));
     msgs

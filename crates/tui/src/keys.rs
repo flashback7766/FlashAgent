@@ -187,13 +187,14 @@ impl App {
                 self.input.set(draft);
                 self.history_search = None;
             }
-            _ => {
+            KeyCode::Enter | KeyCode::Right => {
                 let found = search.found(&self.input_history).map(str::to_string);
                 let draft = std::mem::take(&mut search.draft);
                 self.input.set(found.unwrap_or(draft));
                 self.history_search = None;
                 self.history_index = None;
             }
+            _ => {}
         }
         self.renderer.request_reprint();
     }
@@ -230,6 +231,11 @@ impl App {
     fn handle_view_key(&mut self, cx: &mut LoopCtx<'_>, code: KeyCode, mods: KeyModifiers) -> Option<Flow> {
         match code {
             KeyCode::Esc => {
+                if let Some(cancel) = &self.compaction_cancel {
+                    cancel.store(true, Ordering::Relaxed);
+                    self.renderer.request_reprint();
+                    return Some(Flow::Next);
+                }
                 // A steering draft goes first: a turn stopped to clear two words is lost work.
                 if self.running && self.input.is_empty() {
                     self.interrupt(cx);
@@ -439,7 +445,7 @@ impl App {
                     } else {
                         self.autocomplete_idx -= 1;
                     }
-                } else if self.input.up() {
+                } else if self.input.move_visual((self.last_term_size.0 as usize).saturating_sub(6), -1) {
                     // Moved within a multi-line text.
                 } else if !self.running && !self.input_history.is_empty() {
                     match self.history_index {
@@ -461,7 +467,7 @@ impl App {
             KeyCode::Down => {
                 if let Some(ac) = self.command_popup() {
                     self.autocomplete_idx = (self.autocomplete_idx + 1) % ac.items.len();
-                } else if self.input.down() {
+                } else if self.input.move_visual((self.last_term_size.0 as usize).saturating_sub(6), 1) {
                     // Moved within a multi-line text.
                 } else if !self.running {
                     if let Some(idx) = self.history_index {

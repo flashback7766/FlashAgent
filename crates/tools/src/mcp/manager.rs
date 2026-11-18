@@ -210,9 +210,8 @@ impl McpManager {
     }
 
     pub fn get_all_tool_specs(&self) -> Vec<ToolSpec> {
-        let clients = self.clients.read();
         let mut specs = Vec::new();
-
+        let clients = self.clients.read().clone();
         for (server_name, client) in clients.iter() {
             for tool in client.tools() {
                 let qualified_name = format!("mcp__{server_name}__{}", tool.name);
@@ -234,7 +233,9 @@ impl McpManager {
                 });
             }
         }
-
+        // A non-injective qualified name cannot be offered with two schemas or
+        // routed to whichever server happened to sort first.
+        specs.retain(|spec| self.resolve_tool_name(&spec.name).is_ok());
         specs
     }
 
@@ -248,52 +249,77 @@ impl McpManager {
     }
 
     pub fn has_tool(&self, name: &str) -> bool {
-        self.parse_tool_name(name).is_some()
+        self.parse_tool_name(name).is_some() || self.known_tool_routes(name).len() > 1
     }
 
-    /// `mcp__<server>__<tool>`, or a bare tool name found on a running server.
+    /// Kept for callers that only need an optional route. Ambiguity is never a
+    /// read-only route; execution reports the collision instead.
     pub fn parse_tool_name(&self, name: &str) -> Option<(String, String)> {
-        // The separator is `__`. A server that has one in its name would be
-        // split at the wrong place, so the tool is matched as the longest
-        // configured server prefix.
+        self.resolve_tool_name(name).ok()
+    }
+
+    fn known_tool_routes(&self, name: &str) -> Vec<(String, String)> {
+        let qualified = name.starts_with("mcp__");
+        let clients = self.clients.read();
+        let mut routes = Vec::new();
+        for (server, client) in clients.iter() {
+            for tool in client.tool_names() {
+                let matches = if qualified {
+                    format!("mcp__{server}__{tool}") == name
+                } else {
+                    tool == name
+                };
+                if matches {
+                    routes.push((server.clone(), tool));
+                }
+            }
+        }
+        routes
+    }
+
+    /// `mcp__<server>__<tool>`, or an unambiguous bare tool on a running server.
+    fn resolve_tool_name(&self, name: &str) -> Result<(String, String), String> {
+        let routes = self.known_tool_routes(name);
+        if routes.len() > 1 {
+            let owners = routes.iter().map(|(server, tool)| format!("'{server}' tool '{tool}'")).collect::<Vec<_>>().join(", ");
+            return Err(format!("Ambiguous MCP tool '{name}': name collision between {owners}; rename the server or tool"));
+        }
         if let Some(rest) = name.strip_prefix("mcp__") {
             let configs = self.configs.read();
-            let mut candidates: Vec<&String> = configs.keys().collect();
-            candidates.sort_by(|a, b| (a.len(), b.as_str()).cmp(&(b.len(), a.as_str())));
-            for server in candidates {
-                let prefix = format!("{server}__");
-                if rest.starts_with(prefix.as_str()) {
-                    return Some((server.clone(), rest[prefix.len()..].to_string()));
-                }
+            let longest = configs.keys()
+                .filter(|server| rest.strip_prefix(server.as_str()).is_some_and(|tail| tail.starts_with("__")))
+                .max_by(|a, b| a.len().cmp(&b.len()).then_with(|| a.cmp(b)));
+            let route = if let Some(server) = longest {
+                (server.clone(), rest[server.len() + 2..].to_string())
+            } else if let Some((server, tool)) = rest.split_once("__") {
+                (server.to_string(), tool.to_string())
+            } else {
+                return Err(format!("Unknown MCP tool: {name}"));
+            };
+            // Even one discovered owner can conflict with the longest configured
+            // prefix of a stopped server. Never advertise a call to the wrong one.
+            if routes.first().is_some_and(|owner| owner != &route) {
+                let (owner, tool) = &routes[0];
+                return Err(format!("Ambiguous MCP tool '{name}': '{owner}' tool '{tool}' collides with configured server '{}'; rename the server or tool", route.0));
             }
-            // There is one configured server whose name the prefix could also
-            // be part of; fall back to the simple split.
-            if let Some(parts) = rest.split_once("__") {
-                return Some((parts.0.to_string(), parts.1.to_string()));
+            if route.0.is_empty() || route.1.is_empty() {
+                return Err(format!("Unknown MCP tool: {name}"));
             }
+            return Ok(route);
         }
-        // A bare name a client knows is accepted too; that is how the protocol
-        // reports a tool when the caller did not use the prefixed form.
-        let clients = self.clients.read();
-        for (server_name, client) in clients.iter() {
-            for t in client.tools() {
-                if t.name == name {
-                    return Some((server_name.clone(), t.name.clone()));
-                }
-            }
-        }
-        None
+        routes.into_iter().next().ok_or_else(|| format!("Unknown MCP tool: {name}"))
     }
 
     pub async fn call_tool(&self, qualified_tool: &str, args_json: &str) -> Result<String, ToolError> {
-        let (server_name, tool_name) = self
-            .parse_tool_name(qualified_tool)
-            .ok_or_else(|| ToolError::Other(format!("Unknown MCP tool: {qualified_tool}")))?;
+        let (server_name, tool_name) = self.resolve_tool_name(qualified_tool).map_err(ToolError::Other)?;
 
         let client = match self.start_server(&server_name).await {
             Ok(c) => c,
             Err(e) => return Err(ToolError::Other(format!("Failed to connect to MCP server '{server_name}': {e}"))),
         };
+
+        // Starting can discover a second owner of a formerly unique name.
+        self.resolve_tool_name(qualified_tool).map_err(ToolError::Other)?;
 
         // Unparseable arguments are an error for the model to fix; calling with no
         // arguments would run defaults it never chose. Same resolver as the approval
@@ -323,6 +349,12 @@ impl McpManager {
         let configs = self.configs.read().clone();
         let clients = self.clients.read().clone();
         let errors = self.start_errors.read().clone();
+        let collisions: HashMap<String, String> = clients.iter().filter_map(|(name, client)| {
+            let error = client.tools().iter().find_map(|tool| {
+                self.resolve_tool_name(&format!("mcp__{name}__{}", tool.name)).err()
+            });
+            error.map(|error| (name.clone(), error))
+        }).collect();
         let mut list = Vec::new();
 
         for (name, cfg) in configs {
@@ -332,7 +364,8 @@ impl McpManager {
                 if client.is_alive().await {
                     let tools = client.tools();
                     let names = tools.iter().map(|t| t.name.clone()).collect();
-                    (ServerConnectionState::Active, tools.len(), names)
+                    let state = collisions.get(&name).map_or(ServerConnectionState::Active, |error| ServerConnectionState::Error(error.clone()));
+                    (state, tools.len(), names)
                 } else {
                     (
                         ServerConnectionState::Error("Process exited unexpectedly".into()),
@@ -465,6 +498,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mgr = McpManager::new(dir.path().to_path_buf());
         let mut configs = std::collections::HashMap::new();
+        configs.insert("my".to_string(), McpServerConfig::new("echo", vec![]));
         configs.insert("my__server".to_string(), McpServerConfig::new("echo", vec![]));
         *mgr.configs.write() = configs;
         let (server, tool) = mgr.parse_tool_name("mcp__my__server__tool").expect("a configured server wins");
@@ -475,6 +509,37 @@ mod tests {
             mgr.parse_tool_name("mcp__other__tool"),
             Some(("other".to_string(), "tool".to_string()))
         );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn qualified_mcp_collisions_are_hidden_and_diagnosed_not_routed() {
+        let dir = tempfile::tempdir().unwrap();
+        let mgr = McpManager::new(dir.path().to_path_buf());
+        mgr.configs.write().clear();
+        for (server, tool) in [("my", "server__look"), ("my__server", "look")] {
+            let script = dir.path().join(format!("{server}.sh"));
+            std::fs::write(&script, format!(r#"
+                while IFS= read -r line; do case "$line" in
+                *initialize*) printf '%s\n' '{{"jsonrpc":"2.0","id":1,"result":{{"protocolVersion":"2024-11-05","serverInfo":{{"name":"mock"}}}}}}';;
+                *tools/list*) printf '%s\n' '{{"jsonrpc":"2.0","id":2,"result":{{"tools":[{{"name":"{tool}","inputSchema":{{"type":"object"}}}}]}}}}';;
+                esac; done
+            "#)).unwrap();
+            mgr.configs.write().insert(server.into(), McpServerConfig::new("bash", vec![script.to_string_lossy().into_owned()]));
+            mgr.start_server(server).await.expect("mock starts");
+        }
+        let name = "mcp__my__server__look";
+        assert!(mgr.get_all_tool_specs().is_empty(), "duplicate schemas must not be offered");
+        assert_eq!(mgr.parse_tool_name(name), None);
+        assert!(!mgr.is_tool_read_only(name));
+        let err = mgr.call_tool(name, "{}").await.unwrap_err().to_string();
+        assert!(err.contains("name collision") && err.contains("my__server"), "{err}");
+        let status = mgr.server_status_list().await;
+        assert!(status.iter().all(|s| matches!(&s.state, ServerConnectionState::Error(error) if error.contains("collision"))));
+        let clients: Vec<_> = mgr.clients.read().values().cloned().collect();
+        for client in clients {
+            client.kill().await;
+        }
     }
 
     #[cfg(unix)]

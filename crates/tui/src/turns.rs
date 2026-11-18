@@ -200,10 +200,12 @@ impl App {
     }
 
 pub(crate) fn start_turn(&mut self, cx: &LoopCtx<'_>, budgets: GoalBudgets) {
+        if self.running || self.compacting { return; }
         self.sync_system_prompt(OfferedTools::from_specs(&cx.perm.specs()));
         // Here, not only for typed prompts: a /goal, a skill or Ctrl+R measured
         // their growth from a turn long gone and compacted too early.
         self.context_before_turn = self.context_usage.total_used();
+        self.context_usage.invalidate_server();
         update_context_usage(&self.current_model, &mut self.context_usage, &self.history, cx.memory_block, &self.chat, cx.perm);
         self.refresh_context_line();
         cx.cancel.store(false, Ordering::Relaxed);
@@ -223,7 +225,7 @@ pub(crate) fn start_turn(&mut self, cx: &LoopCtx<'_>, budgets: GoalBudgets) {
         // that regenerates has just cut the history, so carrying it over would
         // show a window fuller than the prompt about to be sent; the first
         // usage of this turn puts the fresh figure in.
-        self.context_usage.server_seen = None;
+        self.context_request_tokens = self.context_usage.local_used();
         self.token_tracker.on_turn_start(self.current_model.clone(), self.context_usage.total_used());
         cx.source.set_model(&self.current_model);
         cx.source.set_effort_bias(self.effort_memory.steps(&self.current_model));
@@ -383,6 +385,16 @@ pub(crate) fn start_turn(&mut self, cx: &LoopCtx<'_>, budgets: GoalBudgets) {
         true
     }
 
+    pub(crate) fn restore_unsent_steering(&mut self) {
+        let unsent = std::mem::take(&mut self.pending_steers);
+        if unsent.is_empty() { return; }
+        let draft = self.input.text().to_string();
+        let restored = unsent.iter().map(|(text, _)| text.as_str()).collect::<Vec<_>>().join("\n");
+        for (_, pictures) in unsent { self.attachments.extend(pictures); }
+        self.input.set(if draft.trim().is_empty() { restored } else { format!("{restored}\n{draft}") });
+        self.say(BackgroundNotice::fading(tr("The turn ended before your message reached it · Enter sends it now"), 8));
+    }
+
     pub(crate) async fn finish_turn(
         &mut self,
         cx: &mut LoopCtx<'_>,
@@ -413,20 +425,7 @@ pub(crate) fn start_turn(&mut self, cx: &LoopCtx<'_>, budgets: GoalBudgets) {
         // A steer typed as the turn ended never reached the model; it goes back into
         // the prompt, with any picture it carried, which used to be dropped here
         // and lost for good.
-        let unsent = std::mem::take(&mut self.pending_steers);
-        if !unsent.is_empty() {
-            // Ahead of a draft typed since: that draft is newer.
-            let draft = self.input.text().to_string();
-            let restored = unsent.iter().map(|(text, _)| text.as_str()).collect::<Vec<_>>().join("\n");
-            for (_, pictures) in unsent {
-                self.attachments.extend(pictures);
-            }
-            self.input.set(if draft.trim().is_empty() { restored } else { format!("{restored}\n{draft}") });
-            self.say(BackgroundNotice::fading(
-                flashagent_tui::i18n::tr("The turn ended before your message reached it · Enter sends it now"),
-                8,
-            ));
-        }
+        self.restore_unsent_steering();
         self.cancel_requested = None;
         cx.cancel.store(false, Ordering::Relaxed);
         self.token_tracker.on_finished();
@@ -511,83 +510,7 @@ pub(crate) fn start_turn(&mut self, cx: &LoopCtx<'_>, budgets: GoalBudgets) {
                     // /goal run) has nothing to compact, and saying it failed misleads.
                     let earlier_turns = self.history.iter().filter(|m| flashagent_core::is_prompt(m)).count() > 1;
                     if verdict.should() && earlier_turns {
-                        // In the transcript: it changes what the model remembers.
-                        self.chat.start_compaction_card();
-                        self.renderer.request_reprint();
-                        // Drawn before the wait: the command is already gone from the composer.
-                        self.draw(cx, None);
-                        let source_compact = cx.source.clone();
-                        // What the window holds now: the number the summary
-                        // is measured against, and what the card says it freed.
-                        let before = self.context_usage.total_used();
-                        // The room one request may carry: the window minus the
-                        // prompt, the memory and the schemas (once). What the
-                        // turn holds now is the conversation itself, and it is
-                        // what gets summarized, so it is not subtracted here.
-                        let room = crate::compact::room_for(
-                            self.context_usage.total_capacity,
-                            self.context_usage.system_tokens
-                                + self.context_usage.memory_tokens
-                                + self.context_usage.tools_tokens,
-                        );
-                        // The model in use: what the conversation costs is
-                        // counted with its own counter, and the compaction
-                        // decides on the same numbers the bar shows.
-                        let model = self.current_model.clone();
-                        let compacted = if let Some(archive) = session_path(cx.session_id) {
-                            // This handler is the event loop, so awaiting the compaction
-                            // straight through would freeze the card until the summary
-                            // landed. Keep the history aside and pump the words into the
-                            // card while redrawing the spinner on a clock.
-                            let mut history = std::mem::take(&mut self.history);
-                            let (update_tx, mut update_rx) =
-                                tokio::sync::mpsc::unbounded_channel::<UiEvent>();
-                            let sink = SummarySink::ui(update_tx);
-                            let result = {
-                                let fut = compact_context_with_sink(
-                                    source_compact.as_ref(),
-                                    &mut history,
-                                    crate::compact::Compaction {
-                                        focus_prompt: None,
-                                        archive_path: &archive,
-                                        real_used: Some(before),
-                                        room: Some(room),
-                                        allow_growth: false,
-                                        model: &model,
-                                    },
-                                    Some(&sink),
-                                );
-                                tokio::pin!(fut);
-                                let mut tick = tokio::time::interval_at(
-                                    tokio::time::Instant::now() + std::time::Duration::from_millis(80),
-                                    std::time::Duration::from_millis(80),
-                                );
-                                tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-                                loop {
-                                    tokio::select! {
-                                        result = &mut fut => break result,
-                                        Some(update) = update_rx.recv() => match update {
-                                            UiEvent::CompactionDelta(delta) => self.chat.append_compaction_delta(&delta),
-                                            UiEvent::CompactionReset => self.chat.restart_compaction_card(),
-                                            _ => {}
-                                        },
-                                        _ = tick.tick() => self.draw(cx, None),
-                                    }
-                                }
-                            };
-                            self.history = history;
-                            result
-                        } else {
-                            None
-                        };
-                        match compacted {
-                            Some(result) => {
-                                self.record_compaction(result);
-                                update_context_usage(&self.current_model, &mut self.context_usage, &self.history, cx.memory_block, &self.chat, cx.perm);
-                            }
-                            None => self.chat.fail_compaction_card(tr("the conversation is unchanged")),
-                        }
-                        self.renderer.request_reprint();
+                        self.compact_command_with_growth(cx, "", false);
                     }
 
                     self.autosave(cx.session_id, cx.cwd_display);

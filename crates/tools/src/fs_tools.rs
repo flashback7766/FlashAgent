@@ -35,13 +35,6 @@ pub struct EditChunk {
     pub end_line: Option<usize>,
 }
 
-/// The file a batch entry names, for telling `a.txt` and `./a.txt` apart
-/// from two files.
-pub(crate) fn same_file_key(cwd: &Path, path: &str) -> PathBuf {
-    let file = resolve(cwd, path);
-    file.canonicalize().unwrap_or(file)
-}
-
 fn resolve(cwd: &Path, path: &str) -> PathBuf {
     flashagent_core::resolve_path(cwd, path)
 }
@@ -139,11 +132,33 @@ fn edit_distance(a: &str, b: &str) -> usize {
     row.last().copied().unwrap_or(0)
 }
 
-/// Returns 1-based numbered lines, reading one line at a time so a small
-/// window of a big log stays cheap. A non-text file says so plainly: "stream
-/// did not contain valid UTF-8" does not tell the model to use another tool.
+/// Drains one line in fixed-size pieces and retains only its bounded prefix.
+fn read_line_capped(
+    reader: &mut impl std::io::BufRead,
+    line: &mut Vec<u8>,
+    cap: usize,
+) -> std::io::Result<(usize, bool)> {
+    let mut total = 0usize;
+    loop {
+        let bytes = reader.fill_buf()?;
+        if bytes.is_empty() {
+            return Ok((total, total > line.len()));
+        }
+        let end = bytes.iter().position(|b| *b == b'\n').map(|at| at + 1);
+        let used = end.unwrap_or(bytes.len());
+        let keep = used.min(cap.saturating_sub(line.len()));
+        line.extend_from_slice(&bytes[..keep]);
+        total = total.saturating_add(used);
+        reader.consume(used);
+        if end.is_some() {
+            return Ok((total, total > line.len()));
+        }
+    }
+}
+
+/// Returns 1-based numbered lines without retaining a whole log or long line.
 pub(crate) fn read_file(cwd: &Path, path: &str, offset: usize, limit: usize) -> Result<String, ToolError> {
-    use std::io::{BufRead, BufReader};
+    use std::io::BufReader;
 
     let file = std::fs::File::open(resolve(cwd, path))
         .map_err(|e| io_error("read", cwd, path, &e))?;
@@ -152,23 +167,38 @@ pub(crate) fn read_file(cwd: &Path, path: &str, offset: usize, limit: usize) -> 
     let mut line = Vec::new();
     let mut number = 0usize;
     while number < offset.saturating_add(limit) {
+        if number >= offset && out.len() >= crate::MAX_OUTPUT_BYTES {
+            out.push_str(&format!("\n...[truncated at {} bytes]", crate::MAX_OUTPUT_BYTES));
+            break;
+        }
         line.clear();
-        match reader.read_until(b'\n', &mut line) {
-            Ok(0) => break,
-            Ok(_) => {}
-            Err(e) => return Err(ToolError::Other(format!("read {path}: {e}"))),
+        let cap = if number < offset { 0 } else { crate::MAX_LINE_BYTES.min(crate::MAX_OUTPUT_BYTES.saturating_sub(out.len())) };
+        let (read, truncated) = read_line_capped(&mut reader, &mut line, cap)
+            .map_err(|e| ToolError::Other(format!("read {path}: {e}")))?;
+        if read == 0 {
+            break;
         }
         number += 1;
         if number <= offset {
             continue;
         }
-        let text = std::str::from_utf8(&line).map_err(|_| {
-            ToolError::Other(format!(
+        let text = match std::str::from_utf8(&line) {
+            Ok(text) => text,
+            // A capped prefix may end in the middle of the last character.
+            Err(e) if truncated && e.error_len().is_none() => std::str::from_utf8(&line[..e.valid_up_to()]).unwrap_or_default(),
+            Err(_) => return Err(ToolError::Other(format!(
                 "read {path}: this is not a text file (line {number} is not valid UTF-8). \
                  Use view_image for a picture, or run_shell with a tool that reads this format."
-            ))
-        })?;
-        let _ = writeln!(out, "{:>6}\t{}", number, text.trim_end_matches(['\n', '\r']));
+            ))),
+        };
+        let header = format!("{number:>6}\t");
+        let complete = crate::push_capped(&mut out, &header, crate::MAX_OUTPUT_BYTES)
+            && crate::push_capped(&mut out, text.trim_end_matches(['\n', '\r']), crate::MAX_OUTPUT_BYTES)
+            && crate::push_capped(&mut out, "\n", crate::MAX_OUTPUT_BYTES);
+        if truncated || !complete {
+            out.push_str(&format!("\n...[truncated at {} bytes; line {number} was cut]", crate::MAX_OUTPUT_BYTES));
+            break;
+        }
     }
     Ok(if out.is_empty() { "(empty or past end of file)".into() } else { out })
 }
@@ -192,13 +222,7 @@ pub(crate) fn write_file(cwd: &Path, path: &str, content: &str) -> Result<String
 /// file is whole until the moment it is replaced, and it is replaced in one
 /// step, so a reader never sees half of it.
 pub(crate) fn write_atomic(file: &Path, content: &str) -> std::io::Result<()> {
-    use std::io::Write;
-
-    // A symlink is written through, not replaced: the file it points at is
-    // the one the caller means. A link to a file that does not exist yet
-    // cannot be resolved, and writing over the link's own name would destroy
-    // it and drop a regular file in its place, so this is refused instead: where the
-    // link points is the owner's setup, and a message says what happened.
+    // Write through a live symlink, never replace a dangling one.
     if std::fs::canonicalize(file).is_err() && std::fs::symlink_metadata(file).is_ok_and(|m| m.is_symlink()) {
         return Err(std::io::Error::other(format!(
             "{path:?} is a symlink to a file that does not exist; write the file it points at instead",
@@ -206,38 +230,46 @@ pub(crate) fn write_atomic(file: &Path, content: &str) -> std::io::Result<()> {
         )));
     }
     let target = std::fs::canonicalize(file).unwrap_or_else(|_| file.to_path_buf());
+    write_atomic_checked(&target, content, || Ok(())).map(|_| ())
+}
+
+/// Checks the prepared version after staging the bytes, just before the rename.
+/// A failed check has not modified the target, so it must not be rolled back.
+fn write_atomic_checked(
+    target: &Path,
+    content: &str,
+    check: impl FnOnce() -> std::io::Result<()>,
+) -> std::io::Result<Option<FileVersion>> {
+    use std::io::Write;
+
     let dir = target.parent().unwrap_or_else(|| Path::new("."));
     let name = target.file_name().and_then(|n| n.to_str()).unwrap_or("file");
-    // The temporary name must fit NAME_MAX beside the file it stands in for:
-    // uniqueness comes from the process and the counter, so a long name is
-    // only a hint and is cut short, on a character boundary.
     let mut cut = name.len().min(96);
     while cut > 0 && !name.is_char_boundary(cut) {
         cut -= 1;
     }
     let temp = dir.join(format!(".{}.flashagent-{}-{}.tmp", &name[..cut], std::process::id(), next_temp_id()));
-
-    let result = (|| -> std::io::Result<()> {
-        // The file's own permissions decide whether it may be written: a
-        // rename would replace it whatever they say.
-        if let Ok(meta) = std::fs::metadata(&target) {
-            if meta.is_file() {
-                std::fs::OpenOptions::new().write(true).open(&target)?;
-            }
+    let mut created = false;
+    let result = (|| -> std::io::Result<Option<FileVersion>> {
+        let meta = std::fs::metadata(target).ok();
+        // Rename alone would bypass the file's write permissions.
+        if meta.as_ref().is_some_and(|m| m.is_file()) {
+            std::fs::OpenOptions::new().write(true).open(target)?;
         }
-        let mut handle = std::fs::File::create(&temp)?;
+        let mut handle = std::fs::OpenOptions::new().write(true).create_new(true).open(&temp)?;
+        created = true;
         handle.write_all(content.as_bytes())?;
-        // The bytes are on the disk before the name points at them.
         handle.sync_all()?;
-        drop(handle);
-        // The permissions the file had are the ones it keeps.
-        if let Ok(meta) = std::fs::metadata(&target) {
-            let _ = std::fs::set_permissions(&temp, meta.permissions());
+        if let Some(meta) = meta {
+            std::fs::set_permissions(&temp, meta.permissions())?;
         }
-        std::fs::rename(&temp, &target)
+        check()?;
+        std::fs::rename(&temp, target)?;
+        // This handle still names our inode even if an external writer replaces
+        // the path immediately. Failure to capture it forbids a later rollback.
+        Ok(handle.metadata().ok().map(|meta| FileVersion::of(&meta)))
     })();
-    if result.is_err() {
-        // A temporary file left behind is litter in the user's project.
+    if result.is_err() && created {
         let _ = std::fs::remove_file(&temp);
     }
     result
@@ -351,45 +383,33 @@ fn match_lines(text: &str, needle: &str, loose: bool) -> Option<(String, Vec<Str
     }
 }
 
-/// `new` re-indented to the file's own layout. Only lines the model wrote with
-/// some indentation are touched; a blank line stays blank. This runs only when
-/// the match needed the loose tier, so an exact match is never disturbed.
-///
-/// The shift is taken from the first line, which stands for the file's own
-/// first line, and applied to every line of the edit, including the ones past
-/// the old block. Those used to keep the model's indent, so a line added after
-/// a loose match landed outside the block it was written into.
+/// A loose match shifts the whole replacement into the file's indentation.
+/// The replacement's relative indentation, including inserted nested blocks,
+/// belongs to the new text, not to the old line at the same index.
 fn with_file_indent(new: &str, indents: &[String]) -> String {
     let Some(file_base) = indents.first() else { return new.to_string() };
     let model_base = new
         .lines()
         .find(|line| !line.trim().is_empty())
-        .map_or(0, |line| line.len() - line.trim_start().len());
+        .map_or(0, |line| line.chars().take_while(|c| c.is_whitespace()).count());
     let mut out = String::with_capacity(new.len());
-    for (i, line) in new.split_inclusive('\n').enumerate() {
+    for line in new.split_inclusive('\n') {
         let body = line.trim_end_matches(['\r', '\n']);
         let ending = &line[body.len()..];
         if body.trim().is_empty() {
             out.push_str(line);
             continue;
         }
-        let own = body.len() - body.trim_start().len();
-        // A line the old block also had takes the file's indent for that line, as
-        // it always did. A line the edit adds has no such line, so it follows the
-        // shift of the block's first line, which is what keeps it inside it.
-        let want = if let Some(file_indent) = indents.get(i) {
-            out.push_str(file_indent);
-            out.push_str(body.trim_start());
-            out.push_str(ending);
-            continue;
-        } else {
-            (file_base.len() as isize + own as isize - model_base as isize).max(0) as usize
-        };
-        if want <= file_base.len() {
-            out.push_str(&file_base[..want]);
-        } else {
+        let prefix = &body[..body.len() - body.trim_start().len()];
+        let own = prefix.chars().count();
+        if own >= model_base {
             out.push_str(file_base);
-            out.push_str(&" ".repeat(want - file_base.len()));
+            let from = prefix.char_indices().nth(model_base).map_or(prefix.len(), |(at, _)| at);
+            out.push_str(&prefix[from..]);
+        } else {
+            let want = file_base.chars().count().saturating_sub(model_base - own);
+            let to = file_base.char_indices().nth(want).map_or(file_base.len(), |(at, _)| at);
+            out.push_str(&file_base[..to]);
         }
         out.push_str(body.trim_start());
         out.push_str(ending);
@@ -710,13 +730,11 @@ fn line_span(text: &str, start: usize, end: usize) -> Option<(usize, usize)> {
     None
 }
 
-pub(crate) fn edit_file(cwd: &Path, path: &str, edits: &[EditChunk]) -> Result<String, ToolError> {
-    let file = resolve(cwd, path);
-    let text = std::fs::read_to_string(&file)
-        .map_err(|e| io_error("read", cwd, path, &e))?;
-    let (text, applied) = apply_edits(path, text, edits)?;
-    write_atomic(&file, &text)?;
-    Ok(format!("applied {applied} edit(s) to {path}"))
+#[cfg(test)]
+fn edit_file(cwd: &Path, path: &str, edits: &[EditChunk]) -> Result<String, ToolError> {
+    let planned = plan_edit(cwd, path, edits)?;
+    write_planned(&planned)?;
+    Ok(format!("applied {} edit(s) to {path}", planned[0].replacements))
 }
 
 /// A batch is for a handful of related files, not the whole project.
@@ -733,22 +751,25 @@ pub(crate) fn read_files(cwd: &Path, files: &[(String, usize, usize)]) -> Result
     }
     let mut out = String::new();
     let mut failed = 0usize;
+    let mut processed = 0usize;
     for (path, offset, limit) in files {
-        let _ = writeln!(out, "=== {path} ===");
-        match read_file(cwd, path, *offset, *limit) {
-            Ok(text) => out.push_str(&text),
-            Err(e) => {
-                failed += 1;
-                let _ = write!(out, "error: {e}");
-            }
+        processed += 1;
+        let header = format!("=== {path} ===\n");
+        let (text, error) = match read_file(cwd, path, *offset, *limit) {
+            Ok(text) => (text, false),
+            Err(e) => (format!("error: {e}"), true),
+        };
+        failed += usize::from(error);
+        let complete = crate::push_capped(&mut out, &header, crate::MAX_OUTPUT_BYTES)
+            && crate::push_capped(&mut out, &text, crate::MAX_OUTPUT_BYTES)
+            && crate::push_capped(&mut out, "\n\n", crate::MAX_OUTPUT_BYTES);
+        if !complete {
+            out.push_str(&format!("\n...[truncated at {} bytes; remaining files not shown]", crate::MAX_OUTPUT_BYTES));
+            break;
         }
-        if !out.ends_with('\n') {
-            out.push('\n');
-        }
-        out.push('\n');
     }
     let out = out.trim_end().to_string();
-    if failed == files.len() {
+    if failed == processed {
         return Err(ToolError::Other(out));
     }
     Ok(out)
@@ -756,21 +777,113 @@ pub(crate) fn read_files(cwd: &Path, files: &[(String, usize, usize)]) -> Result
 
 /// All edits are applied in memory first; if any does not fit, no file is
 /// written. A half-made change across files is worse than none.
-pub(crate) fn edit_files(cwd: &Path, files: &[(String, Vec<EditChunk>)]) -> Result<String, ToolError> {
+#[cfg(test)]
+fn edit_files(cwd: &Path, files: &[(String, Vec<EditChunk>)]) -> Result<String, ToolError> {
     write_planned(&plan_edits(cwd, files)?)
 }
 
 /// One file of a batch edit, changed in memory and not yet written.
-struct PlannedFile {
-    /// As the call named it.
-    path: String,
+pub(crate) struct PlannedFile {
+    pub(crate) path: String,
     file: PathBuf,
-    original: String,
-    new: String,
+    aliases: Vec<PathBuf>,
+    version: FileVersion,
+    pub(crate) original: String,
+    pub(crate) new: String,
     edits: usize,
+    pub(crate) replacements: usize,
 }
 
-fn plan_edits(cwd: &Path, files: &[(String, Vec<EditChunk>)]) -> Result<Vec<PlannedFile>, ToolError> {
+#[derive(Debug, PartialEq, Eq)]
+struct FileVersion {
+    len: u64,
+    modified: Option<std::time::SystemTime>,
+    created: Option<std::time::SystemTime>,
+    readonly: bool,
+    #[cfg(unix)]
+    identity: (u64, u64, i64, i64, u32),
+}
+
+impl FileVersion {
+    fn of(meta: &std::fs::Metadata) -> Self {
+        #[cfg(unix)]
+        use std::os::unix::fs::MetadataExt;
+        Self {
+            len: meta.len(),
+            modified: meta.modified().ok(),
+            created: meta.created().ok(),
+            readonly: meta.permissions().readonly(),
+            #[cfg(unix)]
+            identity: (meta.dev(), meta.ino(), meta.ctime(), meta.ctime_nsec(), meta.mode()),
+        }
+    }
+}
+
+fn changed_file() -> std::io::Error {
+    std::io::Error::other("file changed since the edit was prepared; read it again and prepare a new edit")
+}
+
+fn read_versioned(file: &Path) -> std::io::Result<(String, FileVersion)> {
+    use std::io::Read;
+    let mut handle = std::fs::File::open(file)?;
+    let version = FileVersion::of(&handle.metadata()?);
+    let mut text = String::new();
+    handle.read_to_string(&mut text)?;
+    if version != FileVersion::of(&handle.metadata()?) || version != FileVersion::of(&std::fs::symlink_metadata(file)?) {
+        return Err(changed_file());
+    }
+    Ok((text, version))
+}
+
+/// Compare in fixed-size pieces: an external writer may have replaced the
+/// prepared file with something much larger than the original.
+fn verify_file(file: &Path, version: &FileVersion, text: &str) -> std::io::Result<()> {
+    use std::io::Read;
+    let meta = std::fs::symlink_metadata(file)?;
+    if !meta.is_file() || FileVersion::of(&meta) != *version {
+        return Err(changed_file());
+    }
+    let mut handle = std::fs::File::open(file)?;
+    if FileVersion::of(&handle.metadata()?) != *version {
+        return Err(changed_file());
+    }
+    let mut buffer = [0u8; 8192];
+    for expected in text.as_bytes().chunks(buffer.len()) {
+        handle.read_exact(&mut buffer[..expected.len()])?;
+        if buffer[..expected.len()] != *expected {
+            return Err(changed_file());
+        }
+    }
+    if handle.read(&mut buffer[..1])? != 0
+        || FileVersion::of(&handle.metadata()?) != *version
+        || FileVersion::of(&std::fs::symlink_metadata(file)?) != *version
+    {
+        return Err(changed_file());
+    }
+    Ok(())
+}
+
+impl PlannedFile {
+    fn verify_original(&self) -> std::io::Result<()> {
+        for alias in &self.aliases {
+            if std::fs::canonicalize(alias)? != self.file {
+                return Err(changed_file());
+            }
+        }
+        verify_file(&self.file, &self.version, &self.original)
+    }
+}
+
+pub(crate) fn plan_edit(cwd: &Path, path: &str, edits: &[EditChunk]) -> Result<Vec<PlannedFile>, ToolError> {
+    prepare_targets(cwd, &[(path, edits)], false)
+}
+
+pub(crate) fn plan_edits(cwd: &Path, files: &[(String, Vec<EditChunk>)]) -> Result<Vec<PlannedFile>, ToolError> {
+    let targets: Vec<_> = files.iter().map(|(path, edits)| (path.as_str(), edits.as_slice())).collect();
+    prepare_targets(cwd, &targets, true)
+}
+
+fn prepare_targets(cwd: &Path, files: &[(&str, &[EditChunk])], batch: bool) -> Result<Vec<PlannedFile>, ToolError> {
     if files.is_empty() {
         return Err(ToolError::Other("edit_file: files is empty".into()));
     }
@@ -778,65 +891,94 @@ fn plan_edits(cwd: &Path, files: &[(String, Vec<EditChunk>)]) -> Result<Vec<Plan
         return Err(ToolError::Other(format!("edit_file: at most {MAX_BATCH_FILES} files per call, got {}", files.len())));
     }
     let mut planned: Vec<PlannedFile> = Vec::new();
-    for (path, edits) in files {
-        if edits.is_empty() {
+    for &(path, edits) in files {
+        if batch && edits.is_empty() {
             return Err(ToolError::Other(format!("nothing was changed: {path} has no edits")));
         }
-        let file = resolve(cwd, path)
-            .canonicalize()
-            .map_err(|e| ToolError::Other(format!("nothing was changed: read {path}: {e}")))?;
-        let nothing_changed = |e: ToolError| ToolError::Other(format!("nothing was changed: {path}: {e}"));
-        // The same file twice: the second edits apply to the first's result.
+        let alias = resolve(cwd, path);
+        let read_error = |e: std::io::Error| {
+            if batch {
+                ToolError::Other(format!("nothing was changed: read {path}: {e}"))
+            } else {
+                io_error("read", cwd, path, &e)
+            }
+        };
+        let file = alias.canonicalize().map_err(read_error)?;
+        let edit_error = |e: ToolError| {
+            if batch { ToolError::Other(format!("nothing was changed: {path}: {e}")) } else { e }
+        };
+        // Canonical aliases share one original and one final preview.
         match planned.iter_mut().find(|p| p.file == file) {
             Some(earlier) => {
                 let text = std::mem::take(&mut earlier.new);
-                earlier.new = apply_edits(path, text, edits).map_err(nothing_changed)?.0;
+                let (new, replacements) = apply_edits(path, text, edits).map_err(edit_error)?;
+                earlier.new = new;
                 earlier.edits += edits.len();
+                earlier.replacements += replacements;
+                earlier.aliases.push(alias);
             }
             None => {
-                let original = std::fs::read_to_string(&file)
-                    .map_err(|e| ToolError::Other(format!("nothing was changed: read {path}: {e}")))?;
-                let new = apply_edits(path, original.clone(), edits).map_err(nothing_changed)?.0;
-                planned.push(PlannedFile { path: path.clone(), file, original, new, edits: edits.len() });
+                let (original, version) = read_versioned(&file).map_err(read_error)?;
+                let (new, replacements) = apply_edits(path, original.clone(), edits).map_err(edit_error)?;
+                planned.push(PlannedFile {
+                    path: path.to_string(), file, aliases: vec![alias], version,
+                    original, new, edits: edits.len(), replacements,
+                });
             }
         }
     }
     Ok(planned)
 }
 
-/// A write that fails puts back every file written before it, and the file
-/// whose write failed is whole: a write is a rename, so the old text is still
-/// there until the moment it is replaced.
-fn write_planned(planned: &[PlannedFile]) -> Result<String, ToolError> {
-    for (i, target) in planned.iter().enumerate() {
-        if let Err(e) = write_atomic(&target.file, &target.new) {
-            let mut rollback_failed: Vec<String> = Vec::new();
-            // The file whose write failed is whole: a write is a rename, so
-            // the old text is still there until the moment it is replaced.
-            // It is put back anyway, for the case where something else
-            // touched it in between.
-            if target.file.is_file() {
-                if let Err(err) = write_atomic(&target.file, &target.original) {
-                    rollback_failed.push(format!("{}: {err}", target.path));
+/// All versions are checked before the first write, then again immediately
+/// before each atomic rename. Only our successful, still-unchanged writes may
+/// be rolled back; neither the failed target nor another writer's work is ours.
+pub(crate) fn write_planned(planned: &[PlannedFile]) -> Result<String, ToolError> {
+    write_planned_with(planned, |target| {
+        write_atomic_checked(&target.file, &target.new, || target.verify_original())
+    })
+}
+
+fn write_planned_with(
+    planned: &[PlannedFile],
+    mut write: impl FnMut(&PlannedFile) -> std::io::Result<Option<FileVersion>>,
+) -> Result<String, ToolError> {
+    for target in planned {
+        target.verify_original().map_err(|e| {
+            ToolError::Other(format!("nothing was changed: {}: {e}", target.path))
+        })?;
+    }
+    let mut written: Vec<(&PlannedFile, Option<FileVersion>)> = Vec::new();
+    for target in planned {
+        if target.original == target.new {
+            continue;
+        }
+        match write(target) {
+            Ok(version) => written.push((target, version)),
+            Err(e) => {
+                let mut rollback_failed = Vec::new();
+                for (done, version) in written.iter().rev() {
+                    let rollback = || {
+                        let version = version.as_ref().ok_or_else(changed_file)?;
+                        verify_file(&done.file, version, &done.new)
+                    };
+                    if let Err(err) = write_atomic_checked(&done.file, &done.original, rollback) {
+                        rollback_failed.push(format!("{} (not restored): {err}", done.path));
+                    }
                 }
+                let done = if rollback_failed.is_empty() {
+                    format!("rolled back {} earlier file(s)", written.len())
+                } else {
+                    format!("rollback failed for {}", rollback_failed.join(", "))
+                };
+                return Err(match io_error_at("write", &target.file, &target.path, &e) {
+                    ToolError::Other(mut message) => {
+                        let _ = write!(message, "; {done}");
+                        ToolError::Other(message)
+                    }
+                    other => other,
+                });
             }
-            for done in planned[..i].iter().rev() {
-                if let Err(err) = write_atomic(&done.file, &done.original) {
-                    rollback_failed.push(format!("{}: {err}", done.path));
-                }
-            }
-            let done = if rollback_failed.is_empty() {
-                format!("rolled back {i} earlier file(s)")
-            } else {
-                format!("rollback failed for {}", rollback_failed.join(", "))
-            };
-            return Err(match io_error_at("write", &target.file, &target.path, &e) {
-                ToolError::Other(mut message) => {
-                    let _ = write!(message, "; {done}");
-                    ToolError::Other(message)
-                }
-                other => other,
-            });
         }
     }
     let total: usize = planned.iter().map(|p| p.edits).sum();
@@ -923,9 +1065,10 @@ use rayon::prelude::*;
 
 const MAX_GREP_HITS: usize = 200;
 const MAX_GREP_HITS_PER_FILE: usize = 50;
-/// Searched in parallel, one chunk at a time, so a search with many hits
-/// stops early.
-const GREP_CHUNK: usize = 256;
+const MAX_GREP_HIT_BYTES: usize = 4096;
+const MAX_GREP_FILE_BYTES: u64 = 10 * 1024 * 1024;
+/// At most two MiB of hit text is retained across one parallel chunk.
+const GREP_CHUNK: usize = 16;
 
 /// Returns `path:line:text`, up to 200 matches, in path and line order: the
 /// same search always gives the same answer.
@@ -955,59 +1098,107 @@ pub(crate) fn grep(
 
     // Cut like the other capped paths: the note names the cap, and the model
     // can then ask for the rest instead of believing nothing more was found.
-    let mut hits: Vec<String> = Vec::new();
+    let mut out = String::new();
+    let mut hits = 0usize;
     let mut hit_the_global_cap = false;
     let mut per_file_capped = false;
+    let mut byte_capped = false;
+    let mut line_capped = false;
     'chunks: for chunk in files.chunks(GREP_CHUNK) {
         let walked = chunk.par_iter().map(|file| grep_file(cwd, file, &re)).collect::<Vec<_>>();
-        for found in walked.into_iter() {
-            if found.len() == MAX_GREP_HITS_PER_FILE {
-                per_file_capped = true;
-            }
-            hits.extend(found);
-            if hits.len() >= MAX_GREP_HITS {
-                hits.truncate(MAX_GREP_HITS);
-                hit_the_global_cap = true;
-                break 'chunks;
+        for found in walked {
+            per_file_capped |= found.hits.len() == MAX_GREP_HITS_PER_FILE;
+            byte_capped |= found.byte_capped;
+            line_capped |= found.line_capped;
+            for hit in found.hits {
+                let complete = (out.is_empty() || crate::push_capped(&mut out, "\n", crate::MAX_OUTPUT_BYTES))
+                    && crate::push_capped(&mut out, &hit, crate::MAX_OUTPUT_BYTES);
+                hits += 1;
+                if !complete {
+                    byte_capped = true;
+                    break 'chunks;
+                }
+                if hits >= MAX_GREP_HITS {
+                    hit_the_global_cap = true;
+                    break 'chunks;
+                }
             }
         }
     }
-    let mut out = if hits.is_empty() {
-        "no matches".to_string()
-    } else {
-        hits.join("\n")
-    };
+    if out.is_empty() {
+        out.push_str("no matches");
+    }
     if hit_the_global_cap {
         out.push_str(&format!("\n...[limit {MAX_GREP_HITS} reached]"));
-        if per_file_capped {
-            out.push_str(&format!("\n...[limit {MAX_GREP_HITS_PER_FILE} per file]"));
-        }
-    } else if per_file_capped {
+    }
+    if per_file_capped {
         out.push_str(&format!("\n...[limit {MAX_GREP_HITS_PER_FILE} per file]"));
+    }
+    if byte_capped {
+        out.push_str(&format!("\n...[truncated: hit/file output byte cap; at most {} bytes shown]", crate::MAX_OUTPUT_BYTES));
+    }
+    if line_capped {
+        out.push_str(&format!("\n...[truncated: lines over {} bytes were not searched]", crate::MAX_LINE_BYTES));
     }
     Ok(out)
 }
 
-/// Files over 10 MB and binary files are data, not something to search.
-fn grep_file(cwd: &Path, file: &Path, re: &regex::Regex) -> Vec<String> {
-    if std::fs::metadata(file).is_ok_and(|meta| meta.len() > 10 * 1024 * 1024) {
-        return Vec::new();
+#[derive(Default)]
+struct GrepMatches {
+    hits: Vec<String>,
+    byte_capped: bool,
+    line_capped: bool,
+}
+
+/// Files over 10 MiB and binary files are data, not something to search.
+/// Both file reads and retained hits are bounded, including after a file grows.
+fn grep_file(cwd: &Path, file: &Path, re: &regex::Regex) -> GrepMatches {
+    use std::io::Read;
+
+    let empty = GrepMatches::default;
+    if std::fs::metadata(file).is_ok_and(|meta| meta.len() > MAX_GREP_FILE_BYTES) {
+        return empty();
     }
-    let Ok(bytes) = std::fs::read(file) else { return Vec::new() };
+    let Ok(handle) = std::fs::File::open(file) else { return empty() };
+    let mut bytes = Vec::new();
+    if handle.take(MAX_GREP_FILE_BYTES + 1).read_to_end(&mut bytes).is_err() || bytes.len() as u64 > MAX_GREP_FILE_BYTES {
+        return empty();
+    }
     if bytes[..bytes.len().min(1024)].contains(&0) {
-        return Vec::new();
+        return empty();
     }
-    let Ok(text) = std::str::from_utf8(&bytes) else { return Vec::new() };
+    let Ok(text) = std::str::from_utf8(&bytes) else { return empty() };
+    let mut found = GrepMatches::default();
     let mut shown: Option<String> = None;
-    text.lines()
-        .enumerate()
-        .filter(|(_, line)| re.is_match(line))
-        .take(MAX_GREP_HITS_PER_FILE)
-        .map(|(i, line)| {
-            let path = shown.get_or_insert_with(|| file.strip_prefix(cwd).unwrap_or(file).to_string_lossy().replace('\\', "/"));
-            format!("{path}:{}:{}", i + 1, line.trim())
-        })
-        .collect()
+    let mut output_bytes = 0usize;
+    for (i, line) in text.lines().enumerate() {
+        if line.len() > crate::MAX_LINE_BYTES {
+            found.line_capped = true;
+            continue;
+        }
+        if !re.is_match(line) {
+            continue;
+        }
+        let path = shown.get_or_insert_with(|| file.strip_prefix(cwd).unwrap_or(file).to_string_lossy().replace('\\', "/"));
+        let mut hit = String::new();
+        let header = format!("{path}:{}:", i + 1);
+        let complete = crate::push_capped(&mut hit, &header, MAX_GREP_HIT_BYTES)
+            && crate::push_capped(&mut hit, line.trim(), MAX_GREP_HIT_BYTES);
+        if !complete {
+            hit.push_str("...[truncated hit]");
+            found.byte_capped = true;
+        }
+        output_bytes += hit.len();
+        found.hits.push(hit);
+        if found.hits.len() >= MAX_GREP_HITS_PER_FILE {
+            break;
+        }
+        if output_bytes >= crate::MAX_OUTPUT_BYTES {
+            found.byte_capped = true;
+            break;
+        }
+    }
+    found
 }
 
 #[cfg(test)]
@@ -1527,15 +1718,104 @@ mod tests {
             ],
         )
         .unwrap();
-        // A folder where the second file was read: no write gets through that, not
-        // even as root, which a read-only file does not stop.
-        std::fs::remove_file(&blocked).unwrap();
-        std::fs::create_dir(&blocked).unwrap();
-        let err = write_planned(&planned).unwrap_err().to_string();
+        let err = write_planned_with(&planned, |target| {
+            if target.path == "blocked.txt" {
+                Err(std::io::Error::new(std::io::ErrorKind::PermissionDenied, "write blocked"))
+            } else {
+                write_atomic_checked(&target.file, &target.new, || target.verify_original())
+            }
+        }).unwrap_err().to_string();
 
         assert!(err.contains("blocked.txt") && err.contains("rolled back 1 earlier file(s)"), "{err}");
         assert_eq!(std::fs::read_to_string(&first).unwrap(), "old first\n");
-        assert!(blocked.is_dir(), "nothing was written in place of the folder");
+        assert_eq!(std::fs::read_to_string(&blocked).unwrap(), "old blocked\n");
+    }
+
+    #[test]
+    fn a_changed_batch_target_is_not_overwritten_or_rolled_back() {
+        let dir = tempfile::tempdir().unwrap();
+        let first = dir.path().join("first.txt");
+        let changed = dir.path().join("changed.txt");
+        std::fs::write(&first, "one\n").unwrap();
+        std::fs::write(&changed, "two\n").unwrap();
+        let planned = plan_edits(dir.path(), &[
+            ("first.txt".into(), vec![chunk("one", "ONE", false)]),
+            ("changed.txt".into(), vec![chunk("two", "TWO", false)]),
+        ]).unwrap();
+        std::fs::write(&changed, "someone else's edit\n").unwrap();
+        let err = write_planned(&planned).unwrap_err().to_string();
+        assert!(err.contains("nothing was changed") && err.contains("changed.txt"), "{err}");
+        assert_eq!(std::fs::read_to_string(&first).unwrap(), "one\n");
+        assert_eq!(std::fs::read_to_string(&changed).unwrap(), "someone else's edit\n");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn replacing_a_file_with_identical_bytes_invalidates_a_prepared_edit() {
+        use std::os::unix::fs::MetadataExt;
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("a.txt");
+        std::fs::write(&file, "one\n").unwrap();
+        let planned = plan_edits(dir.path(), &[("a.txt".into(), vec![chunk("one", "ONE", false)])]).unwrap();
+        let before = std::fs::metadata(&file).unwrap().ino();
+        let replacement = dir.path().join("replacement");
+        std::fs::write(&replacement, "one\n").unwrap();
+        std::fs::rename(&replacement, &file).unwrap();
+        assert_ne!(before, std::fs::metadata(&file).unwrap().ino());
+        assert!(write_planned(&planned).is_err());
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "one\n");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_retargeted_symlink_invalidates_the_prepared_batch() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.txt"), "one\n").unwrap();
+        std::fs::write(dir.path().join("b.txt"), "other\n").unwrap();
+        let alias = dir.path().join("alias.txt");
+        std::os::unix::fs::symlink("a.txt", &alias).unwrap();
+        let planned = plan_edits(dir.path(), &[("alias.txt".into(), vec![chunk("one", "ONE", false)])]).unwrap();
+        std::fs::remove_file(&alias).unwrap();
+        std::os::unix::fs::symlink("b.txt", &alias).unwrap();
+        assert!(write_planned(&planned).is_err());
+        assert_eq!(std::fs::read_to_string(dir.path().join("a.txt")).unwrap(), "one\n");
+        assert_eq!(std::fs::read_to_string(&alias).unwrap(), "other\n");
+    }
+
+    #[test]
+    fn rollback_leaves_external_changes_and_the_failed_target_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        let first = dir.path().join("first.txt");
+        let failed = dir.path().join("failed.txt");
+        std::fs::write(&first, "one\n").unwrap();
+        std::fs::write(&failed, "two\n").unwrap();
+        let planned = plan_edits(dir.path(), &[
+            ("first.txt".into(), vec![chunk("one", "ONE", false)]),
+            ("failed.txt".into(), vec![chunk("two", "TWO", false)]),
+        ]).unwrap();
+        let err = write_planned_with(&planned, |target| {
+            if target.path == "failed.txt" {
+                std::fs::write(&first, "external first\n")?;
+                std::fs::write(&failed, "external failed\n")?;
+                Err(std::io::Error::new(std::io::ErrorKind::PermissionDenied, "blocked"))
+            } else {
+                write_atomic_checked(&target.file, &target.new, || target.verify_original())
+            }
+        }).unwrap_err().to_string();
+        assert!(err.contains("not restored"), "{err}");
+        assert_eq!(std::fs::read_to_string(&first).unwrap(), "external first\n");
+        assert_eq!(std::fs::read_to_string(&failed).unwrap(), "external failed\n");
+    }
+
+    #[test]
+    fn a_noop_edit_does_not_replace_the_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("a.txt");
+        std::fs::write(&file, "one\n").unwrap();
+        let planned = plan_edits(dir.path(), &[("a.txt".into(), vec![chunk("one", "one", false)])]).unwrap();
+        let before = FileVersion::of(&std::fs::metadata(&file).unwrap());
+        write_planned(&planned).unwrap();
+        assert_eq!(FileVersion::of(&std::fs::metadata(&file).unwrap()), before);
     }
 
     #[test]
@@ -1630,6 +1910,25 @@ mod tests {
     }
 
     #[test]
+    fn long_grep_hits_and_parallel_chunk_output_stay_bounded() {
+        let dir = tempfile::tempdir().unwrap();
+        let long = format!("hit {}\n", "界".repeat(MAX_GREP_HIT_BYTES));
+        let body = long.repeat(MAX_GREP_HITS_PER_FILE);
+        for n in 0..GREP_CHUNK {
+            std::fs::write(dir.path().join(format!("{n:02}.txt")), &body).unwrap();
+        }
+        let re = regex::Regex::new("^hit").unwrap();
+        let found = grep_file(dir.path(), &dir.path().join("00.txt"), &re);
+        assert!(found.byte_capped);
+        assert!(found.hits.iter().all(|hit| hit.len() <= MAX_GREP_HIT_BYTES + 30));
+        assert!(found.hits.iter().map(String::len).sum::<usize>() < crate::MAX_OUTPUT_BYTES + MAX_GREP_HIT_BYTES + 30);
+        let out = grep(dir.path(), "^hit", None, false).unwrap();
+        assert!(out.len() < crate::MAX_OUTPUT_BYTES + 300);
+        assert!(out.contains("truncated"));
+        assert!(out.starts_with("00.txt:1:hit"), "path order changed");
+    }
+
+    #[test]
     fn a_search_that_asks_for_one_file_only_can_still_say_its_cap() {
         let dir = tempdir();
         let hits = (1..=50).map(|i| format!("hit {i}\nmiss\n")).collect::<String>();
@@ -1703,7 +2002,7 @@ mod tests {
         std::fs::write(dir.path().join("a.py"), body).unwrap();
 
         let under_indented = "    if media:\n        return await send(event)";
-        edit_file(dir.path(), "a.py", &[chunk(under_indented, "if media:\n            return None", false)]).unwrap();
+        edit_file(dir.path(), "a.py", &[chunk(under_indented, "if media:\n    return None", false)]).unwrap();
 
         let no_indent = "async def handle(self):";
         edit_file(dir.path(), "a.py", &[chunk(no_indent, "async def handle(self, q):", false)]).unwrap();
@@ -1726,6 +2025,27 @@ mod tests {
         .unwrap();
         let out = std::fs::read_to_string(dir.path().join("a.py")).unwrap();
         assert_eq!(out, "def f():\n    if media:\n        return 1\n    return 2\n");
+    }
+
+    #[test]
+    fn a_loose_replacement_keeps_inserted_nested_blocks_and_new_dedents() {
+        let old = "def f():\n    if ready:\n        work()\n        finish()\n    after()\n";
+        let edit = chunk(
+            "if ready:\n    work()\n    finish()\nafter()",
+            "if ready:\n    if retry:\n        work()\n    finish()\nafter()",
+            false,
+        );
+        let (out, _) = apply_edits("a.py", old.into(), &[edit]).unwrap();
+        assert_eq!(out, "def f():\n    if ready:\n        if retry:\n            work()\n        finish()\n    after()\n");
+    }
+
+    #[test]
+    fn a_loose_replacement_preserves_tab_relative_indentation_and_crlf() {
+        let old = "def f():\r\n\tif ready:\r\n\t\twork()\r\n\t\tafter()\r\n";
+        let edit = chunk("if ready:\n\twork()\n\tafter()", "if ready:\n\tif retry:\n\t\twork()\n\tafter()", false);
+        let (out, _) = apply_edits("a.py", old.into(), &[edit]).unwrap();
+        assert_eq!(out, "def f():\r\n\tif ready:\r\n\t\tif retry:\r\n\t\t\twork()\r\n\t\tafter()\r\n");
+        assert_eq!(with_file_indent("\u{2003}a\n\u{2003}\u{2003}b\n", &[" ".into()]), " a\n \u{2003}b\n");
     }
 
     #[test]
@@ -1768,6 +2088,42 @@ mod tests {
         assert_eq!(out, "one\ndos\n");
         assert!(apply_edits("f", "abc".into(), &[chunk("zzz", "y", false)]).is_err());
         assert_eq!(apply_edits("f", "a".repeat(10), &[]).unwrap(), ("a".repeat(10), 0));
+    }
+
+    #[test]
+    fn long_lines_are_drained_without_retaining_them() {
+        let input = b"abcdefghijklmnop\nnext\n";
+        let mut reader = std::io::BufReader::with_capacity(3, &input[..]);
+        let mut line = Vec::new();
+        assert_eq!(read_line_capped(&mut reader, &mut line, 5).unwrap(), (17, true));
+        assert_eq!(line, b"abcde");
+        line.clear();
+        assert_eq!(read_line_capped(&mut reader, &mut line, 5).unwrap(), (5, false));
+        assert_eq!(line, b"next\n");
+    }
+
+    #[test]
+    fn long_read_lines_and_large_windows_have_a_byte_cap() {
+        let dir = tempfile::tempdir().unwrap();
+        let long = format!("{}\nshort\n", "a".repeat(crate::MAX_OUTPUT_BYTES + 100));
+        std::fs::write(dir.path().join("long.txt"), long).unwrap();
+        let out = read_file(dir.path(), "long.txt", 0, 1).unwrap();
+        assert!(out.len() < crate::MAX_OUTPUT_BYTES + 200, "{} bytes retained", out.len());
+        assert!(out.contains("truncated"));
+        assert_eq!(read_file(dir.path(), "long.txt", 1, 1).unwrap(), "     2\tshort\n");
+        let many = "row\n".repeat(crate::MAX_OUTPUT_BYTES);
+        std::fs::write(dir.path().join("many.txt"), many).unwrap();
+        let out = read_file(dir.path(), "many.txt", 0, usize::MAX).unwrap();
+        assert!(out.len() < crate::MAX_OUTPUT_BYTES + 200);
+        assert!(out.contains("truncated"));
+    }
+
+    #[test]
+    fn a_capped_read_can_end_inside_utf8_without_claiming_the_file_is_binary() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("utf8.txt"), "界".repeat(crate::MAX_OUTPUT_BYTES / 3 + 5)).unwrap();
+        let out = read_file(dir.path(), "utf8.txt", 0, 1).unwrap();
+        assert!(out.contains("界") && out.contains("truncated"));
     }
 
     #[test]

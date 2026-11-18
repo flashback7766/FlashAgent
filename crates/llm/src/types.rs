@@ -150,6 +150,36 @@ pub struct Usage {
     pub allowance: Option<f64>,
 }
 
+impl Usage {
+    /// Frames within one response carry snapshots, not additional bills.
+    pub fn merge_latest(&mut self, other: Self) {
+        if other.prompt.is_some() { self.prompt = other.prompt; }
+        if other.completion.is_some() { self.completion = other.completion; }
+        if other.cached.is_some() { self.cached = other.cached; }
+        if other.mtp.is_some() { self.mtp = other.mtp; }
+        if other.cost.is_some() { self.cost = other.cost; }
+        if other.cost_details.is_some() { self.cost_details = other.cost_details; }
+        if other.allowance.is_some() { self.allowance = other.allowance; }
+        self.completion_measurement = other.completion_measurement;
+    }
+
+    pub(crate) fn normalized(mut self) -> Self {
+        self.prompt = self.prompt.filter(|n| *n >= 0);
+        self.completion = self.completion.filter(|n| *n >= 0);
+        self.cached = self.cached.filter(|n| *n >= 0).map(|n| self.prompt.map_or(n, |p| n.min(p)));
+        self.cost = self.cost.filter(|n| n.is_finite() && *n >= 0.0);
+        self.allowance = self.allowance.filter(|n| n.is_finite() && *n >= 0.0);
+        if let Some(details) = &mut self.cost_details {
+            details.upstream_cost = details.upstream_cost.filter(|n| n.is_finite() && *n >= 0.0);
+        }
+        self
+    }
+}
+
+pub(crate) fn allowance_in(value: &serde_json::Value) -> Option<f64> {
+    value.pointer("/opencode/allowance").and_then(serde_json::Value::as_f64).filter(|n| n.is_finite() && *n >= 0.0)
+}
+
 /// What a gateway says the provider behind it charged: the turn's own price,
 /// apart from what the gateway added for itself.
 #[derive(Debug, Clone, Copy, Default, PartialEq)]

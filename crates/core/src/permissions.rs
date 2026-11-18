@@ -1157,7 +1157,8 @@ impl PermissionState {
                         _ => Verdict::NeedApproval { diff: Some(format!("held for review: {reason}")) },
                     };
                 }
-                let allowed_by_rule = cmd.as_deref().is_some_and(|c| self.rules.lock().expect("rules lock").shell_allows(c));
+                let allowed_by_rule = mode != PermissionMode::Planning
+                    && cmd.as_deref().is_some_and(|c| self.rules.lock().expect("rules lock").shell_allows(c));
                 if allowed_by_rule {
                     return Verdict::Allow;
                 }
@@ -1257,11 +1258,14 @@ impl PermissionedTools {
     }
 
     /// Snapshots only after the verdict: a refused call changes nothing.
-    async fn run_allowed(&self, call: &ToolCall) -> ToolOutput {
+    async fn run_allowed(&self, call: &ToolCall, prepared: Option<Box<dyn crate::loop_::PreparedWrite>>) -> ToolOutput {
         if let Some(store) = self.state.snapshots() {
             store.before_write(&call.name, &call.args_json);
         }
-        self.inner.execute(call).await
+        match prepared {
+            Some(write) => write.execute().await,
+            None => self.inner.execute(call).await,
+        }
     }
 }
 
@@ -1297,26 +1301,35 @@ impl ToolExec for PermissionedTools {
                 images: Vec::new(),
             };
         }
-        match self.state.decide(call, || self.preview.as_deref().and_then(|p| p.write_preview(call))) {
-            Verdict::Allow => self.run_allowed(call).await,
-            Verdict::Deny(reason) => ToolOutput {
-                content: format!("{DENIED}{reason}"),
-                is_error: true,
-                images: Vec::new(),
-            },
+        // Decide before preparing: an outside-project read still needs its own
+        // permission. A prepared change belongs to the version shown on the card.
+        let verdict = self.state.decide(call, || None);
+        if let Verdict::Deny(reason) = verdict {
+            return ToolOutput { content: format!("{DENIED}{reason}"), is_error: true, images: Vec::new() };
+        }
+        let prepared = self.preview.as_deref().and_then(|p| p.prepare(call));
+        if let Some(error) = prepared.as_deref().and_then(|p| p.error()) {
+            return ToolOutput { content: error, is_error: true, images: Vec::new() };
+        }
+        match verdict {
+            Verdict::Allow => self.run_allowed(call, prepared).await,
+            Verdict::Deny(_) => unreachable!(),
             Verdict::NeedApproval { diff } => {
-                // Approving it would only lead to the same error.
-                if let Some(error) = self.preview.as_deref().and_then(|p| p.doomed(call)) {
-                    return ToolOutput { content: error, is_error: true, images: Vec::new() };
+                if prepared.is_none() {
+                    if let Some(error) = self.preview.as_deref().and_then(|p| p.doomed(call)) {
+                        return ToolOutput { content: error, is_error: true, images: Vec::new() };
+                    }
                 }
                 let req = ApprovalRequest {
                     tool: call.name.clone(),
                     args_json: call.args_json.clone(),
                     category: self.state.category(&call.name),
-                    diff,
+                    diff: prepared.as_deref().and_then(|p| p.preview()).or_else(|| {
+                        diff.or_else(|| self.preview.as_deref().and_then(|p| p.write_preview(call)))
+                    }),
                 };
                 match self.state.gate.approve(&req).await {
-                    Decision::Allow => self.run_allowed(call).await,
+                    Decision::Allow => self.run_allowed(call, prepared).await,
                     Decision::Deny => ToolOutput {
                         content: DECLINED.into(),
                         is_error: true,
@@ -1762,6 +1775,16 @@ mod tests {
         assert!(!is_read_only_shell_in(project.path(), "tree keys", posix), "the link was followed by tree");
         // A plain read of a project file is still a read.
         assert!(is_read_only_shell_in(project.path(), "cut -c1-10 src/main.rs", posix));
+    }
+
+    #[test]
+    fn saved_shell_rules_never_widen_planning() {
+        let state = PermissionState::new(PermissionMode::Planning, Arc::new(DenyAllGate));
+        state.allow_shell_prefix("npm test");
+        state.set_rules(RuleSet { shell_prefixes: vec!["npm test".into()], shell_exact: vec!["touch marker".into()], ..Default::default() });
+        for command in ["npm test", "touch marker"] {
+            assert!(matches!(state.decide(&call("run_shell", &serde_json::json!({"command": command}).to_string()), || None), Verdict::Deny(_)), "{command}");
+        }
     }
 
     /// A standing "Always" skips the card, never a rail: planning stays
@@ -2277,12 +2300,12 @@ mod tests {
     }
 
     #[test]
-    fn planning_denies_unlisted_shell_but_allows_listed() {
+    fn planning_denies_writes_even_with_a_saved_shell_rule() {
         let state = PermissionState::new(PermissionMode::Planning, Arc::new(DenyAllGate));
         let build = call("run_shell", r#"{"command":"cargo build --release"}"#);
         assert!(matches!(state.decide(&build, || None), Verdict::Deny(_)));
         state.allow_shell_prefix("cargo build");
-        assert_eq!(state.decide(&build, || None), Verdict::Allow);
+        assert!(matches!(state.decide(&build, || None), Verdict::Deny(_)));
         assert_eq!(state.decide(&call("run_shell", r#"{"command":"ls -la"}"#), || None), Verdict::Allow);
     }
 

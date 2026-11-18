@@ -246,13 +246,18 @@ if ! http_download "${DOWNLOAD_URL}" "${TMP_DIR}/archive.${EXT}"; then
 fi
 
 # 2. Check the download against the release's SHA256SUMS, as the in-app
-# updater does. Releases from before the manifest existed have none: that is a
-# warning. A manifest that lacks the file or disagrees with it stops the install.
+# updater does. The manifest is the only integrity check a release has, so a
+# release that lacks one is not installed unless the user says so: releases
+# from before b700 have none, and FLASHAGENT_ALLOW_UNVERIFIED=1 is how an old
+# build can still be installed on purpose. A manifest that lacks the file or
+# disagrees with it stops the install.
 sha256_of() {
   if command -v sha256sum >/dev/null 2>&1; then
     sha256sum "$1" | awk '{ print tolower($1) }'
   elif command -v shasum >/dev/null 2>&1; then
     shasum -a 256 "$1" | awk '{ print tolower($1) }'
+  elif command -v openssl >/dev/null 2>&1; then
+    openssl dgst -sha256 "$1" | awk '{ print tolower($NF) }'
   else
     return 1
   fi
@@ -261,9 +266,22 @@ sha256_of() {
 ASSET_NAME="$(printf '%s' "${DOWNLOAD_URL##*/}" | sed 's/%2[Bb]/+/g')"
 SUMS_URL="${DOWNLOAD_URL%/*}/SHA256SUMS"
 if ! http_download "${SUMS_URL}" "${TMP_DIR}/SHA256SUMS" 2>/dev/null; then
-  echo "Warning: this release has no SHA256SUMS (older releases lack it); the download is not verified."
+  if [ "${FLASHAGENT_ALLOW_UNVERIFIED:-0}" = "1" ]; then
+    echo "Warning: this release has no SHA256SUMS; installing it unverified because FLASHAGENT_ALLOW_UNVERIFIED=1."
+  else
+    echo "Error: this release has no SHA256SUMS, so the download cannot be verified."
+    echo "Nothing was installed. Releases from b700 on carry the manifest; set"
+    echo "FLASHAGENT_ALLOW_UNVERIFIED=1 to install an older one anyway."
+    exit 1
+  fi
 elif ! ACTUAL_SUM="$(sha256_of "${TMP_DIR}/archive.${EXT}")"; then
-  echo "Warning: neither sha256sum nor shasum is installed; the download is not verified."
+  if [ "${FLASHAGENT_ALLOW_UNVERIFIED:-0}" = "1" ]; then
+    echo "Warning: no sha256 tool (sha256sum, shasum or openssl) is installed; the download is not verified."
+  else
+    echo "Error: no sha256 tool (sha256sum, shasum or openssl) is installed, so the download cannot be verified."
+    echo "Nothing was installed. Install one of them, or set FLASHAGENT_ALLOW_UNVERIFIED=1 to skip the check."
+    exit 1
+  fi
 else
   # GitHub may rewrite '+' in an asset name; compare with it normalised too.
   EXPECTED_SUM="$(awk -v a="${ASSET_NAME}" '

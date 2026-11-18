@@ -109,6 +109,21 @@ pub fn tr_with(text: &str, word: &str) -> String {
 // spells.
 
 static RU: &[(&str, &str)] = &[
+    ("copy", "копировать"),
+    ("arguments", "аргументы"),
+    ("Not run:", "Не выполнено:"),
+    ("Failed to read", "Не удалось прочитать"),
+    ("Running subagent:", "Субагент работает:"),
+    ("Subagent finished:", "Субагент завершён:"),
+    ("requested", "запрошено"),
+    ("Proposed change", "Предложенное изменение"),
+    ("Requested change · original diff not retained", "Запрошенное изменение · исходный diff не сохранён"),
+    ("No result retained", "Результат не сохранён"),
+    ("declined", "отклонено"),
+    ("Copied tool output", "Вывод инструмента скопирован"),
+    ("Clipboard copy failed", "Не удалось скопировать в буфер"),
+    ("plural: entry/entries", "запись|записи|записей"),
+    ("plural: match/matches", "совпадение|совпадения|совпадений"),
     // --- Hint lines (key_hints values: what the key does, not the key) ---
     ("send", "отправить"),
     ("new line", "новая строка"),
@@ -691,6 +706,10 @@ static RU: &[(&str, &str)] = &[
     ("Connecting to {name} · {url}…", "Подключаемся к {name} · {url}…"),
     ("Already on {name} for this run", "Уже на {name} — только на этот запуск"),
     ("Background task {id} {state} · the agent will be told", "Фоновая задача {id} {state} · агенту сообщат"),
+    (
+        "Background task {id} ended in the session that started it · its output is in /tasks",
+        "Фоновая задача {id} завершилась в сессии, где её запустили · вывод есть в /tasks",
+    ),
     ("{from} · message to {to}", "{from} · сообщение для {to}"),
     ("Resumed session {id} · {messages}", "Продолжили сессию {id} · {messages}"),
     ("No other saved session in this folder", "Других сохранённых сессий в этой папке нет"),
