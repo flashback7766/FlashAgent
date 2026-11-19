@@ -1,5 +1,96 @@
 # Changelog
 
+## b701 — Everything that was supposed to be in b700
+
+- **YOLO is a mode you arm before you can reach it.** Settings → General has a
+  YOLO switch, off by default. With it on, Shift+Tab's cycle gains a fifth
+  step after Accept All, and `/mode yolo` is accepted; the status row shows
+  `[YOLO]` in the warning colour. In YOLO nothing is asked and nothing is held
+  back: the dangerous-command blacklist, the `/goal` refusals, the
+  outside-the-project and local-address rails and the command card are all
+  off, and a goal started from YOLO stays in it. Safe mode and the tools
+  switched off in Settings still win. Turning the switch off while YOLO is the
+  chosen mode falls back to Accept Edits, and a config that still names YOLO
+  after the switch was turned off never starts in it.
+- **The context gauge counts what the server actually saw.** Every adapter
+  publishes one latest cumulative usage snapshot per request; cache reads are
+  part of the prompt, and a completion of zero is a real measurement instead
+  of a missing one. A turn no longer adds up to more prompt than the server
+  reported.
+- **Growth after the measured request is added, not thrown away.** A request
+  the server counted, then a compaction that kept some history, then another
+  request: the gauge follows the growth instead of freezing on the first
+  number, and a session switch or model switch invalidates the old count.
+- **An unknown window says it is unknown.** No guessed 131 072: a server that
+  never said its context size shows `N tokens · context unknown` instead of a
+  percentage against an invented limit.
+- **Token labels are the decimals the gauge means.** 131 072 reads `131K`,
+  65 536 reads `66K`, 32 768 reads `33K`; the footer and the budget use one
+  function, so they cannot disagree.
+- **A tokenizer change mid-session invalidates that model's counts.** The
+  measurement and the cached counts share one revision, so a server that
+  reports a different tokenizer is recounted rather than trusted from the
+  previous model.
+- **A continuation hides its reasoning and asks for none.** When the harness
+  continues a cut answer, the request is sent with thinking off and the
+  reasoning deltas that still arrive are kept for replay, not printed as a
+  second thought the user did not ask for.
+- **Writes decide before the card is drawn.** A simulated edit that would fail
+  now fails before the approval card and its diff; the write itself runs once
+  the verdict is Allow. Planning mode cannot be widened by a saved shell rule.
+- **A line-range edit no longer has to send an empty `old_string`.** The
+  schema requires `new_string` only; the tool still refuses an edit that names
+  neither text nor lines.
+- **The tool line is one compact row, and the opened card is one card.** A
+  call reads as `› √ Read src/config.rs · 120 lines`: state, what it did, the
+  exact target, and the result the tool reported. Opening it gives one shared
+  card with Copy and Arguments, instead of a box per tool type.
+- **Only adjacent reads and searches group.** A run of `read_file`, `grep`
+  and `glob` folds into one row; a write, a command or a subagent always keeps
+  its own line, and a failure leaves the group instead of hiding in it.
+- **The whole collapsed row opens its call.** A click anywhere on the row
+  folds or unfolds it; body text in the opened card is not a fold target, and
+  the Copy control is a zone of its own.
+- **Rewind, memory and snapshots keep what they promise.** Restores use
+  descriptor-relative no-follow paths and an atomic temp file, keep the mode,
+  reject a symlink swapped in after the snapshot, and an old manifest without
+  modes stays rewindable. Memory writes are transactional, two creates of one
+  slug have one winner, and a description cannot close the generated record.
+- **A background task belongs to the session that started it.** A task that
+  is still running when another session opens reports its result as a line and
+  in `/tasks`, and is not handed to the newly opened conversation's model as
+  work it never did.
+- **Messages typed during a compaction are queued.** Their order and
+  attachments are preserved, the compaction can be cancelled, and the newer
+  draft is left alone.
+- **The screen keeps its place.** A turn that grows the transcript while the
+  user reads above it keeps the same lines under the eye, the selection is
+  copied as grapheme clusters, indentation survives, and the SGR sanitizer
+  refuses blink and conceal codes without eating colour channel values.
+- **Ctrl+C copies without freezing the event loop.** Every clipboard backend
+  is given a bounded wait, a tool that exits non-zero is not a successful
+  copy, and OSC 52 is the last try rather than a claim that the terminal took
+  it.
+- **The installer refuses a release it cannot verify.** A missing
+  `SHA256SUMS` stops `install.sh` and `install.ps1` unless
+  `FLASHAGENT_ALLOW_UNVERIFIED=1` is set on purpose; `openssl` joins
+  `sha256sum` and `shasum` as a hasher, and a failing hash tool is an error.
+- **An update never leaves the install path empty.** On Unix the old binary
+  is copied aside for a rollback and the new one replaces the name with one
+  atomic rename; a lock keeps two windows from updating the same folder at
+  once, and a stale lock is taken over after ten minutes.
+- **The update channel never moves backwards.** A re-run of an older tag
+  refuses to overwrite the rolling channel with a build its clients would see
+  as a downgrade; publishing the same build again still works.
+- **Uninstall removes the binary the owner actually starts.** A process
+  running from a parked copy after an update now resolves the sibling path,
+  so the installed binary and its PATH line are removed too.
+- **The Void template points at the real tag.** Beta tags are `bNNN`, not
+  `vbNNN`; the template now takes the exact tag the release was built from.
+- **Obsolete API is gone.** The old card renderers, dead helpers and
+  write-only fields left with the redesign, and the tests that described them
+  were rewritten around the row and card that exist now.
+
 ## b700 — Tools that agree with themselves
 
 - **The tool test times and counts one way.** The setup probe and the CLI
