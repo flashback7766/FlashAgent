@@ -112,7 +112,12 @@ case "${OS}" in
   Darwin)
     case "${ARCH}" in
       arm64|aarch64) ASSET_PATTERN="macos[^\"]*aarch64[^\"]*\.tar\.gz" ;;
-      x86_64) ASSET_PATTERN="macos[^\"]*x86_64[^\"]*\.tar\.gz" ;;
+      x86_64)
+        echo "Error: there is no prebuilt FlashAgent for Intel Macs anymore (Apple Silicon only)."
+        echo "Build it from source instead: install Rust from https://rustup.rs, then run"
+        echo "  cargo install --git https://github.com/${REPO} flashagent-tui"
+        exit 1
+        ;;
       *) echo "Error: Unsupported macOS architecture ${ARCH}"; exit 1 ;;
     esac
     EXT="tar.gz"

@@ -134,46 +134,9 @@ jobs:
           path: dist/*
           retention-days: 3
 
-  build-macos-x86_64:
-    name: Build macOS (Intel x86_64)
-    runs-on: macos-latest
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v7
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: x86_64-apple-darwin
-
-      - name: Cache Cargo dependencies
-        uses: Swatinem/rust-cache@v2
-
-      - name: Build macOS Intel (x86_64)
-        env:
-          FLASHAGENT_VERSION: ${{ github.ref_name }}
-          # A binary that needs AVX2 dies with SIGILL on older Macs, the same
-          # way b670 did on an Ivy Bridge Xeon.
-          RUSTFLAGS: -C target-cpu=x86-64
-        run: cargo build --release --target x86_64-apple-darwin -p flashagent-tui
-
-      - name: Package macOS Binaries
-        run: |
-          TAG="${{ github.ref_name }}"
-          mkdir dist
-          tar -czf "dist/flashagent-macos-${TAG}-x86_64.tar.gz" -C target/x86_64-apple-darwin/release flashagent
-          tar -czf dist/flashagent-macos-x86_64.tar.gz -C target/x86_64-apple-darwin/release flashagent
-
-      - name: Upload macOS Artifacts
-        uses: actions/upload-artifact@v7
-        with:
-          name: macos-artifacts-x86_64
-          path: dist/*
-          retention-days: 3
-
   publish-release:
     name: Publish GitHub Release
-    needs: [test, build-linux, build-windows, build-macos-arm64, build-macos-x86_64]
+    needs: [test, build-linux, build-windows, build-macos-arm64]
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
@@ -236,7 +199,7 @@ jobs:
           - Void Linux: \`flashagent-${VERSION}-void-linux-x86_64.tar.gz\`
           - Generic Linux: \`flashagent-${VERSION}-linux-x86_64.tar.gz\`
           - Windows: \`flashagent-windows-${VERSION}-x86_64.zip\` (raw \`flashagent-windows-x86_64.exe\` for the updater)
-          - macOS: \`flashagent-macos-${VERSION}-aarch64.tar.gz\` (Apple Silicon) / \`flashagent-macos-${VERSION}-x86_64.tar.gz\` (Intel)
+          - macOS: \`flashagent-macos-${VERSION}-aarch64.tar.gz\` (Apple Silicon)
           EOF
 
       - name: Take the stable release notes from CHANGELOG.md
