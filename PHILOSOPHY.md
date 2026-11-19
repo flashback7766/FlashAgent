@@ -26,7 +26,7 @@ Models and data stay on the machine by default. What FlashAgent sends out:
 - Update checks and downloads from GitHub Releases, verified against checksums and installed in the background for the next launch. Can be turned off in Settings.
 - Requests to the model provider the user chose, local or cloud.
 - MCP servers the user configured. A tool that is not marked read-only asks first and shows its arguments.
-- `web_fetch` and `web_search`: on by default and treated like reading a file in every mode; can be turned off in Settings.
+- `web` (search and fetch): on by default and treated like reading a file in every mode; can be turned off in Settings.
 - Telemetry: none. If it is ever added, it is opt-in and limited to a launch count, version, OS and which backends and tools are used, never session content; crash reports opt-in, stack traces only.
 
 ## 4. Technology

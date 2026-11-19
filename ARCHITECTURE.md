@@ -12,9 +12,9 @@ background service and no IPC.
 
 | Crate | What it holds |
 |---|---|
-| `core` | Agent loop and its events, permission modes and approval gating, subagents, memory (rule files and the per-fact store), system prompt, config, auto-effort learning, tool-calling check. |
+| `core` | Agent loop and its events, permission modes and approval gating, subagents, memory (rule files and the fact vault), system prompt in three sizes, config, auto-effort learning, tool-calling check. |
 | `llm` | One model client and the protocols it speaks: OpenAI-compatible, Anthropic, Gemini, Ollama. Thinking-preset discovery, text tool-call parsing, JSON repair, token estimates. |
-| `tools` | Built-in tools (files, patching, shell, search, git, memory, web), the MCP client and marketplace, subagent spawning. |
+| `tools` | The built-in tools, one per job (files, shell, git, web, memory, subagents, user_interaction), the MCP client and marketplace. |
 | `tui` | The terminal UI: chat view, composer, menus, settings, setup wizard, `/goal`, image attachments, what's-new screen. |
 | `svc` | The self-updater. |
 
@@ -147,22 +147,34 @@ order and holds a rule to a single place, because a rule stated twice is a
 rule to keep in sync. Sections that only apply in one mode are left out
 otherwise: the rules for a `/goal` run and the rules for delegating.
 
+The prompt comes in three sizes — compact (about 650 tokens: the loop, the
+tools, how to edit and verify), standard (about 2,100) and full (about 3,900,
+the whole method). `PromptDetail::auto` follows the model: a small local
+window takes the compact one, a large cloud window the full one; `/prompt`
+pins a size until `auto` is asked for again. The tier is rebuilt only when
+the model, the provider or `/prompt` changes, never per turn, so the
+provider's prompt cache keeps matching.
+
 ## Permissions
 
-Four modes: Planning (read-only; shell commands on a short list of programs
+Five modes: Planning (read-only; shell commands on a short list of programs
 that only read run, everything else is refused), Manual (ask before anything
 that is not a read), Accept Edits (file changes allowed, shell asks), Accept
-All. Shell approvals can be remembered per command prefix, and a prefix never
-covers a different subcommand: approving `npm test` does not approve
-`npm publish`. A remembered rule is kept in the config, survives a restart,
-and `/rules` lists what stands and takes a rule back. A file outside the
-project asks in Manual and Accept Edits and is refused in Planning and during
-`/goal`; Accept All lets it through,
-since its shell already reaches any file. A short blacklist of dangerous commands (recursive force
-deletes, `sudo`, force pushes, hard resets, ...) still asks in Accept All and
-is refused outright during `/goal`, where nobody is there to answer. A
-declined call is returned to the model as an error it must not retry. The
-mode the user is in is saved as the one to start in next time.
+All, and YOLO — which only exists once Settings → General turns it on:
+nothing asks, the dangerous-command blacklist stands down, and files outside
+the project and local addresses go through. Safe mode and switched-off tools
+still hold over every mode. Shell approvals can be remembered per command
+prefix, and a prefix never covers a different subcommand: approving `npm
+test` does not approve `npm publish`. A remembered rule is kept in the
+config, survives a restart, and `/rules` lists what stands and takes a rule
+back. A file outside the project asks in Manual and Accept Edits and is
+refused in Planning and during `/goal`; Accept All and YOLO let it through,
+since their shell already reaches any file. A short blacklist of dangerous
+commands (recursive force deletes, `sudo`, force pushes, hard resets, ...)
+still asks in Accept All and is refused outright during `/goal`, where
+nobody is there to answer. A declined call is returned to the model as an
+error it must not retry. The mode the user is in is saved as the one to
+start in next time.
 
 Safe mode is a layer on top of the permission mode, not a fifth mode: reading
 and editing inside the project, and nothing else. The shell, the web and the
@@ -248,13 +260,21 @@ local address is warmed.
 ## Memory
 
 - Rule files: `MEMORY.md`, `CLAUDE.md`, `AGENTS.md` and `.agents/rules/` in
-  the project, and `~/.flashagent/` globally, injected into the prompt.
-  `MEMORY.md` is split at `<!-- flashagent:memory -->`: the owner's text is
-  an instruction, the index the model wrote is a record the model is told to
-  look up through `memory_read`, not an order.
-- Remembered facts: one file per fact under `memory/`, indexed by
-  `MEMORY.md`. Facts about the user are global, facts about the code stay
-  with the project. Writes are refused during `/goal`.
+  the project, and `~/.flashagent/` globally, injected into the prompt. They
+  are instructions, and they outrank memory.
+- Remembered facts are a vault: `~/.flashagent/projects/<project-slug>/memory/`
+  for the project, `~/.flashagent/memory/` for facts about the user. Each fact
+  is one topic file with frontmatter (name, description, kind, date); the
+  `MEMORY.md` index links them, and only the index rides in the prompt —
+  fitted to a token budget, read once per session, so the provider's prompt
+  cache keeps matching. A body is read through the `memory` tool when the
+  model needs it. Files are private (0600 in a 0700 directory), written
+  atomically, and never followed through symlinks. Writes are refused during
+  `/goal`.
+- The previous store (facts inside `MEMORY.md` behind generated markers) is
+  still readable: `/migrate-memory` lists what it holds, backs it up, and
+  imports it fact by fact; `/memory` browses both stores and names the old
+  one until it is migrated.
 
 ## Terminal UI
 
@@ -298,6 +318,12 @@ graph LR
 - `ChatView::render_split` also records which conversation line each row
   came from, so a click on a thought or a tool call opens or folds that one
   (`ChatLine::is_expanded` overrides F2 for it).
+- The mouse works the whole frame: every list scrolls with the wheel, each
+  card closes from its own ✕, the permission-mode label and the context
+  gauge are buttons, a drag selects transcript text and copies it when the
+  button comes up, and the reading screens (`/usage`, `/memory`, `/agents`)
+  answer clicks on their rows and hint words the way their keys do. Shift
+  belongs to the terminal, so text selection stays available.
 - Nothing moves the layout while it animates: the welcome card holds its
   full height while it draws itself in, and the tip line keeps the same
   number of rows for every tip at a given width.
@@ -347,7 +373,10 @@ Plain files under `~/.flashagent/`: `config.json` (settings and the saved
 providers, keys included), `sessions/*.json`,
 `snapshots/<session>/` (file copies for `/rewind`), `prompt_history.jsonl`
 (what was sent, for ↑ and Ctrl+F; kept only while sessions are saved),
-`memory/` and `MEMORY.md`, `rules/`, `skills/`, `mcp.json`, `effort.json`,
+`projects/<project-slug>/memory/` and `memory/` (the fact vaults, project
+and global), `memory-backup/` (what `/migrate-memory` saved before it
+moved anything), `usage.json` (lifetime token and cost totals),
+`rules/`, `skills/`, `mcp.json`, `effort.json`,
 `image-costs.json`, `prefill_cache.json`, `tokens.json` (how far the local
 tokenizer is from each model). A project can add its own `.mcp.json`,
 `.agents/rules/` and `.agents/skills/`.
