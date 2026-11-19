@@ -12,6 +12,7 @@ use std::time::Instant;
 
 use flashagent_core::loop_::LoopEvent;
 use flashagent_core::{ChildUsage, DoneReason, SubagentEvent};
+use crate::{ChatView, LineKind};
 
 /// How a child ended, and the words the app shows for it.
 fn outcome(done: DoneReason) -> &'static str {
@@ -74,6 +75,14 @@ struct Child {
     /// `None` while the report is unchecked, which is the state a reader most
     /// needs to see: a claim nobody has looked at yet.
     review: Option<flashagent_core::ReviewVerdict>,
+    /// The full report, once it arrives. Kept after the row closes so `/agents`
+    /// can still show what the child said.
+    answer: Option<String>,
+    /// What the parent checked, in the parent's words, when a review arrived.
+    review_note: Option<String>,
+    /// The child's own transcript, built from its events: steps, tool calls,
+    /// thoughts and the report. This is what the detail panel shows.
+    chat: ChatView,
     started: Instant,
     /// How long it ran, fixed the moment it ended. A child that is done is not
     /// running any more, so the clock on its row has to stop: read live it would
@@ -113,6 +122,8 @@ impl AgentTree {
                 usage: c.usage,
                 done: c.done,
                 review: c.review,
+                answer: c.answer.clone(),
+                review_note: c.review_note.clone(),
                 seconds: c.seconds(),
             })
             .collect()
@@ -122,36 +133,40 @@ impl AgentTree {
     /// changed and the screen has to be redrawn.
     pub fn apply(&mut self, event: &SubagentEvent) -> bool {
         let child = self.child(&event.id, &event.role);
+        let before_lines = child.chat.line_count();
+        child.chat.on_event(&event.event);
+        child.chat.trim_to_last(400);
+        let chat_changed = child.chat.line_count() != before_lines;
         match &event.event {
             LoopEvent::TurnDelta(text) => {
                 let said = last_line(text);
                 if !said.is_empty() {
                     child.phase = ChildPhase::Writing;
-                    return set_doing(child, said);
+                    return set_doing(child, said) || chat_changed;
                 }
             }
             LoopEvent::ReasoningDelta(text) => {
                 let thought = last_line(text);
                 if !thought.is_empty() {
                     child.phase = ChildPhase::Thinking;
-                    return set_doing(child, crate::i18n::tr_fill("thinking: {thought}", &[("thought", &thought)]));
+                    return set_doing(child, crate::i18n::tr_fill("thinking: {thought}", &[("thought", &thought)])) || chat_changed;
                 }
             }
             LoopEvent::ToolStarted { name, .. } => {
                 child.current_call = Some((name.clone(), false));
                 child.phase = ChildPhase::Tooling(name.clone());
-                return set_doing(child, crate::i18n::tr_fill("calling {name}", &[("name", name)]));
+                return set_doing(child, crate::i18n::tr_fill("calling {name}", &[("name", name)])) || chat_changed;
             }
             LoopEvent::ToolFinished { is_error, .. } => {
                 let name = child.current_call.take().map(|(n, _)| n).unwrap_or_else(|| "a tool".into());
                 // The result is in; the model has it and has not spoken yet.
                 child.phase = ChildPhase::Thinking;
-                return set_doing(child, if *is_error { crate::i18n::tr_fill("{name} failed", &[("name", &name)]) } else { crate::i18n::tr_fill("{name} done", &[("name", &name)]) });
+                return set_doing(child, if *is_error { crate::i18n::tr_fill("{name} failed", &[("name", &name)]) } else { crate::i18n::tr_fill("{name} done", &[("name", &name)]) }) || chat_changed;
             }
             LoopEvent::StepStarted { step, max_steps } => {
                 child.usage.steps = child.usage.steps.max(*step);
                 let of = max_steps.map(|m| format!("/{m}")).unwrap_or_default();
-                return set_doing(child, crate::i18n::tr_fill("step {step}{of}", &[("step", &step.to_string()), ("of", &of)]));
+                return set_doing(child, crate::i18n::tr_fill("step {step}{of}", &[("step", &step.to_string()), ("of", &of)])) || chat_changed;
             }
             LoopEvent::Usage(u) => {
                 child.usage.prompt_tokens += u.prompt.unwrap_or(0).max(0) as u64;
@@ -172,15 +187,43 @@ impl AgentTree {
             // itself, so the start event would only be noise here.
             LoopEvent::Compacted { .. } | LoopEvent::SteeringInjected(_) | LoopEvent::CompactionStarted => {}
         }
-        false
+        chat_changed
     }
 
     /// The parent checked this child's report and said so. The row says what it
     /// made of it, so a report is never read as a finding on its own.
-    pub fn record_review(&mut self, id: &str, verdict: flashagent_core::ReviewVerdict) {
+    pub fn record_review(&mut self, id: &str, verdict: flashagent_core::ReviewVerdict, note: &str) {
         if let Some(child) = self.children.get_mut(id) {
             child.review = Some(verdict);
+            child.review_note = Some(note.to_string());
+            child.chat.push_line(LineKind::System, format!("review: {} — {note}", verdict.describe()));
         }
+    }
+
+    /// The child's final report: kept in the tree and in its transcript.
+    pub fn record_answer(&mut self, id: &str, answer: &str) {
+        if let Some(child) = self.children.get_mut(id) {
+            child.answer = Some(answer.to_string());
+            if !answer.trim().is_empty() {
+                child.chat.push_line(LineKind::Assistant, answer.to_string());
+            }
+        }
+    }
+
+    /// A message the person or another agent sent. It belongs in the child's
+    /// transcript, because it changes what the child is doing.
+    pub fn record_message(&mut self, from: &str, from_role: &str, to: &str, text: &str) {
+        if let Some(child) = self.children.get_mut(to) {
+            child.chat.push_line(LineKind::User, format!("{from_role} ({from}): {text}"));
+        }
+        if let Some(child) = self.children.get_mut(from) {
+            child.chat.push_line(LineKind::System, format!("to {to}: {text}"));
+        }
+    }
+
+    /// The child's own transcript, for the detail panel.
+    pub fn chat(&self, id: &str) -> Option<&ChatView> {
+        self.children.get(id).map(|c| &c.chat)
     }
 
     /// What a child is doing right now, cut to `width` so a long thought never
@@ -316,6 +359,9 @@ impl AgentTree {
                     usage: ChildUsage::default(),
                     done: None,
                     review: None,
+                    answer: None,
+                    review_note: None,
+                    chat: ChatView::default(),
                     started: Instant::now(),
                     finished_secs: None,
                     current_call: None,
@@ -423,6 +469,7 @@ fn cut(text: &str, width: usize) -> String {
 }
 
 /// What `/agents` shows for one child.
+#[derive(Debug, Clone)]
 pub struct AgentRow {
     pub id: String,
     pub role: String,
@@ -430,6 +477,8 @@ pub struct AgentRow {
     pub usage: ChildUsage,
     pub done: Option<DoneReason>,
     pub review: Option<flashagent_core::ReviewVerdict>,
+    pub answer: Option<String>,
+    pub review_note: Option<String>,
     pub seconds: u64,
 }
 
