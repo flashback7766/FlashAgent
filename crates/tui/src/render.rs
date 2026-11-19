@@ -2236,14 +2236,33 @@ impl App {
     /// summed over every request the turn made. A turn with tools is many
     /// requests, and each one is added rather than replacing what came before.
     pub(crate) fn turn_token_phrase(&self) -> Option<String> {
-        let out = self.token_tracker.turn_output();
-        if out == 0 {
+        let out = self.token_tracker.retained_output();
+        let agents = self.token_tracker.subagent_output();
+        if out == 0 && agents == 0 {
             return None;
         }
         // Through the shared formatter rather than a second one: this line had its
         // own `k`-only rule, so a turn that spent four million tokens read as
         // "4621.2k out" while `/goal` said "4.6M" for the same work.
-        Some(format!("{} out", flashagent_tui::goal::human_count(out as i64)))
+        //
+        // The parent's output is what stays in this conversation's window; the
+        // children work in their own requests, so their output is named apart
+        // rather than added to a number the context bar can never reach.
+        let mut phrase = String::new();
+        if out > 0 {
+            phrase.push_str(&format!("{} out", flashagent_tui::goal::human_count(out as i64)));
+        }
+        if agents > 0 {
+            if !phrase.is_empty() {
+                phrase.push_str(" · ");
+            }
+            phrase.push_str(&format!(
+                "{} {}",
+                flashagent_tui::goal::human_count(agents as i64),
+                flashagent_tui::i18n::tr("agents")
+            ));
+        }
+        Some(phrase)
     }
 
     pub(crate) fn animating(&self) -> bool {

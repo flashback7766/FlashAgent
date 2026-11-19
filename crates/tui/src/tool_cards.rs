@@ -213,12 +213,38 @@ pub(crate) fn requested_change(name: &str, parsed: &serde_json::Value) -> (usize
     }
 }
 
-fn outcome(call: &ToolCallRecord, parsed: &serde_json::Value) -> Option<String> {
+/// One outcome line: what the tool reported. Only a real change size gets the
+/// diff colours; any other text keeps its own colour even when it contains
+/// something shaped like `-30` (a shell argument, a quoted command).
+enum Outcome {
+    Text(String),
+    Change(String),
+}
+
+impl Outcome {
+    fn text(&self) -> &str {
+        match self {
+            Self::Text(text) | Self::Change(text) => text,
+        }
+    }
+
+    fn is_change(&self) -> bool {
+        matches!(self, Self::Change(_))
+    }
+
+    /// The outcome as it goes into a row: diff sizes are coloured, text is not.
+    fn styled(&self) -> String {
+        let text = one_line(self.text());
+        if self.is_change() { colored_size(&text) } else { text }
+    }
+}
+
+fn outcome(call: &ToolCallRecord, parsed: &serde_json::Value) -> Option<Outcome> {
     if call.is_running {
         return None;
     }
     if let Some(note) = call.result.as_deref().and_then(not_run_note) {
-        return Some(note.to_string());
+        return Some(Outcome::Text(note.to_string()));
     }
     let result = call.result.as_deref();
     if call.name == "run_shell" {
@@ -226,11 +252,11 @@ fn outcome(call: &ToolCallRecord, parsed: &serde_json::Value) -> Option<String> 
             line.trim().strip_prefix("exit code:")?.trim().parse::<i32>().ok()
         }));
         if let Some(code) = code {
-            return Some(format!("{} {code}", tr("exit")));
+            return Some(Outcome::Text(format!("{} {code}", tr("exit"))));
         }
     }
     if call.is_error {
-        return result.and_then(failure_reason);
+        return result.and_then(failure_reason).map(Outcome::Text);
     }
     if call.name == "run_shell" {
         // Shell output is not a list of lines to count; without an exit code
@@ -239,26 +265,33 @@ fn outcome(call: &ToolCallRecord, parsed: &serde_json::Value) -> Option<String> 
     }
     match call.name.as_str() {
         "read_file" => result.map(|text| {
-            if text.trim() == "(empty or past end of file)" { text.trim().to_string() }
-            else { crate::text::plural(crate::tool_views::read_line_count(text), "line", "lines") }
+            Outcome::Text(if text.trim() == "(empty or past end of file)" { text.trim().to_string() }
+            else { crate::text::plural(crate::tool_views::read_line_count(text), "line", "lines") })
         }),
-        "grep" => result.map(|text| crate::text::plural(text.lines().filter(|line| crate::tool_views::search_match(line).is_some()).count(), "match", "matches")),
-        "glob" => result.map(|text| crate::text::plural(crate::tool_views::listing_count(text), "file", "files")),
-        "list_dir" => result.map(|text| crate::text::plural(crate::tool_views::listing_count(text), "entry", "entries")),
+        "grep" => result.map(|text| Outcome::Text(crate::text::plural(text.lines().filter(|line| crate::tool_views::search_match(line).is_some()).count(), "match", "matches"))),
+        "glob" => result.map(|text| Outcome::Text(crate::text::plural(crate::tool_views::listing_count(text), "file", "files"))),
+        "list_dir" => result.map(|text| Outcome::Text(crate::text::plural(crate::tool_views::listing_count(text), "entry", "entries"))),
         "edit_file" | "write_file" | "patch_file" => {
             if call.diff.is_some() {
-                change_size(call.added, call.deleted).or_else(|| result.and_then(failure_reason))
+                change_size(call.added, call.deleted)
+                    .map(Outcome::Change)
+                    .or_else(|| result.and_then(failure_reason).map(Outcome::Text))
             } else {
                 // Saved sessions keep the arguments, not the original files.
                 // Their requested strings cannot stand in for a real diff.
                 let (added, deleted, _) = requested_change(&call.name, parsed);
-                change_size(added, deleted).map(|size| format!("{} {size}", tr("requested")))
-                    .or_else(|| result.and_then(failure_reason))
+                change_size(added, deleted)
+                    .map(|size| Outcome::Change(format!("{} {size}", tr("requested"))))
+                    .or_else(|| result.and_then(failure_reason).map(Outcome::Text))
             }
         }
         _ => result.and_then(|text| {
             let count = text.lines().count();
-            if count > 1 { Some(crate::text::plural(count, "line", "lines")) } else { failure_reason(text) }
+            if count > 1 {
+                Some(Outcome::Text(crate::text::plural(count, "line", "lines")))
+            } else {
+                failure_reason(text).map(Outcome::Text)
+            }
         }),
     }
 }
@@ -267,7 +300,7 @@ struct Summary {
     state: CallState,
     action: String,
     target: String,
-    outcome: Option<String>,
+    outcome: Option<Outcome>,
     elapsed_ms: Option<u64>,
 }
 
@@ -279,7 +312,12 @@ impl Summary {
         let mut suffix = String::new();
         if let Some(result) = &self.outcome {
             let result_colour = if self.state == CallState::Failed { FAILED } else { MUTED };
-            suffix.push_str(&format!(" {FAINT}·{OFF} {result_colour}{}{OFF}", colored_size(&one_line(result))));
+            let shown = result.styled();
+            if result.is_change() {
+                suffix.push_str(&format!(" {FAINT}·{OFF} {shown}"));
+            } else {
+                suffix.push_str(&format!(" {FAINT}·{OFF} {result_colour}{shown}{OFF}"));
+            }
         }
         if let Some(ms) = self.elapsed_ms {
             let elapsed = crate::goal::human_duration(std::time::Duration::from_millis(ms));
@@ -319,7 +357,7 @@ pub(crate) fn call_title(call: &ToolCallRecord, waiting: bool) -> String {
         title.push_str(&format!(" {FAINT}·{OFF} {STRONG}{}{OFF}", one_line(&summary.target)));
     }
     if let Some(result) = summary.outcome {
-        title.push_str(&format!(" {FAINT}·{OFF} {MUTED}{}{OFF}", colored_size(&one_line(&result))));
+        title.push_str(&format!(" {FAINT}·{OFF} {MUTED}{}{OFF}", result.styled()));
     }
     if let Some(ms) = summary.elapsed_ms {
         title.push_str(&format!(" {FAINT}· {}{OFF}", crate::goal::human_duration(std::time::Duration::from_millis(ms))));
@@ -372,7 +410,7 @@ fn line_summary(line: &ChatLine, waiting: bool) -> Option<Summary> {
     // Every exact target is retained in the row's source; the cell budget
     // clips it visibly, and the shared card lists the calls individually.
     let outcome = if state == CallState::Failed {
-        Some(tr("{failed} failed").replace("{failed}", &line.tool_calls.iter().filter(|call| has_problem(call)).count().to_string()))
+        Some(Outcome::Text(tr("{failed} failed").replace("{failed}", &line.tool_calls.iter().filter(|call| has_problem(call)).count().to_string())))
     } else if results.len() == 1 { results.into_iter().next() } else { None };
     let elapsed_ms = line.tool_calls.iter().try_fold(0u64, |sum, call| sum.checked_add(call.elapsed_ms?));
     Some(Summary { state, action: format!("{action} {}", counts.join(", ")), target: targets, outcome, elapsed_ms })
@@ -519,6 +557,29 @@ mod tests {
         assert!(out.contains(&format!("{REMOVED_COLOUR}-1{OFF}")));
         assert_eq!(strip_ansi(&out), "my-file.rs +3 -1");
         assert_eq!(colored_size("c++ -std=c++20"), "c++ -std=c++20");
+    }
+
+    #[test]
+    fn a_command_argument_shaped_like_a_removed_count_is_never_red() {
+        // `head -30` is an option like any other. Only a real change size gets
+        // the diff colours; the command, its target and any text quoting it
+        // keep the row's own colour.
+        let mut shell = started("run_shell", r#"{"command":"head -30 notes.txt"}"#);
+        shell.tool_finished(false, Some("exit code: 0\noutput:\nline"));
+        let row = &shell.lines.last().expect("the row").text;
+        assert!(!row.contains(&format!("{REMOVED_COLOUR}-30")), "the command's -30 was painted as a removed line: {row:?}");
+        assert!(strip_ansi(row).contains("head -30 notes.txt"));
+
+        let mut failed = started("run_shell", r#"{"command":"head -30 missing.txt"}"#);
+        failed.tool_finished(true, Some("run_shell: head: cannot open 'missing.txt' (head -30)"));
+        let row = &failed.lines.last().expect("the row").text;
+        assert!(!row.contains(&format!("{REMOVED_COLOUR}-30")), "a failure reason's -30 was painted as a removed line: {row:?}");
+
+        // A change keeps the colours: that is what they are for.
+        let mut edit = started("edit_file", r#"{"path":"a.rs","edits":[{"old_string":"one","new_string":"two"}]}"#);
+        edit.tool_finished(false, Some("applied"));
+        let row = &edit.lines.last().expect("the row").text;
+        assert!(row.contains(ADDED_COLOUR) && row.contains(REMOVED_COLOUR), "a requested +1 -1 lost its colours: {row:?}");
     }
 
     #[test]
