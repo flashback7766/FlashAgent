@@ -1027,6 +1027,8 @@ impl Decoder {
                 completion: Some(t.output.max(0)),
                 completion_measurement: crate::types::CompletionMeasurement::Unavailable,
                 cached: Some(t.read),
+                cache_written: Some(t.written),
+                reasoning: None,
                 mtp: None,
                 // Anthropic prices per token, not per turn, and this is a stream:
                 // there is no account total to read here.
@@ -1665,7 +1667,7 @@ mod tests {
             json!({ "type": "message_stop" }),
         ]);
         let usage: Vec<Usage> = events(&transcript, 64).into_iter().filter_map(|e| if let LlmEvent::Usage(u) = e { Some(u) } else { None }).collect();
-        assert_eq!(usage, [Usage { prompt: Some(4320), completion: Some(42), completion_measurement: crate::types::CompletionMeasurement::Unavailable, cached: Some(4000), mtp: None, cost: None, cost_details: None, ..Default::default() }], "once, at the end: the loop adds every report up");
+        assert_eq!(usage, [Usage { prompt: Some(4320), completion: Some(42), completion_measurement: crate::types::CompletionMeasurement::Unavailable, cached: Some(4000), cache_written: Some(300), reasoning: None, mtp: None, cost: None, cost_details: None, ..Default::default() }], "once, at the end: the loop adds every report up");
     }
 
     #[test]

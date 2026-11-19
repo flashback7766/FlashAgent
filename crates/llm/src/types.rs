@@ -137,6 +137,14 @@ pub struct Usage {
     pub completion_measurement: CompletionMeasurement,
     /// Prefix cache reuse (f_keep).
     pub cached: Option<i64>,
+    /// Prompt tokens the provider wrote into its cache for this request
+    /// (Anthropic's `cache_creation_input_tokens`). Most APIs report only the
+    /// reads, so this stays `None` where the number does not exist.
+    pub cache_written: Option<i64>,
+    /// Thinking tokens inside `completion`, when the API counts them apart:
+    /// OpenAI's `completion_tokens_details.reasoning_tokens`, Responses'
+    /// `output_tokens_details`, Gemini's `thoughtsTokenCount`.
+    pub reasoning: Option<i64>,
     pub mtp: Option<MtpStats>,
     /// What the turn cost, in the account's own currency, when the backend
     /// prices it (OpenRouter sends `usage.cost`). A local server prices nothing,
@@ -156,6 +164,8 @@ impl Usage {
         if other.prompt.is_some() { self.prompt = other.prompt; }
         if other.completion.is_some() { self.completion = other.completion; }
         if other.cached.is_some() { self.cached = other.cached; }
+        if other.cache_written.is_some() { self.cache_written = other.cache_written; }
+        if other.reasoning.is_some() { self.reasoning = other.reasoning; }
         if other.mtp.is_some() { self.mtp = other.mtp; }
         if other.cost.is_some() { self.cost = other.cost; }
         if other.cost_details.is_some() { self.cost_details = other.cost_details; }
@@ -167,6 +177,8 @@ impl Usage {
         self.prompt = self.prompt.filter(|n| *n >= 0);
         self.completion = self.completion.filter(|n| *n >= 0);
         self.cached = self.cached.filter(|n| *n >= 0).map(|n| self.prompt.map_or(n, |p| n.min(p)));
+        self.cache_written = self.cache_written.filter(|n| *n >= 0).map(|n| self.prompt.map_or(n, |p| n.min(p)));
+        self.reasoning = self.reasoning.filter(|n| *n >= 0);
         self.cost = self.cost.filter(|n| n.is_finite() && *n >= 0.0);
         self.allowance = self.allowance.filter(|n| n.is_finite() && *n >= 0.0);
         if let Some(details) = &mut self.cost_details {

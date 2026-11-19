@@ -11,6 +11,7 @@ const HELP_COMMANDS: &[(&str, &str)] = &[
     ("/effort, /t, F4", "thinking effort (also Ctrl+T)"),
     ("/mode [plan|man|edits|all|yolo]", "permission mode (also Shift+Tab; YOLO needs Settings)"),
     ("/context, F1", "what fills the context window"),
+    ("/usage", "session, saved-session and lifetime tokens and cost, plus provider limits"),
     ("/compact [focus]", "summarize older turns to free context"),
     ("/memory [summary]", "what FlashAgent remembers; the summary groups it by topic"),
     ("/verbose [all|last|off]", "show thoughts and tool calls (also F2, Alt+O, Ctrl+O)"),
@@ -136,7 +137,7 @@ fn while_running(name: &str) -> WhileRunning {
     match name {
         "help" | "?" | "whatsnew" | "changelog" | "memory" | "memories" | "context" | "verbose" | "expand" | "think"
         | "o" | "diff" | "commit" | "settings" | "config" | "sampling" | "params" | "effort" | "thinking" | "t"
-        | "model" | "models" | "m" | "mode" | "skills" | "tools" | "notices" | "log" | "safe" | "rules" | "cost" | "theme" => {
+        | "model" | "models" | "m" | "mode" | "skills" | "tools" | "notices" | "log" | "safe" | "rules" | "usage" | "theme" => {
             WhileRunning::Now
         }
         "compact" | "clear" | "export" | "rewind" => WhileRunning::AfterTurn,
@@ -373,7 +374,7 @@ impl App {
                     ).warning());
                 }
             }
-            "cost" => self.show_cost(),
+            "usage" => self.open_usage(cx),
             "whatsnew" | "changelog" => self.show_whatsnew(cx).await,
             "memory" | "memories" => {
                 let mut modal = open_memory_modal();
@@ -745,70 +746,52 @@ impl App {
         self.renderer.scroll_to_bottom();
     }
 
-    /// `/cost`: what the session has cost, and where. Says plainly when the
-    /// backend prices nothing, rather than reporting a confident zero.
-    fn show_cost(&mut self) {
-        use flashagent_core::CostLedger;
-        // A plan that bills by quota sends no per-turn price: what it counted
-        // against the monthly allowance is the only figure it gave, and
-        // calling that "free" would be a lie.
-        let allowance = self.cost.allowance();
-        let billed = self.cost.total().filter(|total| *total > 0.0);
-        if let (Some((counted, turns)), None) = (allowance, billed) {
-            self.chat.push_system(&tr_fill(
-                "This session: ${amount} of the monthly allowance over {turns}",
-                &[("amount", &CostLedger::format_amount(counted)), ("turns", &CostLedger::turns_phrase(turns))],
-            ));
-            return;
-        }
-        let Some(total) = self.cost.total() else {
-            self.chat.push_system(&tr_fill(
-                "No backend in this session reported a price \u{b7} {name} is running free on your own hardware, or its API does not say what a turn costs",
-                &[("name", &self.config.active_profile().name)],
-            ));
-            return;
+    /// `/usage`: the session's money and tokens, the saved sessions, the
+    /// lifetime counter and the providers' own limits, in one tabbed card.
+    /// The numbers are a reading taken when it opens, not a live counter.
+    fn open_usage(&mut self, cx: &LoopCtx<'_>) {
+        use flashagent_tui::usage_view::{SessionUsage, UsageView};
+        let session = SessionUsage {
+            provider: self.config.active_profile().name.clone(),
+            model: self.current_model.clone(),
+            totals: self.cost.totals().clone(),
+            upstream: self.cost.upstream_total(),
+            allowance: self.cost.allowance(),
+            priced_requests: self.cost.priced_turns(),
+            context: self.context_usage.clone(),
+            turn_out: self.token_tracker.retained_output(),
+            turn_agents: self.token_tracker.subagent_output(),
         };
-        self.chat.push_system(&tr_fill(
-            "This session: ${amount} over {turns}",
-            &[
-                ("amount", &CostLedger::format_amount(total)),
-                ("turns", &CostLedger::turns_phrase(self.cost.priced_turns())),
-            ],
-        ));
-        // What the providers behind the gateways charged: the difference is
-        // what the gateway added for itself.
-        if let Some(upstream) = self.cost.upstream_total() {
-            self.chat.push_system(&tr_fill(
-                "  the providers themselves: ${amount} over {turns}",
-                &[
-                    ("amount", &CostLedger::format_amount(upstream)),
-                    ("turns", &CostLedger::turns_phrase(self.cost.upstream_turns())),
-                ],
-            ));
-        }
-        for row in self.cost.by_provider() {
-            // A model the backend prices at nothing has no bill to break down:
-            // saying "$0.00 over 12 turns" reads as an empty account rather than
-            // as one that does not exist.
-            let line = if row.total == 0.0 {
-                tr_fill("  {name} \u{b7} free", &[("name", &row.name)])
-            } else {
-                tr_fill(
-                    "  {name} \u{b7} ${amount} over {turns}",
-                    &[
-                        ("name", &row.name),
-                        ("amount", &CostLedger::format_amount(row.total)),
-                        ("turns", &CostLedger::turns_phrase(row.turns)),
-                    ],
-                )
-            };
-            self.chat.push_system(&line);
-        }
-        if let Some((counted, turns)) = allowance {
-            self.chat.push_system(&tr_fill(
-                "  the monthly allowance: ${amount} over {turns}",
-                &[("amount", &CostLedger::format_amount(counted)), ("turns", &CostLedger::turns_phrase(turns))],
-            ));
+        let providers: Vec<String> = self
+            .config
+            .providers
+            .iter()
+            .map(|p| p.name.clone())
+            .filter(|name| !name.trim().is_empty())
+            .take(12)
+            .collect();
+        let pending = !providers.is_empty();
+        let history = saved_usage_rows();
+        let view = UsageView::new(session, history, self.usage_history.clone(), providers, pending);
+        self.open_overlay(Overlay::Usage(Box::new(view)));
+        self.refresh_usage_limits(cx);
+    }
+
+    /// One bounded request per configured provider. A local server answers
+    /// "there is no account" without a round trip; a cloud one is given eight
+    /// seconds and then reported as slow, not hidden.
+    pub(crate) fn refresh_usage_limits(&self, cx: &LoopCtx<'_>) {
+        for profile in self.config.providers.iter().take(12) {
+            if profile.url.trim().is_empty() {
+                continue;
+            }
+            let endpoint = profile.endpoint();
+            let provider = profile.name.clone();
+            let tx = cx.tx.clone();
+            tokio::spawn(async move {
+                let outcome = flashagent_llm::limits::fetch(&endpoint).await;
+                let _ = tx.send(UiEvent::UsageLimits { provider, outcome });
+            });
         }
     }
 
@@ -1397,7 +1380,7 @@ mod tests {
 
     #[test]
     fn a_command_typed_during_a_turn_runs_waits_or_is_refused_by_what_it_touches() {
-        for name in ["help", "verbose", "diff", "mode", "effort", "model", "memory", "context", "cost", "theme"] {
+        for name in ["help", "verbose", "diff", "mode", "effort", "model", "memory", "context", "usage", "theme"] {
             assert_eq!(while_running(name), WhileRunning::Now, "{name}");
         }
         // The conversation belongs to the turn until it ends.

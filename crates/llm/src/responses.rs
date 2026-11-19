@@ -354,6 +354,8 @@ impl Decoder {
                 prompt: usage["input_tokens"].as_i64(), completion: usage["output_tokens"].as_i64(),
                 completion_measurement,
                 cached: usage.pointer("/input_tokens_details/cached_tokens").and_then(Value::as_i64),
+                cache_written: None,
+                reasoning: usage.pointer("/output_tokens_details/reasoning_tokens").and_then(Value::as_i64),
                 cost: usage["cost"].as_f64(),
                 cost_details: usage.pointer("/cost_details/upstream_inference_cost").and_then(Value::as_f64)
                     .map(|upstream_cost| CostDetails { upstream_cost: Some(upstream_cost) }),

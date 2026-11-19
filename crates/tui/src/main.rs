@@ -945,6 +945,9 @@ struct App {
     /// What this session has cost, where the backend says. Unpriced backends
     /// leave it empty and the status bar stays quiet.
     cost: flashagent_core::CostLedger,
+    /// Tokens and money across every run, kept in `~/.flashagent/usage.json`.
+    usage_history: flashagent_core::usage_history::UsageHistory,
+    usage_dirty: bool,
     /// The model's own checklist for whatever it is doing, in any session and
     /// not only under /goal.
     plan: Vec<flashagent_tools::plan_tool::PlanStep>,
@@ -1562,6 +1565,10 @@ fn initial_app(init: InitialApp) -> App {
         current_context: context_display,
         current_effort: initial_effort,
         cost: flashagent_core::CostLedger::default(),
+        usage_history: flashagent_core::usage_history::usage_history_path()
+            .map(|path| flashagent_core::usage_history::load(&path))
+            .unwrap_or_default(),
+        usage_dirty: false,
         plan: Vec::new(),
         last_tool_args: String::new(),
         context_request_tokens: 0,
@@ -1822,6 +1829,7 @@ async fn run_app(ctx: AppContext) -> Result<SaveOutcome> {
 
     w.tools_arc.shells().stop_all();
     let saved = app.config.auto_save_sessions && worth_saving(&app.history);
+    app.flush_usage_history();
     Ok(saved.then(|| save_on_exit(&session_id, &app.current_model, &w.cwd_display, &app.history, &app.archive, app.session_title.as_deref())))
 }
 

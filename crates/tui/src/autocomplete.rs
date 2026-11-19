@@ -99,7 +99,7 @@ pub fn builtin_commands() -> Vec<AutocompleteItem> {
         AutocompleteItem::new("/memory", tr("See what FlashAgent remembers; forget or correct a fact"), AutocompleteCategory::Command),
         AutocompleteItem::new("/whatsnew", tr("Show what changed in the latest releases"), AutocompleteCategory::Command),
         AutocompleteItem::new("/context", tr("Show detailed context window token breakdown"), AutocompleteCategory::Command),
-        AutocompleteItem::new("/cost", tr("What this session has cost, and where it went"), AutocompleteCategory::Command),
+        AutocompleteItem::new("/usage", tr("Session, history and lifetime cost and tokens, plus provider limits"), AutocompleteCategory::Command),
         AutocompleteItem::new("/clear", tr("Clear terminal screen and conversation scrollback"), AutocompleteCategory::Command),
         AutocompleteItem::new("/effort", tr("Select thinking effort preset (whatever the model offers)"), AutocompleteCategory::Command),
         AutocompleteItem::new("/model", tr("Open model selection menu or switch model"), AutocompleteCategory::Command),

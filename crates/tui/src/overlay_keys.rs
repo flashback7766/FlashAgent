@@ -78,6 +78,7 @@ impl App {
                 Overlay::Effort(menu) => self.effort_menu_key(cx, menu, code, mods),
                 Overlay::Theme(picker) => self.theme_menu_key(picker, code, mods),
                 Overlay::Tools(view) => self.tools_key(cx, view, code, mods),
+                Overlay::Usage(view) => self.usage_key(cx, view, code, mods),
                 Overlay::Notices(mut view) => {
                     use flashagent_tui::notice_log::NoticeAction;
                     if view.handle_key(code, mods) == NoticeAction::Close {
@@ -1064,5 +1065,27 @@ pub(crate) fn navigate_menu(menu: &mut SelectMenu<String>, code: KeyCode, mods: 
             menu.push_filter_char(c);
         }
         _ => {}
+    }
+}
+
+impl App {
+    /// `/usage`: tabs, scrolling, close, and the limits refresh.
+    pub(crate) fn usage_key(
+        &mut self,
+        cx: &LoopCtx<'_>,
+        mut view: Box<flashagent_tui::usage_view::UsageView>,
+        code: KeyCode,
+        mods: KeyModifiers,
+    ) {
+        use flashagent_tui::usage_view::UsageAction;
+        match view.handle_key(code, mods) {
+            UsageAction::Close => {}
+            UsageAction::RefreshLimits => {
+                view.set_limits_loading(true);
+                self.overlay = Some(Overlay::Usage(view));
+                self.refresh_usage_limits(cx);
+            }
+            UsageAction::None => self.overlay = Some(Overlay::Usage(view)),
+        }
     }
 }

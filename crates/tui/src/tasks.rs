@@ -209,7 +209,10 @@ impl App {
         // its money and quota are the same account's, so `/cost` and `/goal`
         // must see them too.
         if let flashagent_core::loop_::LoopEvent::Usage(usage) = &event.event {
-            self.cost.record_usage(&self.config.active_profile().name, usage);
+            let provider = self.config.active_profile().name.clone();
+            let model = self.current_model.clone();
+            self.cost.record_usage(&provider, &model, usage);
+            self.record_usage_history(&provider, &model, usage);
             if let Some(ledger) = self.goal_ledger.as_mut() {
                 ledger.record_cost(&self.config.active_profile().name, usage.cost);
             }

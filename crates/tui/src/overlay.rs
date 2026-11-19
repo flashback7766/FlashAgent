@@ -31,6 +31,8 @@ pub(crate) enum Overlay {
     Notices(flashagent_tui::notice_log::NoticeLog),
     /// /rules: the standing permissions, and a way to take them back.
     Rules(flashagent_tui::rules_view::RulesView),
+    /// /usage: what the session, the saved sessions and this install spent.
+    Usage(Box<flashagent_tui::usage_view::UsageView>),
 }
 
 impl Overlay {
@@ -63,6 +65,7 @@ impl Overlay {
             Overlay::Tools(view) => view.wheel(dir),
             Overlay::Notices(view) => view.wheel(dir),
             Overlay::Rules(view) => view.wheel(dir),
+            Overlay::Usage(view) => view.wheel(dir),
             Overlay::Context(_) | Overlay::Rewind(_) => false,
             Overlay::Effort(_) | Overlay::Model(_) | Overlay::Provider(_) | Overlay::Sessions(_) | Overlay::Palette(_) => {
                 self.select_menu_mut().is_some_and(|menu| menu.wheel(dir))
@@ -92,6 +95,7 @@ impl Overlay {
             Overlay::Tools(view) => view.render(width, hover, flash),
             Overlay::Notices(view) => view.render(width, hover, flash),
             Overlay::Rules(view) => view.render(width, hover, flash),
+            Overlay::Usage(view) => view.render(width, height),
         }
     }
 }

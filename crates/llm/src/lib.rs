@@ -4,6 +4,7 @@
 //! parsing.
 
 pub mod encoding;
+pub mod limits;
 pub mod protocol;
 pub mod repair;
 pub mod types;

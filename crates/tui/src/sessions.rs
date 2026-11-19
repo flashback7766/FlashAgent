@@ -135,6 +135,11 @@ pub(crate) struct SavedSession {
     /// have none and are listed under their first prompt, as they always were.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) title: Option<String>,
+    /// What the session spent, when it was saved by a build that counted it.
+    /// Older files have none: `/usage`'s history tab says so rather than
+    /// reading a missing number as a free session.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) usage: Option<flashagent_core::cost::UsageTotals>,
 }
 
 fn is_false(b: &bool) -> bool {
@@ -163,12 +168,14 @@ pub(crate) fn save_session_file(
     history: &[ChatMessage],
     archive: &[ChatMessage],
     title: Option<&str>,
+    usage: Option<&flashagent_core::cost::UsageTotals>,
 ) -> Result<std::path::PathBuf, String> {
-    save_session_file_marked(session_id, model, cwd, history, archive, false, title)
+    save_session_file_marked(session_id, model, cwd, history, archive, false, title, usage)
 }
 
 /// As [`save_session_file`], but records that the history ends inside a running
 /// turn, so a later resume does not read the last message as a finished answer.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn save_session_file_marked(
     session_id: &str,
     model: &str,
@@ -177,9 +184,10 @@ pub(crate) fn save_session_file_marked(
     archive: &[ChatMessage],
     turn_in_flight: bool,
     title: Option<&str>,
+    usage: Option<&flashagent_core::cost::UsageTotals>,
 ) -> Result<std::path::PathBuf, String> {
     let base_dir = sessions_dir().ok_or(flashagent_tui::i18n::tr("no home directory to save sessions in"))?;
-    save_session_in(&base_dir, session_id, model, cwd, history, archive, turn_in_flight, title)
+    save_session_full_in(&base_dir, session_id, model, cwd, history, archive, turn_in_flight, title, usage)
 }
 
 /// Earlier turns are removed from the model's live context after compaction.
@@ -208,6 +216,22 @@ pub(crate) fn save_session_in(
     turn_in_flight: bool,
     title: Option<&str>,
 ) -> Result<std::path::PathBuf, String> {
+    save_session_full_in(base_dir, session_id, model, cwd, history, archive, turn_in_flight, title, None)
+}
+
+/// As [`save_session_in`], with what the session has spent so far.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn save_session_full_in(
+    base_dir: &std::path::Path,
+    session_id: &str,
+    model: &str,
+    cwd: &str,
+    history: &[ChatMessage],
+    archive: &[ChatMessage],
+    turn_in_flight: bool,
+    title: Option<&str>,
+    usage: Option<&flashagent_core::cost::UsageTotals>,
+) -> Result<std::path::PathBuf, String> {
     std::fs::create_dir_all(base_dir).map_err(|e| {
         tr_fill("cannot create {path}: {e}", &[("path", &base_dir.display().to_string()), ("e", &e.to_string())])
     })?;
@@ -230,6 +254,7 @@ pub(crate) fn save_session_in(
         archive: archive.iter().map(SavedMessage::from).collect(),
         turn_in_flight,
         title: title.map(str::to_string).filter(|t| !t.trim().is_empty()),
+        usage: usage.cloned(),
     };
     let data = serde_json::to_string_pretty(&saved)
         .map_err(|e| tr_fill("cannot encode the session: {e}", &[("e", &e.to_string())]))?;
@@ -368,7 +393,7 @@ impl App {
             return;
         }
         let model = self.current_model.clone();
-        let err = save_session_file(session_id, &model, cwd_display, &self.history, &self.archive, self.session_title.as_deref()).err();
+        let err = save_session_file(session_id, &model, cwd_display, &self.history, &self.archive, self.session_title.as_deref(), Some(self.cost.totals())).err();
         if let Some(why) = err {
             self.notice(tr_fill(
                 "Session not saved: {why} · retrying after the next turn and on exit",
@@ -403,7 +428,7 @@ impl App {
         // The turn has not ended, so whatever the last message holds is a
         // snapshot of an unfinished answer. Written into the file, so a resume
         // knows not to read it as the conclusion.
-        let err = save_session_file_marked(cx.session_id, &model, cx.cwd_display, &snapshot, &self.archive, true, self.session_title.as_deref()).err();
+        let err = save_session_file_marked(cx.session_id, &model, cx.cwd_display, &snapshot, &self.archive, true, self.session_title.as_deref(), Some(self.cost.totals())).err();
         if let Some(why) = err {
             self.notice(tr_fill(
                 "Session not saved: {why} · retrying after the next turn and on exit",
@@ -463,7 +488,7 @@ impl App {
         self.cancel_recap();
         if self.config.auto_save_sessions && worth_saving(&self.history) {
             if let Err(why) =
-                save_session_file(current, &self.current_model, &self.cwd_display, &self.history, &self.archive, self.session_title.as_deref())
+                save_session_file(current, &self.current_model, &self.cwd_display, &self.history, &self.archive, self.session_title.as_deref(), Some(self.cost.totals()))
             {
                 // Switching away would drop the only copy, the one in memory.
                 self.notice(tr_fill(
@@ -819,6 +844,76 @@ fn strip_legacy_memory(history: &mut [ChatMessage], memory_block: &str) {
 
 
 
+/// The saved conversations, newest first, as `/usage`'s history tab reads
+/// them. A file written before sessions recorded their spend has no usage;
+/// its tokens are estimated from its text and its price is reported as never
+/// recorded, rather than as a free session.
+pub(crate) fn saved_usage_rows() -> Vec<flashagent_tui::usage_view::HistoryRow> {
+    use flashagent_core::cost::UsageTotals;
+    let Some(dir) = sessions_dir() else { return Vec::new() };
+    let Ok(entries) = std::fs::read_dir(&dir) else { return Vec::new() };
+    let mut files: Vec<(u64, std::path::PathBuf)> = entries
+        .flatten()
+        .filter_map(|entry| {
+            let path = entry.path();
+            if path.extension().is_some_and(|e| e == "json") {
+                let modified = entry.metadata().ok().and_then(|m| m.modified().ok())
+                    .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0);
+                Some((modified, path))
+            } else {
+                None
+            }
+        })
+        .collect();
+    files.sort_by_key(|(modified, _)| std::cmp::Reverse(*modified));
+    // A menu that scans every session ever saved would open slowly on a long
+    // install; the newest fifty are what a person reads.
+    files.truncate(50);
+    files
+        .into_iter()
+        .filter_map(|(_, path)| {
+            let bytes = std::fs::read(&path).ok()?;
+            let saved: SavedSession = serde_json::from_slice(&bytes).ok()?;
+            let title = saved.title.clone().filter(|t| !t.trim().is_empty()).unwrap_or_else(|| {
+                saved.messages.iter()
+                    .find(|m| m.role == "user")
+                    .map(|m| flashagent_tui::truncate_middle(m.content.trim(), 60))
+                    .unwrap_or_default()
+            });
+            let estimated = saved.usage.is_none().then(|| {
+                let mut totals = UsageTotals::default();
+                for message in &saved.messages {
+                    match message.role.as_str() {
+                        "user" | "tool" => {
+                            totals.prompt_tokens = totals.prompt_tokens
+                                .saturating_add(flashagent_llm::count_tokens(&saved.model, &message.content) as u64);
+                        }
+                        "assistant" => {
+                            totals.completion_tokens = totals.completion_tokens
+                                .saturating_add(flashagent_llm::count_tokens(&saved.model, &message.content) as u64);
+                            if let Some(reasoning) = &message.reasoning {
+                                totals.reasoning_tokens = totals.reasoning_tokens
+                                    .saturating_add(flashagent_llm::count_tokens(&saved.model, reasoning) as u64);
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                totals
+            });
+            Some(flashagent_tui::usage_view::HistoryRow {
+                when: flashagent_core::usage_history::day_key(saved.timestamp),
+                title,
+                model: saved.model,
+                usage: saved.usage,
+                estimated,
+            })
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod session_tests {
     use super::*;
@@ -891,6 +986,7 @@ mod session_tests {
             ],
             turn_in_flight: false,
             title: None,
+            usage: None,
         };
         std::fs::write(dir.join(format!("{id}.json")), serde_json::to_string(&saved).unwrap()).unwrap();
     }
@@ -1183,6 +1279,7 @@ mod session_tests {
             ],
             turn_in_flight: false,
             title: None,
+            usage: None,
         };
         let mut chat = ChatView::default();
         let mut history = vec![ChatMessage::system("new prompt")];
@@ -1214,6 +1311,7 @@ mod session_tests {
             ],
             turn_in_flight: false,
             title: None,
+            usage: None,
         };
         let mut chat = ChatView::default();
         let mut history = vec![ChatMessage::system("new prompt\n\n[Context] 100 of 1,000 tokens used, 900 left.")];
@@ -1247,6 +1345,7 @@ mod session_tests {
             ],
             turn_in_flight: false,
             title: None,
+            usage: None,
         };
         let mut chat = ChatView::default();
         let mut history = vec![ChatMessage::system("new prompt")];
@@ -1289,6 +1388,7 @@ mod session_tests {
             ],
             turn_in_flight: false,
             title: None,
+            usage: None,
         };
         let mut chat = ChatView::default();
         let mut history = vec![ChatMessage::system("new prompt")];
@@ -1324,6 +1424,7 @@ mod session_tests {
             ],
             turn_in_flight: false,
             title: None,
+            usage: None,
         };
         let mut chat = ChatView::default();
         let mut history = vec![ChatMessage::system("new prompt")];
@@ -1335,4 +1436,5 @@ mod session_tests {
         assert!(rendered.iter().any(|(kind, text)| *kind == LineKind::User && text.contains("[image]")));
     }
 }
+
 
