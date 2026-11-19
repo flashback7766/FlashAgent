@@ -8,11 +8,11 @@ use crate::tool_views::CallState;
 
 const MUTED: &str = "\x1b[38;2;160;165;180m";
 const STRONG: &str = "\x1b[38;2;225;230;240m";
-const FAILED: &str = "\x1b[38;2;230;120;120m";
-const FAINT: &str = "\x1b[38;2;120;125;140m";
+const FAILED: &str = "\x1b[38;2;230;110;95m";
+const FAINT: &str = "\x1b[38;2;135;130;125m";
 const OFF: &str = "\x1b[0m";
-const ADDED_COLOUR: &str = "\x1b[38;2;135;220;145m";
-const REMOVED_COLOUR: &str = "\x1b[38;2;245;120;120m";
+const ADDED_COLOUR: &str = "\x1b[38;2;145;205;140m";
+const REMOVED_COLOUR: &str = "\x1b[38;2;230;110;95m";
 
 /// Counts keep the same meaning and colours as the diff below them.
 pub(crate) fn colored_size(text: &str) -> String {

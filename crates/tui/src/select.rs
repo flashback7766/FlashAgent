@@ -306,8 +306,6 @@ impl<T> SelectMenu<T> {
         let page_size = self.page();
         let start = if cur_pos < page_size { 0 } else { (cur_pos + 1).saturating_sub(page_size) };
         let end = (start + page_size).min(matches.len());
-        let filter = self.filter.to_lowercase();
-
         let mut row = 1;
         if start > 0 {
             if line == row {
@@ -317,16 +315,16 @@ impl<T> SelectMenu<T> {
             row += 1;
         }
         for &idx in &matches[start..end] {
-            let item = &self.items[idx];
-            let rows = 1 + usize::from(item.description.is_some()) + usize::from(item.hidden_match(&filter).is_some());
-            if (row..row + rows).contains(&line) {
+            if row == line {
                 // The row under the pointer is the pick: the already-selected
                 // one included, so the second click confirms as Enter would.
                 self.selected = idx;
                 return MenuClick::Select;
             }
-            row += rows;
+            row += 1;
         }
+        // The selected item's description is one reserved row under the list.
+        row += 1;
         if end < matches.len() && line == row {
             self.page_down();
             return MenuClick::Page;
@@ -435,13 +433,9 @@ impl<T> SelectMenu<T> {
             lines.push((LineKind::System, pad_row(&format!("  \x1b[38;2;135;130;125m{said}\x1b[0m"))));
         } else {
             let cur_pos = matches.iter().position(|&idx| idx == self.selected).unwrap_or(0);
-            // Title, bottom border, key hints and the two "more" rows.
-            let filter = self.filter.to_lowercase();
-            let rows_per_item = matches.iter().map(|&i| {
-                1 + usize::from(self.items[i].description.is_some())
-                    + usize::from(self.items[i].hidden_match(&filter).is_some())
-            }).max().unwrap_or(1);
-            let fit = (max_rows.saturating_sub(5) / rows_per_item).max(1);
+            // Title, the paging rows, the reserved description row and the
+            // bottom border: the rest is one row per item.
+            let fit = max_rows.saturating_sub(6).max(1);
             let page_size = self.page_size.min(fit);
             self.shown.set(page_size);
             let start = if cur_pos < page_size {
@@ -451,13 +445,19 @@ impl<T> SelectMenu<T> {
             };
             let end = (start + page_size).min(total_matches);
 
+            let pad_row_bg = |content: &str| -> String {
+                let clipped = crate::tool_views::clip_ellipsis(content, inner_w);
+                let pad = inner_w.saturating_sub(visible_width(&clipped));
+                format!("{border_color}│{reset}\x1b[48;2;38;36;33m{clipped}{}\x1b[49m{border_color}│{reset}", " ".repeat(pad))
+            };
+
             if start > 0 {
                 let ink = paging_ink(lines.len(), hover, flash);
                 lines.push((
                     LineKind::System,
                     pad_row(&format!(
                         "  {ink}{}\x1b[0m",
-                        crate::i18n::tr_fill("▲ {n} more above", &[("n", &start.to_string())])
+                        crate::i18n::tr_fill("↑ {n} more above", &[("n", &start.to_string())])
                     )),
                 ));
             }
@@ -465,36 +465,41 @@ impl<T> SelectMenu<T> {
             for &idx in &matches[start..end] {
                 let item = &self.items[idx];
                 let is_cur = idx == self.selected;
-                // The whole item answers its hover -- label, description and
-                // the hidden-match row are one row to the click, so they are
-                // one row to the pointer.
                 let item_line = lines.len();
-                let item_rows = 1
-                    + usize::from(item.description.is_some())
-                    + usize::from(item.hidden_match(&self.filter.to_lowercase()).is_some());
-                let is_hover = !is_cur && hover.is_some_and(|line| (item_line..item_line + item_rows).contains(&line)) && flash != Some(item_line);
+                let is_hover = !is_cur && hover == Some(item_line) && flash != Some(item_line);
                 let is_press = flash == Some(item_line);
-                let (cursor, label_styled) = if is_press {
-                    (" \x1b[1;38;2;225;175;95m›\x1b[0m", format!("\x1b[38;2;225;175;95m{}\x1b[0m", item.label))
-                } else if is_cur {
-                    (" \x1b[1;38;2;225;175;95m›\x1b[0m", format!("\x1b[1;38;2;245;240;232m{}\x1b[0m", item.label))
+                let (cursor, label_styled) = if is_press || is_cur {
+                    (" \x1b[1;38;2;225;175;95m›\x1b[0m", format!("\x1b[1;38;2;232;227;218m{}\x1b[0m", item.label))
                 } else if is_hover {
-                    (" \x1b[38;2;135;130;125m·\x1b[0m", format!("\x1b[38;2;235;230;220m{}\x1b[0m", item.label))
+                    ("  ", format!("\x1b[38;2;232;227;218m{}\x1b[0m", item.label))
                 } else {
                     ("  ", format!("\x1b[38;2;160;155;145m{}\x1b[0m", item.label))
                 };
-                lines.push((LineKind::System, pad_row(&format!("{cursor} {label_styled}"))));
-                if let Some(desc) = &item.description {
-                    lines.push((
-                        LineKind::System,
-                        pad_row(&format!("    \x1b[38;2;135;130;125m{desc}\x1b[0m")),
-                    ));
-                }
-                // Matched only in hidden text: show where, or the match looks like a mistake.
-                if let Some(piece) = item.hidden_match(&self.filter.to_lowercase()) {
-                    lines.push((LineKind::System, pad_row(&format!("    \x1b[38;2;175;170;225m{piece}\x1b[0m"))));
-                }
+                let line = format!("{cursor} {label_styled}");
+                lines.push((
+                    LineKind::System,
+                    if is_cur { pad_row_bg(&line) } else { pad_row(&line) },
+                ));
             }
+
+            // The selected item's explanation, in one reserved row: the list
+            // stays a list, and the screen no longer pays two rows per item.
+            let described = self.items.get(self.selected).and_then(|item| {
+                let hidden = item.hidden_match(&self.filter.to_lowercase());
+                match (&item.description, hidden) {
+                    (Some(desc), Some(piece)) => Some(format!("{desc} · {piece}")),
+                    (Some(desc), None) => Some(desc.clone()),
+                    (None, Some(piece)) => Some(piece.to_string()),
+                    (None, None) => None,
+                }
+            });
+            lines.push((
+                LineKind::System,
+                pad_row(&format!(
+                    "  \x1b[38;2;135;130;125m{}\x1b[0m",
+                    described.as_deref().unwrap_or("")
+                )),
+            ));
 
             if end < total_matches {
                 let ink = paging_ink(lines.len(), hover, flash);
@@ -502,7 +507,7 @@ impl<T> SelectMenu<T> {
                     LineKind::System,
                     pad_row(&format!(
                         "  {ink}{}\x1b[0m",
-                        crate::i18n::tr_fill("▼ {n} more below", &[("n", &(total_matches - end).to_string())])
+                        crate::i18n::tr_fill("↓ {n} more below", &[("n", &(total_matches - end).to_string())])
                     )),
                 ));
             }
@@ -531,7 +536,7 @@ fn paging_ink(row: usize, hover: Option<usize>, flash: Option<usize>) -> &'stati
     if flash == Some(row) {
         "\x1b[1;38;2;225;175;95m"
     } else if hover == Some(row) {
-        "\x1b[1;38;2;235;230;220m"
+        "\x1b[1;38;2;232;227;218m"
     } else {
         "\x1b[38;2;135;130;125m"
     }
@@ -586,9 +591,9 @@ mod tests {
         menu.page_down();
         let rows = menu.render_in(80, 19, None, None);
         assert!(rows.len() <= 19);
-        assert!(rows.iter().any(|(_, r)| crate::strip_ansi(r).contains("› /cmd7")), "{:?}", rows.iter().map(|r| crate::strip_ansi(&r.1)).collect::<Vec<_>>());
+        assert!(rows.iter().any(|(_, r)| crate::strip_ansi(r).contains("› /cmd10")), "{:?}", rows.iter().map(|r| crate::strip_ansi(&r.1)).collect::<Vec<_>>());
         // With room, the page stays ten items.
-        assert!(menu.render_in(80, 100, None, None).len() > 20);
+        assert!(menu.render_in(80, 100, None, None).len() >= 15);
     }
 
     #[test]
@@ -600,9 +605,9 @@ mod tests {
         "palette".chars().for_each(|c| menu.push_filter_char(c));
         let rows = menu.render_in(60, 8, None, None);
         assert!(rows.len() <= 8, "hidden match rows count towards the limit: {}", rows.len());
-        assert_eq!(menu.page(), 1);
+        assert_eq!(menu.page(), 2);
         menu.page_down();
-        assert_eq!(menu.selected_value(), Some(&1));
+        assert_eq!(menu.selected_value(), Some(&2));
         assert!(menu.render_in(60, 8, None, None).len() <= 8);
     }
 
@@ -706,11 +711,11 @@ mod tests {
         assert_eq!(menu.page_size, 10);
 
         let lines = menu.render(80);
-        assert!(lines.iter().any(|(_, t)| t.contains("▼ 40 more below")));
+        assert!(lines.iter().any(|(_, t)| t.contains("↓ 40 more below")));
         let hint = crate::strip_ansi(&lines.last().unwrap().1);
         assert!(hint.contains("PgUp/PgDn page") && hint.trim_end().ends_with("Esc cancel"), "{hint:?}");
         menu.selected = 49;
-        assert!(menu.render(80).iter().any(|(_, t)| t.contains("▲ 40 more above")));
+        assert!(menu.render(80).iter().any(|(_, t)| t.contains("↑ 40 more above")));
         menu.selected = 0;
 
         menu.push_filter_char('4');
@@ -746,7 +751,7 @@ mod tests {
         // The rows the menu paints: item `i` sits on card row 1 + i here (a
         // title, then one line per item -- no descriptions, no filter).
         let lines = menu.render(80);
-        assert_eq!(lines.len(), 6, "title, three items, border, hints: {lines:?}");
+        assert_eq!(lines.len(), 7, "title, three items, description row, border, hints: {lines:?}");
 
         let mut menu = menu;
         // The second row of the card is the second item's line.
@@ -792,9 +797,9 @@ mod tests {
         let hovered = menu.render_in(80, 100, Some(2), None);
         let pressed = menu.render_in(80, 100, Some(2), Some(2));
         let strip = |rows: &Vec<RenderLine>| rows.iter().map(|(_, t)| crate::strip_ansi(t)).collect::<Vec<_>>();
-        let (plain, hovered, pressed) = (strip(&plain), strip(&hovered), strip(&pressed));
-        assert!(!plain[2].contains('·'), "nothing points at an unhovered row: {}", plain[2]);
-        assert!(hovered[2].contains("· second"), "the hover points at its row: {}", hovered[2]);
+        let (plain, _hovered, pressed) = (strip(&plain), strip(&hovered), strip(&pressed));
+        assert!(!plain[2].contains("232;227;218"), "nothing brightens an unhovered row: {}", plain[2]);
+        assert!(menu.render_in(80, 100, Some(2), None)[2].1.contains("232;227;218"), "the hover brightens its row");
         assert!(pressed[2].contains("› second"), "the press keeps the selection's pointer: {}", pressed[2]);
         // The pressed row is the amber the other screens' presses wear.
         assert!(menu.render_in(80, 100, Some(2), Some(2))[2].1.contains("225;175;95"));
@@ -811,7 +816,8 @@ mod tests {
         // The ▼ more row: below it the list continues. Its card row is 1 (no
         // more-above row while the top is shown) + the page of items.
         let page = menu.page();
-        let more_row = 1 + page;
+        // Title, the page of items, the reserved description row, then the more row.
+        let more_row = 2 + page;
         let plain = menu.render_in(80, 100, None, None);
         let hovered = menu.render_in(80, 100, Some(more_row), None);
         let pressed = menu.render_in(80, 100, Some(more_row), Some(more_row));

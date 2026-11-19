@@ -132,7 +132,7 @@ impl TasksModal {
     }
 
     pub fn render(&self, width: usize) -> Vec<RenderLine> {
-        let border = "\x1b[38;2;100;95;90m";
+        let border = "\x1b[38;2;95;90;85m";
         let dim = "\x1b[38;2;135;130;125m";
         let reset = "\x1b[0m";
         let inner_w = width.saturating_sub(6).min(110);
@@ -146,12 +146,12 @@ impl TasksModal {
         let state_colour = |state: &TaskState| match state {
             TaskState::Running => "\x1b[38;2;145;205;140m",
             TaskState::Exited(Some(0)) => "\x1b[38;2;160;155;145m",
-            _ => "\x1b[38;2;225;115;105m",
+            _ => "\x1b[38;2;230;110;95m",
         };
         let hints: Vec<(&str, &str)> = match self.detail.as_ref().and_then(|(id, out)| Some((self.tasks.iter().find(|t| t.id == *id)?, out))) {
             Some((task, output)) => {
                 lines.push(row(&format!(
-                    "\x1b[1;38;2;240;235;225m#{}\x1b[0m  {}{}{reset}  {dim}{}{reset}  {}",
+                    "\x1b[1;38;2;232;227;218m#{}\x1b[0m  {}{}{reset}  {dim}{}{reset}  {}",
                     task.id,
                     state_colour(&task.state),
                     task.state.describe(),

@@ -53,8 +53,12 @@ pub fn token_count_label(tokens: usize) -> String {
     if tokens >= 1_000_000 {
         let text = format!("{:.1}", tokens as f64 / 1_000_000.0);
         format!("{}M", text.strip_suffix(".0").unwrap_or(&text))
+    } else if tokens >= 10_000 {
+        // Lowercase k; a window is a round figure, so a big count is rounded.
+        format!("{}k", tokens.saturating_add(500) / 1000)
     } else if tokens >= 1000 {
-        format!("{}K", tokens.saturating_add(500) / 1000)
+        let text = format!("{:.1}", tokens as f64 / 1000.0);
+        format!("{}k", text.strip_suffix(".0").unwrap_or(&text))
     } else {
         tokens.to_string()
     }

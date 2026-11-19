@@ -280,7 +280,7 @@ impl SamplingView {
 
     pub fn render(&self, width: usize) -> Vec<RenderLine> {
         let mut lines = Vec::new();
-        let border_color = "\x1b[38;2;100;95;90m";
+        let border_color = "\x1b[38;2;95;90;85m";
         let reset = "\x1b[0m";
         let inner_w = width.saturating_sub(6).min(110);
 
@@ -306,17 +306,17 @@ impl SamplingView {
         lines.push((LineKind::System, pad_row("")));
 
         let is_preset_sel = self.selected_index == 0;
-        let ptr0 = if is_preset_sel { "\x1b[1;38;2;225;175;95m▸\x1b[0m" } else { " " };
+        let ptr0 = if is_preset_sel { "\x1b[1;38;2;225;175;95m›\x1b[0m" } else { " " };
         let preset_val = format!("[ {} ]", crate::i18n::tr(self.preset.label()));
         let (label0, val0) = if is_preset_sel {
             (
-                format!("\x1b[1;38;2;240;235;225m{:<18}\x1b[0m", "Preset"),
+                format!("\x1b[1;38;2;232;227;218m{:<18}\x1b[0m", "Preset"),
                 format!("\x1b[1;38;2;225;175;95m{:<22}\x1b[0m {}", preset_val, crate::key_hints(&[("←/→", "change")], 20)),
             )
         } else {
             (
                 format!("\x1b[38;2;160;155;145m{:<18}\x1b[0m", "Preset"),
-                format!("\x1b[38;2;200;195;185m{:<22}\x1b[0m", preset_val),
+                format!("\x1b[38;2;232;227;218m{:<22}\x1b[0m", preset_val),
             )
         };
         lines.push((LineKind::System, pad_row(&format!("{ptr0} {label0} {val0}"))));
@@ -334,24 +334,24 @@ impl SamplingView {
 
         for (idx, label, buf, range_hint) in fields {
             let is_sel = self.selected_index == idx;
-            let ptr = if is_sel { "\x1b[1;38;2;225;175;95m▸\x1b[0m" } else { " " };
+            let ptr = if is_sel { "\x1b[1;38;2;225;175;95m›\x1b[0m" } else { " " };
             let display_val = if is_sel { format!("{}█", buf) } else { buf.to_string() };
             let (label_styled, val_styled) = if is_sel {
                 (
-                    format!("\x1b[1;38;2;240;235;225m{:<18}\x1b[0m", label),
+                    format!("\x1b[1;38;2;232;227;218m{:<18}\x1b[0m", label),
                     format!("\x1b[1;38;2;225;175;95m{:<10}\x1b[0m \x1b[38;2;135;130;125m{}\x1b[0m", display_val, range_hint),
                 )
             } else {
                 (
                     format!("\x1b[38;2;160;155;145m{:<18}\x1b[0m", label),
-                    format!("\x1b[38;2;200;195;185m{:<10}\x1b[0m \x1b[38;2;100;95;90m{}\x1b[0m", display_val, range_hint),
+                    format!("\x1b[38;2;232;227;218m{:<10}\x1b[0m \x1b[38;2;95;90;85m{}\x1b[0m", display_val, range_hint),
                 )
             };
             lines.push((LineKind::System, pad_row(&format!("{ptr} {label_styled} {val_styled}"))));
         }
 
         let is_apply_sel = self.selected_index == 9;
-        let ptr7 = if is_apply_sel { "\x1b[1;38;2;225;175;95m▸\x1b[0m" } else { " " };
+        let ptr7 = if is_apply_sel { "\x1b[1;38;2;225;175;95m›\x1b[0m" } else { " " };
         let apply_label = crate::i18n::tr("[ Apply and return to chat ]");
         let apply_styled = if is_apply_sel {
             format!("\x1b[1;38;2;225;175;95m{apply_label}\x1b[0m")

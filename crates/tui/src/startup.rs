@@ -143,7 +143,7 @@ impl TrustScreen {
         let reset = "\x1b[0m";
         let prompt_style = "\x1b[1;38;2;225;175;95m"; // amber accent
         let text_dim = "\x1b[38;2;160;155;145m";
-        let text_bright = "\x1b[1;38;2;240;235;225m";
+        let text_bright = "\x1b[1;38;2;232;227;218m";
         let text_error = "\x1b[1;38;2;235;105;105m";
 
         match &self.mode {
@@ -306,7 +306,7 @@ impl McpTrustScreen {
         let reset = "\x1b[0m";
         let prompt_style = "\x1b[1;38;2;225;175;95m"; // amber accent
         let text_dim = "\x1b[38;2;160;155;145m";
-        let text_bright = "\x1b[1;38;2;240;235;225m";
+        let text_bright = "\x1b[1;38;2;232;227;218m";
         let text_error = "\x1b[1;38;2;235;105;105m";
 
         let Some(server) = self.servers.get(self.current) else {

@@ -1185,7 +1185,7 @@ mod tests {
     fn a_context_window_is_named_as_people_name_it() {
         use crate::thinking::token_count_label as label;
         assert_eq!([label(1_000_000), label(1_048_576), label(2_000_000), label(1_500_000)], ["1M", "1M", "2M", "1.5M"]);
-        assert_eq!([label(128_000), label(131_072), label(262_144), label(32_768), label(200_000)], ["128K", "131K", "262K", "33K", "200K"]);
+        assert_eq!([label(128_000), label(131_072), label(262_144), label(32_768), label(200_000)], ["128k", "131k", "262k", "33k", "200k"]);
         let mut m = DiscoveredModel { id: "m".into(), display_name: None, is_loaded: false, context_length: Some(1_000_000), max_context_length: None, thinking: ThinkingProfile::unreported(), supports_tools: true, supports_vision: false, ..Default::default() };
         assert_eq!(m.context_display().as_deref(), Some("1M ctx"), "it read 977k ctx");
         m.context_length = Some(131_072);

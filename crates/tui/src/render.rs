@@ -8,10 +8,10 @@ pub(crate) fn color(kind: LineKind) -> crossterm::style::Color {
         LineKind::User => crossterm::style::Color::Rgb { r: 245, g: 240, b: 232 },
         LineKind::Assistant => crossterm::style::Color::Rgb { r: 232, g: 227, b: 218 },
         LineKind::Reasoning => crossterm::style::Color::Rgb { r: 140, g: 135, b: 130 },
-        LineKind::Tool => crossterm::style::Color::Rgb { r: 135, g: 185, b: 205 },
+        LineKind::Tool => crossterm::style::Color::Rgb { r: 160, g: 155, b: 145 },
         LineKind::ToolError => crossterm::style::Color::Rgb { r: 230, g: 110, b: 95 },
         LineKind::Diff => crossterm::style::Color::Rgb { r: 145, g: 205, b: 140 },
-        LineKind::System => crossterm::style::Color::Rgb { r: 225, g: 175, b: 95 },
+        LineKind::System => crossterm::style::Color::Rgb { r: 160, g: 155, b: 145 },
         // The card paints its own rules and headings; the body reads as an
         // answer, not as a warning.
         LineKind::Compaction => crossterm::style::Color::Rgb { r: 232, g: 227, b: 218 },
@@ -20,7 +20,7 @@ pub(crate) fn color(kind: LineKind) -> crossterm::style::Color {
         LineKind::Model => crossterm::style::Color::Rgb { r: 160, g: 155, b: 148 },
         // Between the tool colour and the reasoning grey: a child is work in
         // progress, closer to a tool call than to something said.
-        LineKind::Subagent => crossterm::style::Color::Rgb { r: 150, g: 170, b: 195 },
+        LineKind::Subagent => crossterm::style::Color::Rgb { r: 138, g: 180, b: 248 },
     }
 }
 
@@ -68,6 +68,10 @@ pub(crate) struct Renderer {
     /// The screen's width, as last painted: the scrollbar lives in the last
     /// column, and a press is told by its column.
     pub(crate) screen_width: usize,
+    /// Blank rows above the first painted row: the composer block ends at the
+    /// bottom of the screen, so a short conversation leaves its empty space
+    /// above the prompt, not below it.
+    top_pad: usize,
     /// A thumb under the mouse: where it was grabbed and what the scroll
     /// looked like then. Moving the mouse maps the row difference back
     /// through the proportion the track stood at when the drag began.
@@ -126,7 +130,6 @@ pub(crate) struct FrameState<'a> {
     /// Laid out by `TipAnimator::render_lines`; `None` with tips off.
     pub(crate) tip_lines: Option<&'a [String]>,
     pub(crate) reasoning_expand: ReasoningExpansion,
-    pub(crate) tick_n: usize,
     pub(crate) running: bool,
     /// Seconds the server asked us to wait before the next attempt, while that
     /// wait is still running: the turn is not stalled, it is rate limited.
@@ -287,7 +290,7 @@ pub(crate) fn work_box(
         body.push((LineKind::Tool, live_row(&format!("  {line}"), t)));
         if expanded.contains(&id.as_str()) {
             if let Some(detail) = details.get(id) {
-                body.push((LineKind::Tool, format!("\x1b[38;2;120;125;140m{detail}\x1b[0m")));
+                body.push((LineKind::Tool, format!("\x1b[38;2;135;130;125m{detail}\x1b[0m")));
             }
         }
     }
@@ -297,7 +300,7 @@ pub(crate) fn work_box(
     if body.is_empty() {
         return Vec::new();
     }
-    let edge = "\x1b[38;2;100;95;90m";
+    let edge = "\x1b[38;2;95;90;85m";
     // As wide as the composer block under it, not two columns narrower. Both
     // start at column 0 and both are closed on the right, so a narrower box
     // makes the right-hand wall step in exactly at the seam, and a seam that
@@ -358,8 +361,8 @@ pub(crate) fn work_box(
 /// at the period and between the colours the call in flight uses: one movement
 /// across the interface rather than a second one invented here. Animations off
 /// leaves it still, which is the setting's promise and not a special case here.
-fn live_row(plain: &str, t: u64) -> String {
-    anim::shimmer(plain, t, 1800, anim::Rgb(150, 160, 175), anim::Rgb(240, 245, 255))
+fn live_row(plain: &str, _t: u64) -> String {
+    format!("\x1b[38;2;160;155;145m{plain}\x1b[0m")
 }
 
 /// A background command as a row of the work box. `box_inner` is the room left
@@ -396,11 +399,13 @@ mod work_box_tests {
     /// animations off it must still be readable, which is that setting's promise
     /// rather than a special case made here.
     #[test]
-    fn the_box_sweeps_while_its_work_runs_and_is_still_when_animations_are_off() {
+    fn the_box_of_running_work_is_still() {
+        // One movement on a running turn is the spinner; a sweep across every
+        // row of the box made a large block of text crawl under the prompt.
         flashagent_tui::anim::set_enabled(true);
-        assert_ne!(row_colour(0), row_colour(900), "the sweep has to differ from one moment to the next");
+        assert_eq!(row_colour(0), row_colour(900), "the work box must not sweep");
         flashagent_tui::anim::set_enabled(false);
-        assert_eq!(row_colour(0), row_colour(900), "animations off is still: no sweep at all");
+        assert_eq!(row_colour(0), row_colour(900), "still is still with animations off");
         flashagent_tui::anim::set_enabled(true);
     }
     use super::*;
@@ -607,6 +612,7 @@ impl Renderer {
             card_hits: Vec::new(),
             chat_rows_on_screen: 0,
             screen_width: 0,
+            top_pad: 0,
             scrollbar_drag: None,
             status_gauge_cols: None,
             status_gauge: None,
@@ -636,7 +642,7 @@ impl Renderer {
         let len = (((visible * track) / self.total_lines).max(2)).min(track);
         let room = track - len;
         let span = self.max_scroll.max(1);
-        let top = ((self.max_scroll - self.scroll_offset.min(self.max_scroll)) * room) / span;
+        let top = self.top_pad + ((self.max_scroll - self.scroll_offset.min(self.max_scroll)) * room) / span;
         Some(Scrollbar { column: self.screen_width.saturating_sub(1), top, len, track_len: track })
     }
 
@@ -650,7 +656,7 @@ impl Renderer {
             return false;
         }
         let hit = row as usize;
-        if hit >= sb.track_len {
+        if hit < self.top_pad || hit >= self.top_pad + sb.track_len {
             return false;
         }
         if hit < sb.top {
@@ -729,13 +735,14 @@ impl Renderer {
     /// The conversation row drawn on screen row `y`, if one is.
     pub(crate) fn chat_row_at(&self, y: u16) -> Option<usize> {
         let (first, count) = self.chat_view;
-        ((y as usize) < count).then_some(first + y as usize)
+        let row = (y as usize).checked_sub(self.top_pad)?;
+        (row < count).then_some(first + row)
     }
 
     /// The screen row a chat line is painted on, when it is on screen.
     pub(crate) fn chat_screen_row(&self, line: usize) -> Option<u16> {
         let (first, count) = self.chat_view;
-        (line >= first && line - first < count).then_some((line - first) as u16)
+        (line >= first && line - first < count).then_some((self.top_pad + line - first) as u16)
     }
 
     /// The subagent row on screen row `y`, if one is there.
@@ -765,7 +772,7 @@ fn tasks_status(running: usize) -> String {
         return String::new();
     }
     format!(
-        " \x1b[38;2;100;95;90m\u{b7}\x1b[0m \x1b[38;2;168;199;250m\u{25cf} {}\x1b[0m",
+        " \x1b[38;2;95;90;85m\u{b7}\x1b[0m \x1b[38;2;138;180;248m\u{25cf} {}\x1b[0m",
         flashagent_tui::plural(running, "task", "tasks")
     )
 }
@@ -785,31 +792,31 @@ pub(crate) fn format_status_left(
         format!("\x1b[1;38;2;225;175;95m{}\x1b[0m", flashagent_tui::i18n::tr("[Goal: Autonomous]"))
     } else if yolo {
         // The one mode with no brakes says so in the color of a warning.
-        format!("\x1b[1;38;2;225;115;105m[{mode_label}]\x1b[0m")
+        format!("\x1b[1;38;2;245;160;80m[{mode_label}]\x1b[0m")
     } else {
-        format!("\x1b[38;2;145;205;140m[{mode_label}]\x1b[0m")
+        format!("\x1b[38;2;160;155;145m[{mode_label}]\x1b[0m")
     };
     let activity = match (running, awaiting_user, goal_progress) {
         // Stopped at an approval card: waiting for the user, not generating.
         (true, true, _) => format!("\x1b[38;2;225;175;95m{}\x1b[0m", flashagent_tui::i18n::tr("Waiting for your answer")),
         // During a goal the budget burn-down.
-        (true, false, Some(p)) => format!("\x1b[38;2;168;199;250m{p}\x1b[0m"),
+        (true, false, Some(p)) => format!("\x1b[38;2;138;180;248m{p}\x1b[0m"),
         (true, false, None) => return format!("  {mode_str}{expand_status}"),
-        (false, ..) => format!("\x1b[38;2;140;135;130m{}\x1b[0m", flashagent_tui::i18n::tr("Ready")),
+        (false, ..) => format!("\x1b[38;2;135;130;125m{}\x1b[0m", flashagent_tui::i18n::tr("Ready")),
     };
-    format!("  {mode_str} \x1b[38;2;100;95;90m·\x1b[0m {activity}{expand_status}")
+    format!("  {mode_str} \x1b[38;2;95;90;85m·\x1b[0m {activity}{expand_status}")
 }
 
 /// " · Anthropic · claude-opus-5-5", in parts the status line drops from
 /// the end when it is narrow: the model first, then the provider.
 pub(crate) fn format_provider(provider: &str, model: &str) -> String {
-    let dot = " \x1b[38;2;100;95;90m\u{b7}\x1b[0m ";
+    let dot = " \x1b[38;2;95;90;85m\u{b7}\x1b[0m ";
     let mut out = String::new();
     if !provider.is_empty() {
-        out.push_str(&format!("{dot}\x1b[38;2;140;135;130m{provider}\x1b[0m"));
+        out.push_str(&format!("{dot}\x1b[38;2;135;130;125m{provider}\x1b[0m"));
     }
     if !model.is_empty() {
-        out.push_str(&format!("{dot}\x1b[38;2;175;170;160m{model}\x1b[0m"));
+        out.push_str(&format!("{dot}\x1b[38;2;232;227;218m{model}\x1b[0m"));
     }
     out
 }
@@ -823,7 +830,7 @@ struct FooterVisibility {
 
 fn footer_hint(shown: FooterVisibility, st: &FrameState<'_>, width: usize, t: u64) -> String {
     let left_hint = if let Some(toast) = st.copy_toast {
-        format!("  \x1b[1;38;2;135;215;165m{toast}\x1b[0m")
+        format!("  \x1b[1;38;2;145;205;140m{toast}\x1b[0m")
     } else if st.history_search.is_some() {
         format!("  {}", key_hints(&[("Ctrl+F", "older"), ("Enter", "use"), ("Esc", "cancel")], width.saturating_sub(2)))
     } else if shown.approval {
@@ -833,7 +840,7 @@ fn footer_hint(shown: FooterVisibility, st: &FrameState<'_>, width: usize, t: u6
         // The card lists its own keys, which differ for a choice and a written answer.
         st.background.map(|text| format!("  {}", st.background_style.paint(text))).unwrap_or_default()
     } else if st.channel_prompt.is_some() && st.prompt_title == UNINSTALL_TITLE {
-        format!("  {}", key_hints(&[("y/Enter", "close and uninstall"), ("n/Esc", "keep FlashAgent")], width.saturating_sub(2)))
+        format!("  {}", key_hints(&[("y", "close and uninstall"), ("any other key", "keep FlashAgent")], width.saturating_sub(2)))
     } else if st.channel_prompt.is_some() {
         format!("  {}", key_hints(&[("y/Enter", "switch"), ("n/Esc", "keep the current channel")], width.saturating_sub(2)))
     } else if shown.overlay {
@@ -847,7 +854,7 @@ fn footer_hint(shown: FooterVisibility, st: &FrameState<'_>, width: usize, t: u6
         // The spinner says it is alive; then only how fast it writes and how fast it
         // read the prompt. A speed of 0 before the first token reads as a stall, so
         // it waits for one.
-        let dot = " \x1b[38;2;75;99;130m·\x1b[0m ";
+        let dot = " \x1b[38;2;95;90;85m·\x1b[0m ";
         let mut live = format!("  {}", anim::spinner(t));
         if let Some(secs) = st.rate_limit_wait {
             live.push_str(&format!(
@@ -856,7 +863,7 @@ fn footer_hint(shown: FooterVisibility, st: &FrameState<'_>, width: usize, t: u6
             ));
         }
         if let Some(speed) = st.tokens_per_sec.filter(|s| *s > 0.0) {
-            live.push_str(&format!(" \x1b[38;2;194;231;255m{speed:.1} t/s\x1b[0m"));
+            live.push_str(&format!(" \x1b[38;2;160;155;145m{speed:.1} t/s\x1b[0m"));
         }
         if let Some(turn) = st.turn_tokens.as_deref() {
             live.push_str(&format!("{dot}{turn}"));
@@ -927,7 +934,7 @@ fn context_gauges(context_usage: &ContextUsage, reported: bool, warn_threshold: 
     let percent = context_usage.percentage().clamp(0.0, 100.0);
     if !reported {
         let used = format!(
-            "\x1b[38;2;135;215;165m{}\x1b[0m {}",
+            "\x1b[38;2;145;205;140m{}\x1b[0m {}",
             ContextUsage::format_tokens(context_usage.total_used()),
             flashagent_tui::i18n::tr("used")
         );
@@ -945,7 +952,7 @@ fn context_gauges(context_usage: &ContextUsage, reported: bool, warn_threshold: 
     [
         context_usage.format_compact_gauge(10),
         context_usage.format_compact_gauge(4),
-        format!("\x1b[38;2;135;215;165m{percent:.0}%\x1b[0m"),
+        format!("\x1b[38;2;145;205;140m{percent:.0}%\x1b[0m"),
     ]
 }
 
@@ -972,17 +979,17 @@ fn footer_status(width: usize, context_usage: &ContextUsage, st: &FrameState<'_>
     // the bill does not.
     let gauge_str = match st.cost_display {
         Some(cost) if mode_room + visible_width(cost) + 3 + visible_width(&gauge_str) <= width => {
-            format!("\x1b[38;2;135;215;165m{cost}\x1b[0m · {gauge_str}")
+            format!("\x1b[38;2;160;155;145m{cost}\x1b[0m · {gauge_str}")
         }
         _ => gauge_str,
     };
     let expand_status = if st.reasoning_expand.all {
         // The words are the interface's; the brackets are a label's.
-        " \x1b[38;2;100;95;90m·\x1b[0m \x1b[38;2;175;170;225m{v}\x1b[0m"
-            .replace("{v}", flashagent_tui::i18n::tr("[verbose: all]"))
+        " \x1b[38;2;95;90;85m·\x1b[0m \x1b[38;2;160;155;145m{v}\x1b[0m"
+            .replace("{v}", flashagent_tui::i18n::tr("verbose: all"))
     } else if st.reasoning_expand.last {
-        " \x1b[38;2;100;95;90m·\x1b[0m \x1b[38;2;175;170;225m{v}\x1b[0m"
-            .replace("{v}", flashagent_tui::i18n::tr("[verbose: last]"))
+        " \x1b[38;2;95;90;85m·\x1b[0m \x1b[38;2;160;155;145m{v}\x1b[0m"
+            .replace("{v}", flashagent_tui::i18n::tr("verbose: last"))
     } else {
         String::new()
     };
@@ -1012,7 +1019,7 @@ fn fit_status_row(width: usize, left: &str, provider: &str, gauge_str: &str) -> 
         let clip_budget = width.saturating_sub(gauge_vis + 3);
         let mut left = left.clone();
         while visible_width(&left) > clip_budget {
-            match left.rfind(" \x1b[38;2;100;95;90m·") {
+            match left.rfind(" \x1b[38;2;95;90;85m·") {
                 Some(cut) => left = format!("{}\x1b[0m", &left[..cut]),
                 None => break,
             }
@@ -1027,30 +1034,11 @@ fn fit_status_row(width: usize, left: &str, provider: &str, gauge_str: &str) -> 
 /// The change an approval card asks about, one styled row per diff line.
 /// The card shows as many as fit; `v` puts them all in the conversation.
 pub(crate) fn diff_rows(diff: &str, inner_w: usize) -> Vec<String> {
-    diff.lines()
-        .filter(|l| !l.starts_with("--- ") && !l.starts_with("+++ ") && !l.starts_with("@@"))
-        .map(|line| {
-            let (color, prefix) = if line.starts_with('+') {
-                ("\x1b[38;2;145;205;140m", "+")
-            } else if line.starts_with('-') {
-                ("\x1b[38;2;225;115;105m", "-")
-            } else {
-                ("\x1b[38;2;135;130;125m", " ")
-            };
-            // Only the diff's own marker goes: the indentation is part of the change.
-            // A note above the diff ("outside the project: ...") has none.
-            let body = match line.as_bytes().first() {
-                Some(b'+' | b'-' | b' ') => &line[1..],
-                _ => line,
-            };
-            // Shown, never executed: an escape in the new text must not hide part of it.
-            let line_clean = card_safe(&body.replace('\t', "    "));
-            let line_clipped = clip_ansi(&line_clean, inner_w.saturating_sub(6));
-            format!("  {color}{prefix} {line_clipped}\x1b[0m")
-        })
+    flashagent_tui::tool_views::diff_body(diff)
+        .into_iter()
+        .map(|(_, row)| format!("  {}", clip_ansi(&row, inner_w.saturating_sub(2))))
         .collect()
 }
-
 /// Diff rows the card has room for: the rest of the screen, less the card's
 /// own rows, the footer and a few lines of the conversation.
 fn approval_preview_rows(height: usize) -> usize {
@@ -1091,7 +1079,7 @@ fn append_approval_card(tail: &mut Vec<RenderLine>, gate: &TuiGate, st: &FrameSt
         "edit_file" | "patch_file" | "write_file" => tr("Change this file?").to_string(),
         tool => tr_fill("Allow {tool}?", &[("tool", tool)]),
     };
-    let title = format!(" \x1b[1;38;2;225;175;95m{question}\x1b[0m \x1b[38;2;135;130;125m{}\x1b[0m ", req.tool);
+    let title = format!(" \x1b[1;38;2;225;175;95m{question}\x1b[0m ");
     let dash_w = inner_w.saturating_sub(visible_width(&title) + 1);
     if !joined {
         tail.push((
@@ -1104,7 +1092,7 @@ fn append_approval_card(tail: &mut Vec<RenderLine>, gate: &TuiGate, st: &FrameSt
     let label_row = |label: &str, value: &str| {
         pad_box_row(
             &format!(
-                " \x1b[38;2;160;155;145m{label}\x1b[0m \x1b[1;38;2;240;235;225m{}\x1b[0m",
+                " \x1b[38;2;160;155;145m{label}\x1b[0m \x1b[1;38;2;232;227;218m{}\x1b[0m",
                 clip_ansi(value, inner_w.saturating_sub(visible_width(label) + 4))
             ),
             width,
@@ -1150,7 +1138,7 @@ fn append_approval_card(tail: &mut Vec<RenderLine>, gate: &TuiGate, st: &FrameSt
         }
         if rows.len() > shown {
             let more = flashagent_tui::plural(rows.len() - shown, "more line", "more lines");
-            tail.push((LineKind::System, pad_box_row(&format!("    \x1b[38;2;100;95;90m+{more} · \x1b[38;2;225;175;95mv\x1b[38;2;100;95;90m {}\x1b[0m", flashagent_tui::i18n::tr("shows the whole change")), width)));
+            tail.push((LineKind::System, pad_box_row(&format!("    \x1b[38;2;95;90;85m+{more} · \x1b[38;2;225;175;95mv\x1b[38;2;95;90;85m {}\x1b[0m", flashagent_tui::i18n::tr("shows the whole change")), width)));
         }
     }
 
@@ -1160,7 +1148,7 @@ fn append_approval_card(tail: &mut Vec<RenderLine>, gate: &TuiGate, st: &FrameSt
             let bg = if choice == ConfirmChoice::Deny { "225;115;105" } else { "225;175;95" };
             format!("\x1b[1;38;2;30;26;22;48;2;{bg}m {label} \x1b[0m")
         } else {
-            format!("\x1b[38;2;190;185;175m {label} \x1b[0m")
+            format!("\x1b[38;2;232;227;218m {label} \x1b[0m")
         }
     };
     tail.push((LineKind::System, pad_box_row(" ", width)));
@@ -1219,7 +1207,7 @@ fn append_question_card(tail: &mut Vec<RenderLine>, req: &QuestionRequest, quest
     // Wrapped: the question is what the user answers, so none of it is cut.
     // Line by line: a newline kept inside one row would misplace every row after it.
     for row in req.question.lines().flat_map(|line| wrap_plain(&card_safe(line), inner_w.saturating_sub(3))) {
-        tail.push((LineKind::System, pad_box_row(&format!(" \x1b[1;38;2;240;235;225m{row}\x1b[0m"), width)));
+        tail.push((LineKind::System, pad_box_row(&format!(" \x1b[1;38;2;232;227;218m{row}\x1b[0m"), width)));
     }
     if let Some(deadline) = req.deadline {
         // During /goal the question will not wait forever; say how long.
@@ -1254,7 +1242,7 @@ fn append_question_card(tail: &mut Vec<RenderLine>, req: &QuestionRequest, quest
             let num = i + 1;
             let is_sel = !is_writing && sel_idx == i;
             let ptr = if is_sel { "\x1b[1;38;2;225;175;95m▸\x1b[0m" } else { " " };
-            let colour = if is_sel { "\x1b[1;38;2;225;175;95m" } else { "\x1b[38;2;200;195;185m" };
+            let colour = if is_sel { "\x1b[1;38;2;225;175;95m" } else { "\x1b[38;2;232;227;218m" };
             let check_box = if !req.multi_select {
                 ""
             } else if q_state.is_some_and(|s| s.selected_indices.contains(&i)) {
@@ -1296,7 +1284,7 @@ fn append_question_card(tail: &mut Vec<RenderLine>, req: &QuestionRequest, quest
             let shown = answer_in(4 + visible_width(&label));
             tail.push((
                 LineKind::User,
-                pad_box_row(&format!("  {write_ptr} \x1b[1;38;2;225;175;95m{write_num}. {}\x1b[0m \x1b[1;38;2;240;235;225m{shown}\x1b[0m", flashagent_tui::i18n::tr("Your answer:")), width),
+                pad_box_row(&format!("  {write_ptr} \x1b[1;38;2;225;175;95m{write_num}. {}\x1b[0m \x1b[1;38;2;232;227;218m{shown}\x1b[0m", flashagent_tui::i18n::tr("Your answer:")), width),
             ));
             let hints = flashagent_tui::key_hints(&[("Enter", "send"), ("Esc", "back to the choices")], inner_w.saturating_sub(4));
             tail.push((LineKind::System, pad_box_row(&format!("   {hints}"), width)));
@@ -1322,7 +1310,7 @@ fn append_question_card(tail: &mut Vec<RenderLine>, req: &QuestionRequest, quest
         let shown = answer_in(4);
         tail.push((
             LineKind::User,
-            pad_box_row(&format!("  \x1b[1;38;2;225;175;95m›\x1b[0m \x1b[1;38;2;240;235;225m{shown}\x1b[0m"), width),
+            pad_box_row(&format!("  \x1b[1;38;2;225;175;95m›\x1b[0m \x1b[1;38;2;232;227;218m{shown}\x1b[0m"), width),
         ));
         let hints = flashagent_tui::key_hints(&[("Enter", "send"), ("Esc", "cancel")], inner_w.saturating_sub(4));
         tail.push((LineKind::System, pad_box_row(&format!("   {hints}"), width)));
@@ -1355,7 +1343,7 @@ fn append_composer(
     st: &FrameState<'_>,
     width: usize,
     height: u16,
-    t: u64,
+    _t: u64,
     border_color: &str,
     joined: bool,
 ) -> (usize, Option<u16>) {
@@ -1372,19 +1360,16 @@ fn append_composer(
     if !st.attachments.is_empty() {
         let listed = st.attachments.join("  ");
         let row = format!(
-            " \x1b[38;2;145;205;140mattached\x1b[0m \x1b[38;2;160;165;180m{listed}\x1b[0m \x1b[38;2;100;95;90m· ctrl+z removes\x1b[0m"
+            " \x1b[38;2;145;205;140mattached\x1b[0m \x1b[38;2;160;165;180m{listed}\x1b[0m \x1b[38;2;95;90;85m· ctrl+z removes\x1b[0m"
         );
         tail.push((LineKind::System, pad_box_row(&row, width)));
     }
 
     let mut input_line_idx = tail.len();
     let mut text_cursor = Some(4);
-    let cycle = if anim::enabled() { (st.tick_n % 28) as f32 / 28.0 } else { 0.25 };
-    let phase = (cycle * std::f32::consts::PI * 2.0).sin() * 0.5 + 0.5;
-    let r = (210.0 + phase * 45.0) as u8;
-    let g = (150.0 + phase * 55.0) as u8;
-    let b = (75.0 + phase * 40.0) as u8;
-    let prompt_styled = format!("\x1b[1;38;2;{r};{g};{b}m›\x1b[0m");
+    // The prompt mark is the accent, still. It used to breathe through a gold
+    // cycle, which made the one thing the eye returns to the one thing moving.
+    let prompt_styled = "\x1b[1;38;2;225;175;95m›\x1b[0m".to_string();
     let input_rows: Vec<String> = if let Some((query, found)) = st.history_search {
         // The found prompt stands in the input, the search above it.
         let found_line = found.map_or_else(
@@ -1394,7 +1379,7 @@ fn append_composer(
         let label_text = flashagent_tui::i18n::tr("find in history:");
         let label = format!("\x1b[38;2;135;130;125m{label_text}\x1b[0m");
         text_cursor = Some(history_cursor(query, label_text, width));
-        vec![format!(" {prompt_styled} {label} \x1b[1;38;2;240;235;225m{query}\x1b[0m"), format!("   {found_line}")]
+        vec![format!(" {prompt_styled} {label} \x1b[1;38;2;232;227;218m{query}\x1b[0m"), format!("   {found_line}")]
     } else if let (true, Some(custom)) = (st.input.is_empty() && st.prefill_status.is_none() && !st.running && st.suggested_prompt.is_none(), st.custom_placeholder) {
         // Up to three rows: a notice cut at the edge loses its advice.
         wrap_plain(custom, width.saturating_sub(8).max(10))
@@ -1413,8 +1398,8 @@ fn append_composer(
             // What the agent is at, in the language of the interface; the
             // label itself stays English for the tests that pin it.
             let what = st.turn_phase.map_or_else(|| flashagent_tui::i18n::tr("Working on task").to_string(), |p| flashagent_tui::i18n::tr(p.label().as_str()).to_string());
-            let glow = if matches!(st.turn_phase, Some(TurnPhase::Stopping)) { Rgb(235, 150, 120) } else { Rgb(235, 225, 205) };
-            format!(" {prompt_styled} {}", anim::shimmer(&format!("{what}…"), t, 2000, Rgb(135, 130, 125), glow))
+            let colour = if matches!(st.turn_phase, Some(TurnPhase::Stopping)) { "\x1b[38;2;230;110;95m" } else { "\x1b[38;2;135;130;125m" };
+            format!(" {prompt_styled} {colour}{what}…\x1b[0m")
         } else if let Some(sug) = st.suggested_prompt {
             format!(" {prompt_styled}  \x1b[38;2;155;160;175m{sug}\x1b[0m  {}", key_hints(&[("→", "use")], width))
         } else if !st.attachments.is_empty() {
@@ -1444,7 +1429,7 @@ fn append_composer(
         let layout = st.input.layout(width.saturating_sub(6).max(1), max_rows);
         input_line_idx += layout.cursor_row;
         text_cursor = Some((layout.cursor_col + 4).min(width.saturating_sub(2)) as u16);
-        let dim = |s: &str| format!("\x1b[38;2;100;95;90m{s}\x1b[0m");
+        let dim = |s: &str| format!("\x1b[38;2;95;90;85m{s}\x1b[0m");
         let last = layout.rows.len() - 1;
         layout
             .rows
@@ -1490,11 +1475,11 @@ fn append_channel_card(tail: &mut Vec<RenderLine>, st: &FrameState<'_>, width: u
     for row in wrap_plain(prompt, inner_w.saturating_sub(3)) {
         tail.push((
             LineKind::System,
-            pad_box_row(&format!(" \x1b[38;2;240;235;225m{row}\x1b[0m"), width),
+            pad_box_row(&format!(" \x1b[38;2;232;227;218m{row}\x1b[0m"), width),
         ));
     }
     let yes = format!("\x1b[1;38;2;30;26;22;48;2;225;175;95m {} \x1b[0m", flashagent_tui::i18n::tr("Yes"));
-    let no = format!("\x1b[38;2;190;185;175m {} \x1b[0m", flashagent_tui::i18n::tr("No"));
+    let no = format!("\x1b[38;2;232;227;218m {} \x1b[0m", flashagent_tui::i18n::tr("No"));
     let row = format!(" {yes}  {no}");
     let at = tail.len();
     tail.push((LineKind::System, pad_box_row(&row, width)));
@@ -1572,9 +1557,9 @@ impl Renderer {
                 let wrapped = wrap_plain(steer, avail);
                 for (j, chunk) in wrapped.into_iter().enumerate() {
                     let text = if j == 0 {
-                        format!(" \x1b[1;38;2;225;175;95m›\x1b[0m \x1b[1;38;2;240;235;225m{chunk}\x1b[0m{suffix}")
+                        format!(" \x1b[1;38;2;225;175;95m›\x1b[0m \x1b[1;38;2;232;227;218m{chunk}\x1b[0m{suffix}")
                     } else {
-                        format!("   \x1b[1;38;2;240;235;225m{chunk}\x1b[0m")
+                        format!("   \x1b[1;38;2;232;227;218m{chunk}\x1b[0m")
                     };
                     tail.push((LineKind::User, text));
                 }
@@ -1584,7 +1569,7 @@ impl Renderer {
         for command in st.queued_commands {
             let suffix = " \x1b[38;2;135;130;125m· runs when the turn ends\x1b[0m";
             let shown = flashagent_tui::truncate_middle(command, width.saturating_sub(34).max(10));
-            tail.push((LineKind::User, format!(" \x1b[1;38;2;225;175;95m›\x1b[0m \x1b[1;38;2;240;235;225m{shown}\x1b[0m{suffix}")));
+            tail.push((LineKind::User, format!(" \x1b[1;38;2;225;175;95m›\x1b[0m \x1b[1;38;2;232;227;218m{shown}\x1b[0m{suffix}")));
         }
 
         // Every child, pinned above the composer and below the steering above
@@ -1650,10 +1635,11 @@ impl Renderer {
         } else {
             CardKey::Composer
         };
-        // A card waiting on the user breathes amber; after a turn the border briefly
-        // takes the colour of how it ended.
+        // A waiting card is a still amber hairline; the spinner on the call and
+        // the footer already say it is waiting. After a turn the composer
+        // border briefly takes the colour of how it ended.
         let border_rgb = match card_key {
-            CardKey::Approval | CardKey::Question => anim::pulse(t, 1800, BORDER, Rgb(225, 175, 95)),
+            CardKey::Approval | CardKey::Question => Rgb(225, 175, 95),
             CardKey::Composer => st.composer_flash.map_or(BORDER, |(lit, faded)| lit.mix(BORDER, faded)),
             _ => BORDER,
         };
@@ -1843,7 +1829,7 @@ impl Renderer {
         // place, so it says there is more above the block the user works in,
         // not above some composer floating in the middle of the chat.
         let marker = format!(
-            " \x1b[38;2;100;95;90m── \x1b[38;2;225;175;95m↓ {} below\x1b[38;2;100;95;90m · click or End to return ──\x1b[0m",
+            " \x1b[38;2;95;90;85m── \x1b[38;2;225;175;95m↓ {} below\x1b[38;2;95;90;85m · click or End to return ──\x1b[0m",
             flashagent_tui::plural(self.scroll_offset, "more line", "more lines")
         );
         rows.push(marker);
@@ -1858,9 +1844,18 @@ impl Renderer {
     // A composer taller than the screen keeps its end, where the typing is.
     let cut = rows.len().saturating_sub(height);
     rows.drain(..cut);
+    // The prompt sits on the terminal's last row: what the conversation does
+    // not fill is blank space above it, never a dead band under the composer.
+    let pad = height.saturating_sub(rows.len());
+    if pad > 0 {
+        let mut padded = vec![String::new(); pad];
+        padded.append(&mut rows);
+        rows = padded;
+    }
+    self.top_pad = pad;
     // The "more lines below" marker is the conversation's last painted row;
     // whatever the screen cut from the top, that is where a click finds it.
-    self.scroll_marker = (self.scroll_offset > 0).then(|| chat_rows.saturating_sub(1).saturating_sub(cut));
+    self.scroll_marker = (self.scroll_offset > 0).then(|| pad + chat_rows.saturating_sub(1).saturating_sub(cut));
     let scrolled_marker = usize::from(self.scroll_offset > 0);
     self.chat_view = (first_chat_row + cut, chat_rows.saturating_sub(scrolled_marker).saturating_sub(cut));
     self.chat_rows_on_screen = chat_rows.saturating_sub(cut);
@@ -1875,8 +1870,8 @@ impl Renderer {
     // click and hover on the card answers one row beneath the pointer.
     let card_first_abs = (settled.len() + paint_start).saturating_sub(chat_skipped);
     let (top, first) = match card_first_abs.checked_sub(cut) {
-        Some(top) => (top, 0),
-        None => (0, cut - card_first_abs),
+        Some(top) => (pad + top, 0),
+        None => (pad, cut - card_first_abs),
     };
     self.card_rows = Some(CardRows {
         top,
@@ -1896,14 +1891,16 @@ impl Renderer {
     // there would reach a thought or a tool call, takes a quiet background:
     // the same hint the card rows give theirs.
     if let Some((row, col)) = hover_chat {
-        let r = row as usize;
-        if r < self.chat_rows_on_screen && r < rows.len() {
+        // The pointer names a screen row; the transcript counts from the top
+        // of its own block, which sits under the blank rows.
+        let r = (row as usize).saturating_sub(self.top_pad);
+        if r < self.chat_rows_on_screen && (row as usize) < rows.len() {
             // A welcome-card button lights exactly its own cells; a thought
             // or tool call lights its whole row.
             if let Some((from, to)) = (zone_at)(self.chat_view.0 + r, col as usize) {
-                rows[r] = flashagent_tui::style_span(&rows[r], from, to, "\x1b[48;2;44;50;62m", "\x1b[49m");
+                rows[row as usize] = flashagent_tui::style_span(&rows[row as usize], from, to, "\x1b[48;2;38;36;33m", "\x1b[49m");
             } else if (owner_at)(self.chat_view.0 + r).is_some() {
-                rows[r] = flashagent_tui::style_span(&rows[r], 0, width, "\x1b[48;2;44;50;62m", "\x1b[49m");
+                rows[row as usize] = flashagent_tui::style_span(&rows[row as usize], 0, width, "\x1b[48;2;38;36;33m", "\x1b[49m");
             }
         }
     }
@@ -1912,14 +1909,14 @@ impl Renderer {
     if hover_gauge {
         if let Some((row, from, to)) = self.status_gauge {
             if (row as usize) < rows.len() {
-                rows[row as usize] = flashagent_tui::style_span(&rows[row as usize], from as usize, to as usize, "\x1b[48;2;44;50;62m", "\x1b[49m");
+                rows[row as usize] = flashagent_tui::style_span(&rows[row as usize], from as usize, to as usize, "\x1b[48;2;38;36;33m", "\x1b[49m");
             }
         }
     }
     if hover_marker {
         if let Some(row) = self.scroll_marker {
             if row < rows.len() {
-                rows[row] = flashagent_tui::style_span(&rows[row], 0, width, "\x1b[48;2;44;50;62m", "\x1b[49m");
+                rows[row] = flashagent_tui::style_span(&rows[row], 0, width, "\x1b[48;2;38;36;33m", "\x1b[49m");
             }
         }
     }
@@ -1927,7 +1924,7 @@ impl Renderer {
     // the marker.
     if let Some((row, from, to)) = zone_flash {
         if (row as usize) < rows.len() {
-            rows[row as usize] = flashagent_tui::style_span(&rows[row as usize], from, to, "\x1b[48;2;110;82;32m", "\x1b[49m");
+            rows[row as usize] = flashagent_tui::style_span(&rows[row as usize], from, to, "\x1b[48;2;60;48;30m", "\x1b[49m");
         }
     }
     // The drag selection, while the button is held: reverse video over the
@@ -1935,7 +1932,7 @@ impl Renderer {
     // transcript's rows only. The card and the footer are not selectable.
     if let Some(((ar, ac), (hr, hc))) = selection {
         let (top, left, bottom, right) = if (ar, ac) <= (hr, hc) { (ar, ac, hr, hc) } else { (hr, hc, ar, ac) };
-        let last = self.chat_rows_on_screen.saturating_sub(1);
+        let last = self.top_pad.saturating_add(self.chat_rows_on_screen).saturating_sub(1);
         for r in (top as usize)..=(bottom as usize).min(last) {
             if r >= rows.len() {
                 break;
@@ -1971,7 +1968,7 @@ impl Renderer {
         let mut opened = 0usize;
         for (i, (id, _)) in self.agent_plan.iter().enumerate() {
             let at = base + i + opened;
-            if let Some(screen) = at.checked_sub(cut) {
+            if let Some(screen) = at.checked_sub(cut).map(|row| row + pad) {
                 self.agent_screen.push((screen, id.clone()));
             }
             if self.agent_open.contains(id) {
@@ -1982,7 +1979,7 @@ impl Renderer {
     // The terminal's cursor is shown only where text is typed; cards and menus
     // mark their own choice.
     let cursor = text_cursor.and_then(|col| {
-        let row = (chat_rows + input_line_idx.checked_sub(card_start)?).checked_sub(cut)?;
+        let row = (chat_rows + input_line_idx.checked_sub(card_start)?).checked_sub(cut).map(|row| row + pad)?;
         Some((row as u16, col))
     });
     // The status row is the last one painted, however much the screen cut from
@@ -2195,7 +2192,6 @@ impl App {
                 goal_progress: goal_progress.as_deref(),
                 tip_lines: config.show_tips.then_some(cx.tip_lines.as_slice()),
                 reasoning_expand: ReasoningExpansion { all: self.all_expanded, last: self.last_expanded },
-                tick_n: self.tick_n,
                 running: self.running,
                 rate_limit_wait: cx.source.0.waiting_for_rate_limit().map(|wait| wait.as_secs_f64().ceil() as u64),
                 tokens_per_sec: config.show_tokens.then_some(tg_speed),
@@ -2449,7 +2445,7 @@ mod scrollbar_tests {
         assert_eq!(visible_width(&out), 10, "clipped one short, and the thumb goes in its place");
         // A styled row keeps its styles: the cell carries its own colour and
         // closes it, whatever the clipped row left open.
-        let styled = "\x1b[38;2;200;195;185mжёлтая строка\x1b[0m";
+        let styled = "\x1b[38;2;232;227;218mжёлтая строка\x1b[0m";
         let out = with_right_cell(styled, 12, "█");
         assert_eq!(visible_width(&out), 12);
         assert!(out.ends_with("\x1b[0m"), "the row closes what it opened");
@@ -2535,9 +2531,9 @@ mod footer_tests {
     fn the_yolo_mode_is_the_one_warning_colour_in_the_status_row() {
         let yolo = format_status_left(false, false, false, None, "YOLO", true, "");
         assert!(yolo.contains("[YOLO]"));
-        assert!(yolo.contains("225;115;105"), "YOLO does not stand out: {yolo:?}");
+        assert!(yolo.contains("245;160;80"), "YOLO does not stand out: {yolo:?}");
         let manual = format_status_left(false, false, false, None, "Manual", false, "");
-        assert!(manual.contains("145;205;140"), "the usual mode keeps its colour: {manual:?}");
+        assert!(manual.contains("160;155;145"), "the usual mode is neutral, not a success colour: {manual:?}");
         // A goal run's own banner still wins: it says who is driving.
         let goal = format_status_left(true, true, false, None, "YOLO", true, "");
         assert!(goal.contains("Goal: Autonomous"));

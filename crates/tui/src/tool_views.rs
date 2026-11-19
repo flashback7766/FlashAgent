@@ -5,17 +5,17 @@
 use crate::{visible_width, LineKind, RenderLine};
 
 const RESET: &str = "\x1b[0m";
-const BORDER_DIM: &str = "\x1b[38;2;75;99;130m";
-const TEXT_MUTED: &str = "\x1b[38;2;120;125;140m";
+const BORDER_DIM: &str = "\x1b[38;2;95;90;85m";
+const TEXT_MUTED: &str = "\x1b[38;2;135;130;125m";
 const TEXT_PROMPT: &str = "\x1b[38;2;120;140;160m";
 const TEXT_BRIGHT: &str = "\x1b[38;2;225;230;240m";
-const TEXT_YELLOW: &str = "\x1b[1;38;2;240;210;115m";
+const TEXT_YELLOW: &str = "\x1b[1;38;2;245;160;80m";
 const TEXT_CYAN: &str = "\x1b[38;2;110;175;230m";
-const TEXT_RED: &str = "\x1b[38;2;245;120;120m";
-const TEXT_GREEN: &str = "\x1b[38;2;135;220;145m";
+const TEXT_RED: &str = "\x1b[38;2;230;110;95m";
+const TEXT_GREEN: &str = "\x1b[38;2;145;205;140m";
 const BG_DEL: &str = "\x1b[48;2;65;20;25m";
 const BG_ADD: &str = "\x1b[48;2;20;55;30m";
-const BG_READ: &str = "\x1b[48;2;22;38;60m";
+const BG_READ: &str = "\x1b[48;2;38;36;33m";
 const TEXT_READ: &str = "\x1b[38;2;145;195;255m";
 
 /// Clipped by cells and grapheme clusters, with an ellipsis only where text
@@ -110,7 +110,7 @@ pub(crate) struct ToolCard {
 }
 
 fn card_width(width: usize) -> usize {
-    if width < 12 { width } else { width.saturating_sub(4).min(100) }
+    if width < 12 { width } else { crate::content_width(width) }
 }
 
 /// A carriage return in captured output replaces the previous progress line.
@@ -339,8 +339,11 @@ pub(crate) fn parse_diff_to_rows(diff_text: &str) -> Vec<DiffRow> {
             });
             old_pos = start('-').unwrap_or(old_pos);
             new_pos = start('+').unwrap_or(new_pos);
-            rows.push(DiffRow::Note(line.to_string()));
-        } else if line.starts_with("---") || line.starts_with("+++") || is_file_separator(line) {
+            // The hunk header is machinery; the line numbers carry the same
+            // information without a second notation.
+        } else if line.starts_with("---") || line.starts_with("+++") {
+            // File headers belong under [arguments], not in the change itself.
+        } else if is_file_separator(line) {
             rows.push(DiffRow::Note(line.to_string()));
         } else if let Some(text) = line.strip_prefix(' ') {
             rows.push(DiffRow::Same { old_line: old_pos, new_line: new_pos, text: text.to_string() });
@@ -359,15 +362,16 @@ pub(crate) fn parse_diff_to_rows(diff_text: &str) -> Vec<DiffRow> {
     rows
 }
 
-pub(crate) fn diff_body(text: &str) -> Vec<RenderLine> {
+pub fn diff_body(text: &str) -> Vec<RenderLine> {
     let numbered = text.lines().any(|line| line.starts_with("@@"));
     let at = |n: usize, mark: &str| if numbered { n.to_string() } else { mark.to_string() };
+    let safe = |text: &str| crate::text::shown_controls(&text.replace('\t', "    "));
     parse_diff_to_rows(text).into_iter().map(|row| {
         let styled = match row {
-            DiffRow::Same { old_line, new_line, text } => format!("{TEXT_MUTED}{:>4} {:>4}{RESET} {TEXT_BRIGHT}{text}{RESET}", at(old_line, ""), at(new_line, "")),
-            DiffRow::Del { old_line, text } => format!("{TEXT_RED}{:>4}     -{RESET} {BG_DEL}{TEXT_RED}{text}{RESET}", at(old_line, "-")),
-            DiffRow::Add { new_line, text } => format!("     {TEXT_GREEN}{:>4} +{RESET} {BG_ADD}{TEXT_GREEN}{text}{RESET}", at(new_line, "+")),
-            DiffRow::Note(text) => format!("{TEXT_MUTED}{text}{RESET}"),
+            DiffRow::Same { old_line, new_line, text } => format!("{TEXT_MUTED}{:>4} {:>4}{RESET} {TEXT_BRIGHT}{}{RESET}", at(old_line, ""), at(new_line, ""), safe(&text)),
+            DiffRow::Del { old_line, text } => format!("{TEXT_RED}{:>4}     -{RESET} {BG_DEL}{TEXT_RED}{}{RESET}", at(old_line, "-"), safe(&text)),
+            DiffRow::Add { new_line, text } => format!("     {TEXT_GREEN}{:>4} +{RESET} {BG_ADD}{TEXT_GREEN}{}{RESET}", at(new_line, "+"), safe(&text)),
+            DiffRow::Note(text) => format!("{TEXT_MUTED}{}{RESET}", safe(&text)),
         };
         (LineKind::Tool, styled)
     }).collect()
@@ -495,12 +499,13 @@ mod tests {
         let diff = format!("--- a/src/main.rs\n+++ b/src/main.rs\n@@ -10,1 +10,40 @@\n-old\n{}\n\\ No newline at end of file",
             (1..=40).map(|i| format!("+new {i}")).collect::<Vec<_>>().join("\n"));
         let rows = diff_body(&diff);
-        assert!(rows.iter().any(|(_, row)| row.contains("--- a/src/main.rs")));
+        // Headers are arguments, not the change; the numbers carry the hunk.
+        assert!(!rows.iter().any(|(_, row)| row.contains("--- a/src/main.rs") || row.contains("+++ b/src/main.rs")));
         assert!(rows.iter().any(|(_, row)| row.contains("new 40")));
         assert!(rows.iter().any(|(_, row)| row.contains("No newline at end of file")));
         assert_eq!(rows.iter().filter(|(_, row)| row.contains(BG_ADD)).count(), 40);
         assert_eq!(rows.iter().filter(|(_, row)| row.contains(BG_DEL)).count(), 1);
-        assert!(crate::strip_ansi(&rows[3].1).contains("  10"));
+        assert!(crate::strip_ansi(&rows[0].1).contains("  10"));
         let written = written_body("# Notes\n- item\n+ plus\n  indented");
         assert_eq!(written.iter().filter(|(_, row)| row.contains(BG_ADD)).count(), 4);
         assert!(!written.iter().any(|(_, row)| row.contains(BG_DEL)));

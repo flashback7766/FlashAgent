@@ -77,7 +77,7 @@ impl ContextUsage {
         Self::format_capacity_tokens(tokens)
     }
 
-    /// `▌───────── 6% · 4.1K/64K`
+    /// `▌───────── 6% · 4.1k/64k`
     pub fn format_compact_gauge(&self, bar_width: usize) -> String {
         if self.total_capacity == 0 {
             return format!("{} tokens · context unknown", Self::format_used_tokens(self.total_used()));
@@ -86,14 +86,14 @@ impl ContextUsage {
         let bar_width = bar_width.max(4);
 
         let fill_color = if pct >= 90.0 {
-            "\x1b[1;38;2;240;110;110m" // coral red
+            "\x1b[1;38;2;230;110;95m" // error
         } else if pct >= 75.0 {
-            "\x1b[1;38;2;235;185;105m" // warm amber
+            "\x1b[1;38;2;245;160;80m" // warning
         } else {
-            "\x1b[38;2;135;215;165m" // mint green
+            "\x1b[1;38;2;225;175;95m" // the one accent
         };
 
-        let rail_color = "\x1b[38;2;60;65;78m"; // recessed dark rail
+        let rail_color = "\x1b[38;2;95;90;85m"; // hairline
         let reset = "\x1b[0m";
 
         let total_eighths = ((pct / 100.0) * (bar_width as f32) * 8.0).round() as usize;
@@ -116,7 +116,7 @@ impl ContextUsage {
         let cap_str = Self::format_capacity_tokens(self.total_capacity);
 
         format!(
-            "{fill_color}{full_str}{sub_block}{reset}{rail_color}{empty_str}{reset} \x1b[1;38;2;245;240;235m{pct:.0}%\x1b[0m \x1b[38;2;120;125;140m·\x1b[0m \x1b[38;2;160;165;180m{used_str}\x1b[38;2;110;115;130m/\x1b[38;2;160;165;180m{cap_str}\x1b[0m"
+            "{fill_color}{full_str}{sub_block}{reset}{rail_color}{empty_str}{reset} \x1b[1;38;2;232;227;218m{pct:.0}%\x1b[0m \x1b[38;2;135;130;125m·\x1b[0m \x1b[38;2;160;155;145m{used_str}\x1b[38;2;135;130;125m/\x1b[38;2;160;155;145m{cap_str}\x1b[0m"
         )
     }
 }
@@ -141,8 +141,8 @@ mod tests {
 
         let gauge = usage.format_compact_gauge(10);
         assert!(gauge.contains("23%"));
-        assert!(gauge.contains("30K"));
-        assert!(gauge.contains("128K"));
+        assert!(gauge.contains("30k"));
+        assert!(gauge.contains("128k"));
     }
 
     #[test]
@@ -179,19 +179,19 @@ mod tests {
 
     #[test]
     fn test_format_tokens_binary_and_decimal() {
-        assert_eq!(ContextUsage::format_capacity_tokens(131_072), "131K");
-        assert_eq!(ContextUsage::format_capacity_tokens(65_536), "66K");
-        assert_eq!(ContextUsage::format_capacity_tokens(32_768), "33K");
-        assert_eq!(ContextUsage::format_capacity_tokens(128_000), "128K");
-        assert_eq!(ContextUsage::format_capacity_tokens(200_000), "200K");
-        assert_eq!(ContextUsage::format_capacity_tokens(3_250), "3K");
+        assert_eq!(ContextUsage::format_capacity_tokens(131_072), "131k");
+        assert_eq!(ContextUsage::format_capacity_tokens(65_536), "66k");
+        assert_eq!(ContextUsage::format_capacity_tokens(32_768), "33k");
+        assert_eq!(ContextUsage::format_capacity_tokens(128_000), "128k");
+        assert_eq!(ContextUsage::format_capacity_tokens(200_000), "200k");
+        assert_eq!(ContextUsage::format_capacity_tokens(3_250), "3.2k");
         assert_eq!(ContextUsage::format_capacity_tokens(500), "500");
 
-        assert_eq!(ContextUsage::format_used_tokens(5_230), "5K");
-        assert_eq!(ContextUsage::format_used_tokens(5_000), "5K");
-        assert_eq!(ContextUsage::format_used_tokens(8_400), "8K");
+        assert_eq!(ContextUsage::format_used_tokens(5_230), "5.2k");
+        assert_eq!(ContextUsage::format_used_tokens(5_000), "5k");
+        assert_eq!(ContextUsage::format_used_tokens(8_400), "8.4k");
         assert_eq!(ContextUsage::format_used_tokens(500), "500");
-        assert_eq!(ContextUsage::format_used_tokens(131_072), "131K");
+        assert_eq!(ContextUsage::format_used_tokens(131_072), "131k");
     }
 }
 

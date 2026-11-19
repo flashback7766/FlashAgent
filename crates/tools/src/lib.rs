@@ -933,7 +933,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         assert!(!out.is_error, "{}", out.content);
         assert_eq!((a.as_str(), b.as_str()), ("ONE\n", "TWO\n"));
-        assert!(out.content.contains("2 file(s)"), "{}", out.content);
+        assert!(out.content.contains("2 edits to 2 files"), "{}", out.content);
     }
 
     #[tokio::test]

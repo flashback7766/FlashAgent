@@ -213,9 +213,9 @@ impl UsageView {
     }
 
     pub fn render(&self, width: usize, height: usize) -> Vec<RenderLine> {
-        let border = "\x1b[38;2;100;95;90m";
+        let border = "\x1b[38;2;95;90;85m";
         let reset = "\x1b[0m";
-        let inner_w = width.saturating_sub(6).min(88);
+        let inner_w = width.saturating_sub(6).min(100);
         let mut lines = Vec::new();
         let title = format!(" {} ", tr("Usage"));
         let dashes = inner_w.saturating_sub(visible_width(&title) + 1);
@@ -273,7 +273,7 @@ impl UsageView {
         if total > window {
             let from = start + 1;
             let to = (start + window).min(total);
-            lines.push((LineKind::System, pad_row(&format!("\x1b[38;2;120;125;140m{from}-{to} / {total}\x1b[0m"))));
+            lines.push((LineKind::System, pad_row(&format!("\x1b[38;2;135;130;125m{from}-{to} / {total}\x1b[0m"))));
         } else {
             lines.push((LineKind::System, pad_row("")));
         }
@@ -412,7 +412,7 @@ impl UsageView {
                 crate::tool_views::clip_ellipsis(title, 46)
             ));
             rows.push(format!(
-                "      \x1b[38;2;120;125;140m{}\x1b[0m · \x1b[38;2;135;130;125m{detail}\x1b[0m",
+                "      \x1b[38;2;135;130;125m{}\x1b[0m · \x1b[38;2;135;130;125m{detail}\x1b[0m",
                 crate::tool_views::clip_ellipsis(&row.model, 32)
             ));
         }
@@ -478,7 +478,7 @@ impl UsageView {
                     }
                 }
                 LimitsOutcome::Unsupported(why) => rows.push(format!("  \x1b[38;2;135;130;125m{why}\x1b[0m")),
-                LimitsOutcome::Failed(why) => rows.push(format!("  \x1b[38;2;230;120;120m{why}\x1b[0m")),
+                LimitsOutcome::Failed(why) => rows.push(format!("  \x1b[38;2;230;110;95m{why}\x1b[0m")),
             }
             rows.push(String::new());
         }
@@ -487,7 +487,7 @@ impl UsageView {
 }
 
 fn section(text: &str) -> String {
-    format!("\x1b[1;38;2;180;175;165m{text}\x1b[0m")
+    format!("\x1b[1;38;2;232;227;218m{text}\x1b[0m")
 }
 
 /// The labels are a column, so the values line up in either language.
@@ -520,7 +520,7 @@ mod tests {
         assert!(text.contains("Usage"));
         assert!(text.contains("OpenCode Go"));
         assert!(text.contains("$0.25"));
-        assert!(text.contains("1K"));
+        assert!(text.contains("1k"));
     }
 
     #[test]

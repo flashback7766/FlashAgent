@@ -346,13 +346,13 @@ impl TokenTracker {
     /// fault rather than as the first line of a conversation.
     pub(crate) fn cache_display(&self) -> Option<String> {
         let share = self.last_f_keep.filter(|s| *s > 0.0)?;
-        Some(format!("\x1b[38;2;175;170;225mcache {:.0}%\x1b[0m", share * 100.0))
+        Some(format!("\x1b[38;2;160;155;145mcache {:.0}%\x1b[0m", share * 100.0))
     }
 
     /// E.g. `draft 81%`, while a turn runs on a server that reports it.
     pub(crate) fn draft_display(&self) -> Option<String> {
         let rate = self.draft_acceptance.filter(|_| self.is_running)?;
-        Some(format!("\x1b[38;2;175;170;225mdraft {rate:.0}%\x1b[0m"))
+        Some(format!("\x1b[38;2;160;155;145mdraft {rate:.0}%\x1b[0m"))
     }
 
     pub(crate) fn ttft_display(&self) -> Option<String> {
@@ -363,7 +363,7 @@ impl TokenTracker {
         } else {
             format!("{:.0} t/s", spd)
         };
-        Some(format!("\x1b[38;2;120;220;140mTTFT {:.2}s ({speed_str})\x1b[0m", ttft.as_secs_f64()))
+        Some(format!("\x1b[38;2;145;205;140mTTFT {:.2}s ({speed_str})\x1b[0m", ttft.as_secs_f64()))
     }
 }
 

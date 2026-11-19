@@ -4,7 +4,7 @@ pub static TIPS_POOL: &[&str] = &[
     "Shift+Tab cycles the permission mode: Planning, Manual, Accept Edits, Accept All.",
     "Click a thought or a tool call to open or fold just that one; F2 does them all.",
     "Press Enter while the agent is working to steer it without stopping the turn; a slash command works too, and /compact runs once the turn ends.",
-    "Esc interrupts a running turn and keeps everything it already did.",
+    "Esc stops a running turn and keeps what it already did.",
     "Ctrl+Z takes back an attached image before it is sent.",
     "Drop an image file on the window to attach it to the next message.",
     "Ctrl+X Ctrl+E writes the prompt in your external editor, as in bash.",
@@ -53,7 +53,9 @@ fn shuffle_deck(deck: &mut [usize], seed: &mut u64) {
     }
 }
 
-/// How long a tip stays: 10 s at the 80 ms tick.
+/// How long a tip used to stay: 10 s at the 80 ms tick. Kept for the test
+/// that proves a tip is no longer replaced on that clock.
+#[cfg(test)]
 const HOLD_TICKS: usize = 125;
 /// How long a new tip takes to fade in, with motion on.
 const FADE_TICKS: usize = 5;
@@ -109,11 +111,12 @@ impl TipAnimator {
         Self { tip_text: TIPS_POOL[deck[0]], age: 0, deck, deck_idx: 0, seed, room: None }
     }
 
-    /// One tick is 80 ms. Tips change with motion off too; only the fade goes.
+    /// One tick is 80 ms. A tip is a note, not a carousel: replacing it every
+    /// ten seconds moved the footer while the user was reading. It is swapped
+    /// only when the footer becomes too narrow for it (`fit_to`).
     pub fn tick(&mut self) {
-        self.age += 1;
-        if self.age >= HOLD_TICKS {
-            self.advance();
+        if self.age < FADE_TICKS {
+            self.age += 1;
         }
     }
 
@@ -294,17 +297,17 @@ mod tests {
     }
 
     #[test]
-    fn a_tip_is_shown_whole_and_replaced_whole() {
+    fn a_tip_is_shown_whole_and_stays() {
+        // A tip is a note, not a carousel: ten ticks or a thousand, the words
+        // stay until the footer itself changes.
         let mut anim = TipAnimator::new();
         let first = anim.tip_text;
-        for _ in 1..HOLD_TICKS {
+        for _ in 0..HOLD_TICKS.saturating_mul(3) {
             anim.tick();
-            assert_eq!(anim.tip_text, first, "the tip changed before its time was up");
+            assert_eq!(anim.tip_text, first, "the tip changed while it was being read");
             let row = visible(&anim.render_lines(200, 2).concat());
             assert_eq!(row, format!("  Tip: {first}"), "a tip is never shown in part");
         }
-        anim.tick();
-        assert_ne!(anim.tip_text, first);
     }
 
     #[test]

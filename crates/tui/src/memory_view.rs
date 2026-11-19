@@ -312,11 +312,11 @@ impl MemoryModal {
         if self.tab == MemoryTab::Summary {
             return self.render_summary(width);
         }
-        let border = "\x1b[38;2;100;95;90m";
+        let border = "\x1b[38;2;95;90;85m";
         let reset = "\x1b[0m";
         let dim = "\x1b[38;2;135;130;125m";
-        let text = "\x1b[38;2;200;195;185m";
-        let bright = "\x1b[1;38;2;240;235;225m";
+        let text = "\x1b[38;2;232;227;218m";
+        let bright = "\x1b[1;38;2;232;227;218m";
         let accent = "\x1b[1;38;2;225;175;95m";
         let inner_w = width.saturating_sub(6).min(96);
 
@@ -352,7 +352,7 @@ impl MemoryModal {
             lines.push((LineKind::System, pad("")));
             for (i, row) in self.rows.iter().enumerate() {
                 let selected = i == self.selected;
-                let marker = if selected { format!("{accent}▸{reset}") } else { " ".to_string() };
+                let marker = if selected { format!("{accent}›{reset}") } else { " ".to_string() };
                 let scope_tag = match row.scope {
                     Scope::Project => crate::i18n::tr("project"),
                     Scope::Global => crate::i18n::tr("global "),
@@ -400,13 +400,13 @@ impl MemoryModal {
     }
 
     fn render_summary(&self, width: usize) -> Vec<RenderLine> {
-        let border = "\x1b[38;2;100;95;90m";
+        let border = "\x1b[38;2;95;90;85m";
         let reset = "\x1b[0m";
         let dim = "\x1b[38;2;135;130;125m";
-        let text = "\x1b[38;2;200;195;185m";
-        let heading = "\x1b[1;38;2;240;235;225m";
+        let text = "\x1b[38;2;232;227;218m";
+        let heading = "\x1b[1;38;2;232;227;218m";
         let accent = "\x1b[1;38;2;225;175;95m";
-        let link = "\x1b[4;38;2;168;199;250m";
+        let link = "\x1b[4;38;2;138;180;248m";
         let inner_w = width.saturating_sub(6).min(96);
         let t = crate::anim::now_ms();
         let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);

@@ -229,7 +229,7 @@ impl PrefillTracker {
                 String::new()
             };
             format!(
-                "\x1b[38;2;120;220;140mPrefill ~{:.1}s\x1b[0m{detail} \x1b[38;2;100;140;180m[{bar}]\x1b[0m",
+                "\x1b[38;2;145;205;140mPrefill ~{:.1}s\x1b[0m{detail} \x1b[38;2;100;140;180m[{bar}]\x1b[0m",
                 pred_secs
             )
         } else {

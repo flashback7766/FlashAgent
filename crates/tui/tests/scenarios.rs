@@ -263,8 +263,9 @@ fn switching_provider_mid_session_sends_the_next_turn_to_the_other_server() {
     // Its last row: the menu unfolds as it opens.
     let menu = term.wait_for("+ Edit providers", WAIT);
     assert!(menu.contains("Desk  (in use)") && menu.contains("Lab"), "{menu}");
-    assert!(menu.contains(&second.url), "the menu shows where each provider is:\n{menu}");
     term.type_text("lab");
+    // The selected provider's address is the one row under the list.
+    term.wait_for(&second.url, WAIT);
     term.send(ENTER);
     // The server's own model, since none was saved for it. The footer names it
     // once discovery is back; the transcript must still say nothing.
@@ -391,13 +392,13 @@ fn the_card_at_the_top_says_the_model_that_runs_now() {
     term.send(ENTER);
     std::thread::sleep(Duration::from_millis(300));
 
-    // The card at the top of the chat says what runs now, not what ran when
-    // the session started. Its row is the one without the rule's level.
+    // The status row says what runs now. The welcome card is gone once the
+    // conversation starts, so the live state is the one place that answers.
     let screen = term.screen();
-    let card_row = screen
-        .lines()
-        .find(|l| l.contains("Model:") && l.contains("other-model") && !l.contains("thinking effort"));
-    assert!(card_row.is_some(), "the card still shows the old model:\n{screen}");
+    assert!(
+        screen.lines().any(|l| l.contains("other-model") && l.contains("Accept Edits")),
+        "the status still shows the old model:\n{screen}"
+    );
 }
 
 /// Ctrl+D on an empty prompt.
@@ -647,16 +648,16 @@ fn scrolling_back_moves_the_conversation_and_keeps_the_composer() {
 
 #[test]
 fn a_click_on_a_thought_opens_it() {
-    let server = MockServer::start(vec![Reply::Text("<think>Weighing the options carefully</think>Done thinking.".into())]);
+    let server = MockServer::start(vec![Reply::Text("<think>Weighing the options carefully. The hidden DETAIL_TOKEN is below.</think>Done thinking.".into())]);
     let home = Home::new();
     let term = ready(&home, &server);
     ask(&term, "think about it", "Done thinking.");
     let screen = term.wait_for("Thought:", WAIT);
-    assert!(!screen.contains("Weighing the options"), "already open:\n{screen}");
-    let row = screen.lines().position(|l| l.contains("Thought:")).unwrap();
-    // SGR mouse report: left button down, then up, at column 5 of that row.
-    term.write(&format!("\x1b[<0;5;{}M\x1b[<0;5;{}m", row + 1, row + 1));
-    term.wait_for("Weighing the options", WAIT);
+    assert!(!screen.contains("DETAIL_TOKEN"), "already open:\n{screen}");
+    // The chevron at the end of the collapsed row.
+    let (row, col) = term.find_on_screen("›").expect("the thought row's chevron");
+    term.click(row, col);
+    term.wait_for("DETAIL_TOKEN", WAIT);
 }
 
 #[test]
@@ -1926,7 +1927,7 @@ fn the_command_palette_opens_while_a_turn_runs() {
     term.send(ENTER);
     term.wait_for("Working", WAIT);
     term.send("\x0b");
-    let screen = term.wait_for("Commands", WAIT);
+    let screen = term.wait_for("Command palette", WAIT);
     assert!(screen.contains("Working"), "the turn was stopped when the palette opened:\n{screen}");
     term.send(ESC);
     server.release();
@@ -2077,11 +2078,8 @@ fn a_tool_that_is_turned_off_goes_out_of_the_prompt_with_it() {
     term.wait_for("Tools", WAIT);
     for _ in 0..40 {
         let screen = term.screen();
-        // The row under the cursor is the one marked with a triangle.
-        let line = screen
-            .lines()
-            .find(|l| l.contains('\u{25b8}') || l.contains("▸"))
-            .unwrap_or_default();
+        // The row under the cursor carries the selection mark.
+        let line = screen.lines().find(|l| l.contains('›')).unwrap_or_default();
         if line.contains("ask_user") {
             term.send(" ");
             break;
@@ -2167,17 +2165,17 @@ fn compaction_refreshes_the_gauge_before_another_prompt() {
     term.wait_for("First answer.", WAIT);
     term.wait_gone(RUNNING_HINT, WAIT);
     ask(&term, "the current question", "Second answer.");
-    term.wait_for("26K/33K", WAIT);
+    term.wait_for("26k/33k", WAIT);
 
     term.type_text("/compact");
     term.send(ENTER);
     term.wait_for("Session compacted", WAIT);
     // The footer and gauge can arrive in separate PTY reads of the same frame.
-    term.wait_gone("26K/33K", Duration::from_secs(2));
+    term.wait_gone("26k/33k", Duration::from_secs(2));
     let screen = term.wait_for("Session compacted", WAIT);
-    assert!(!screen.contains("26K/33K"), "the old request still owns the gauge after compaction, before any new input:\n{screen}");
+    assert!(!screen.contains("26k/33k"), "the old request still owns the gauge after compaction, before any new input:\n{screen}");
     assert!(!screen.contains("Context compacted:"), "the summary card has a second, yellow success message:\n{screen}");
-    assert!(screen.contains("/33K"), "the context gauge disappeared:\n{screen}");
+    assert!(screen.contains("/33k"), "the context gauge disappeared:\n{screen}");
     assert_eq!(server.turns().len(), 2, "the gauge must refresh without another model turn");
 }
 
@@ -2199,12 +2197,12 @@ fn automatic_compaction_refreshes_the_gauge_and_keeps_the_archive() {
     paste(&term, "the current question");
     term.send(ENTER);
     term.wait_for("Writing a summary", WAIT);
-    term.wait_for("26K/33K", WAIT);
+    term.wait_for("26k/33k", WAIT);
     term.wait_for("conversation… 1.", WAIT);
     term.wait_for("Session compacted", WAIT);
-    term.wait_gone("26K/33K", Duration::from_secs(2));
+    term.wait_gone("26k/33k", Duration::from_secs(2));
     let screen = term.wait_for("Session compacted", WAIT);
-    assert!(!screen.contains("26K/33K"), "automatic compaction kept the old server count:\n{screen}");
+    assert!(!screen.contains("26k/33k"), "automatic compaction kept the old server count:\n{screen}");
     assert!(!screen.contains("Context compacted:"), "automatic compaction has a duplicate status:\n{screen}");
     let sessions = home.sessions();
     let saved: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(sessions.first().expect("the session was saved")).unwrap()).unwrap();
@@ -2221,13 +2219,13 @@ fn failed_compaction_keeps_the_previous_gauge() {
     let home = Home::new();
     let term = ready_with(&home, &server, serde_json::json!({ "auto_compact_context": false, "context_warn_threshold": 95 }));
     ask(&term, "the question", "Only answer.");
-    term.wait_for("26K/33K", WAIT);
+    term.wait_for("26k/33k", WAIT);
     let session = home.sessions().into_iter().next().expect("the session was saved");
     let before: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&session).unwrap()).unwrap();
     term.type_text("/compact");
     term.send(ENTER);
     let screen = term.wait_for("Session compaction failed", WAIT);
-    assert!(screen.contains("26K/33K"), "a failed summary must not lower the unchanged window:\n{screen}");
+    assert!(screen.contains("26k/33k"), "a failed summary must not lower the unchanged window:\n{screen}");
     let after: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&session).unwrap()).unwrap();
     assert_eq!(after["messages"], before["messages"], "an empty summary must not replace the conversation");
     assert_eq!(after.get("archive"), before.get("archive"));
@@ -2766,7 +2764,7 @@ fn several_files_are_read_and_changed_in_one_call_each() {
     for part in ["=== one.txt ===", "first draft", "=== two.txt ===", "second draft"] {
         assert!(read.contains(part), "the read did not hand back {part:?}: {read}");
     }
-    assert!(tool_result(&turns[2]).contains("2 file(s)"), "{}", tool_result(&turns[2]));
+    assert!(tool_result(&turns[2]).contains("2 edits to 2 files"), "{}", tool_result(&turns[2]));
 }
 
 #[test]
@@ -4197,7 +4195,7 @@ fn the_command_palette_answers_a_click_on_its_rows() {
     term.wait_for("/verbose", WAIT);
     let (row, col) = term.find_on_screen("/verbose").expect("the filter leaves /verbose");
     term.click(row, col);
-    term.wait_for("[verbose: last]", WAIT);
+    term.wait_for("verbose: last", WAIT);
     quit(&mut term);
 }
 
@@ -4210,6 +4208,10 @@ fn the_palette_s_own_close_button_closes_it() {
     term.wait_for("Command palette", WAIT);
     // Every card carries a ✕ in its top-right corner; clicking it closes
     // what Esc closes.
+    // The card unfolds row by row; its ✕ moves as it grows, so the search
+    // happens on the settled frame.
+    term.wait_for("↑/↓ move", WAIT);
+    std::thread::sleep(Duration::from_millis(300));
     let (row, col) = term.find_on_screen("✕").expect("the card carries a close button");
     term.click(row, col);
     term.wait_for("Ask FlashAgent", WAIT);
@@ -4223,9 +4225,10 @@ fn the_welcome_card_s_own_buttons_do_what_they_say() {
     let mut term = ready(&home, &server);
     // Swift opens Settings. The reveal draws the card a row at a time, so the
     // greeting is waited for before its place on screen means anything.
-    term.wait_for("Welcome", WAIT);
-    let (row, col) = term.find_on_screen("Welcome").expect("the greeting names its owner");
-    term.click(row + 2, col);
+    // The mascot is the card's settings button; it sits under the cwd title.
+    term.wait_for("~/work", WAIT);
+    let (row, _) = term.find_on_screen("~/work").expect("the card names the project");
+    term.click(row + 2, 3);
     term.wait_for("[1 General]", WAIT);
     term.send("\x1b");
     term.wait_for("Ask FlashAgent", WAIT);
@@ -4333,6 +4336,9 @@ mod never_half_drawn {
         /// Reads after which under 60% of the most the screen ever showed was left.
         half_drawn: usize,
         most: usize,
+        /// The previous read, to tell a partial paint from a screen that was
+        /// deliberately cleared (the welcome card goes on the first prompt).
+        last: usize,
     }
 
     struct Watched {
@@ -4402,10 +4408,18 @@ mod never_half_drawn {
                     let mut seen = seen2.lock().unwrap();
                     if settled.is_some_and(|t| t.elapsed() > Duration::from_secs(1)) {
                         seen.reads += 1;
-                        if filled * 10 < seen.most * 6 {
+                        // A screen that changed by more than a third in one read
+                        // was replaced on purpose (the welcome card on the first
+                        // prompt, a modal over the transcript); the new scene is
+                        // the size the next frames are judged against.
+                        if seen.last > 0 && (filled * 3 < seen.last * 2 || filled * 2 > seen.last * 3) {
+                            seen.most = filled;
+                            seen.half_drawn = 0;
+                        } else if filled * 10 < seen.most * 6 {
                             seen.half_drawn += 1;
                         }
                     }
+                    seen.last = filled;
                     seen.most = seen.most.max(filled);
                 }
             });

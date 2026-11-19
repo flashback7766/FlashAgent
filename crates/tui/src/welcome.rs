@@ -74,15 +74,15 @@ pub(crate) fn center_cell(s: &str, width: usize) -> String {
     }
 }
 
-pub(crate) const M3_PRI_B: &str = "\x1b[1;38;2;138;180;248m";
-pub(crate) const M3_PRI: &str = "\x1b[38;2;138;180;248m";
-pub(crate) const M3_LGT: &str = "\x1b[38;2;168;199;250m";
-pub(crate) const M3_LGT_B: &str = "\x1b[1;38;2;168;199;250m";
-pub(crate) const M3_ICE: &str = "\x1b[38;2;194;231;255m";
-pub(crate) const M3_BRD: &str = "\x1b[38;2;75;99;130m";
-pub(crate) const M3_MUT: &str = "\x1b[38;2;155;165;180m";
-pub(crate) const M3_TXT: &str = "\x1b[38;2;235;240;250m";
-pub(crate) const M3_TXT_B: &str = "\x1b[1;38;2;235;240;250m";
+pub(crate) const M3_PRI_B: &str = "\x1b[1;38;2;232;227;218m";
+pub(crate) const M3_PRI: &str = "\x1b[38;2;160;155;145m";
+pub(crate) const M3_LGT: &str = "\x1b[38;2;160;155;145m";
+pub(crate) const M3_LGT_B: &str = "\x1b[1;38;2;160;155;145m";
+pub(crate) const M3_ICE: &str = "\x1b[38;2;160;155;145m";
+pub(crate) const M3_BRD: &str = "\x1b[38;2;95;90;85m";
+pub(crate) const M3_MUT: &str = "\x1b[38;2;135;130;125m";
+pub(crate) const M3_TXT: &str = "\x1b[38;2;232;227;218m";
+pub(crate) const M3_TXT_B: &str = "\x1b[1;38;2;232;227;218m";
 pub(crate) const RESET: &str = "\x1b[0m";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -128,12 +128,11 @@ pub(crate) fn mascot_grid(blink: bool, mood: MascotMood) -> [&'static str; 12] {
 }
 
 /// Triangle wave 0..=5, one cycle per ~3 s at the 80 ms tick.
-pub(crate) fn breath_level(tick_n: usize) -> u8 {
-    const PERIOD: usize = 38;
-    let half = PERIOD / 2;
-    let phase = tick_n % PERIOD;
-    let up = if phase < half { phase } else { PERIOD - phase - 1 };
-    (up.min(half - 1) * 6 / half) as u8
+pub(crate) fn breath_level(_tick_n: usize) -> u8 {
+    // The mascot is lit, not breathing: an idle screen where something moves
+    // forever is a screen that never looks finished. It still blinks and it
+    // still changes with the server state.
+    3
 }
 
 /// The card is rebuilt only when this says so, not 12 times a second.
@@ -153,10 +152,12 @@ pub(crate) fn mascot_color(px: u8, breath: u8, offline: bool) -> Option<(u8, u8,
         (lo as i32 + span * breath as i32 / 5) as u8
     };
     let color = match px {
-        b'#' => (138, 180, 248),
-        b'o' => (lift(150, 194), lift(196, 231), lift(224, 255)),
+        // Brass on warm graphite: the mascot is the one bright thing, not a
+        // second blue brand beside the amber chrome.
+        b'#' => (160, 155, 145),
+        b'o' => (lift(210, 232), lift(160, 190), lift(80, 120)),
         b'w' => (255, 255, 255),
-        b'k' => (32, 42, 62),
+        b'k' => (38, 36, 33),
         _ => return None,
     };
     if offline {
@@ -259,8 +260,8 @@ pub fn fit_hints(parts: &[(String, String)], separator: &str, width: usize) -> S
 /// `·` between hints, e.g. `[("Enter", "send"), ("Esc", "cancel")]`. An empty
 /// action shows the key alone. Fitted to `width` as `fit_hints` does.
 pub fn key_hints(pairs: &[(&str, &str)], width: usize) -> String {
-    const KEY: &str = "\x1b[38;2;185;180;170m";
-    const WHAT: &str = "\x1b[38;2;125;121;115m";
+    const KEY: &str = "\x1b[38;2;232;227;218m";
+    const WHAT: &str = "\x1b[38;2;135;130;125m";
     const OFF: &str = "\x1b[0m";
     // The key is a shape the hand remembers and stays as it is; the meaning
     // follows the language of the interface.
@@ -420,15 +421,6 @@ fn build_card(card: &WelcomeCard<'_>, shape: Shape) -> WelcomeRender {
         mood,
     } = card;
     let mut lines = Vec::new();
-    let username = std::env::var("USER")
-        .or_else(|_| std::env::var("USERNAME"))
-        .unwrap_or_else(|_| "Developer".to_string());
-    let username_clean = if username.chars().count() > 16 {
-        truncate_middle(&username, 16)
-    } else {
-        username
-    };
-    let greeting = if been_here_before() { crate::i18n::tr("Welcome back") } else { crate::i18n::tr("Welcome") };
 
     let th_str = thinking.unwrap_or("auto");
     // Nothing is made up while the server has not said.
@@ -462,7 +454,7 @@ fn build_card(card: &WelcomeCard<'_>, shape: Shape) -> WelcomeRender {
 
     if shape.two_column {
         let card_w = if width >= 76 {
-            width.clamp(76, 104)
+            crate::content_width(width).max(76)
         } else {
             width
         };
@@ -496,10 +488,9 @@ fn build_card(card: &WelcomeCard<'_>, shape: Shape) -> WelcomeRender {
             th_str
         };
         // The model and its settings are on the right; the left says where.
-        let cwd_meta = format!("{M3_MUT}{}{RESET}", truncate_middle(&cwd_clean, w1.saturating_sub(4)));
 
         let left_lines = [
-            center_cell(&format!("{M3_TXT_B}{greeting} {M3_ICE}{username_clean}{M3_TXT_B}!{RESET}"), w1),
+            center_cell(&format!("{M3_TXT_B}{}{RESET}", truncate_middle(&cwd_clean, w1.saturating_sub(2))), w1),
             "".to_string(),
             center_cell(&mascot[0], w1),
             center_cell(&mascot[1], w1),
@@ -508,7 +499,7 @@ fn build_card(card: &WelcomeCard<'_>, shape: Shape) -> WelcomeRender {
             center_cell(&mascot[4], w1),
             center_cell(&mascot[5], w1),
             "".to_string(),
-            center_cell(&cwd_meta, w1),
+            center_cell(&format!("{M3_MUT}{}{RESET}", crate::i18n::tr("the coding agent for local models")), w1),
             "".to_string(),
         ];
 
@@ -625,10 +616,10 @@ fn build_card(card: &WelcomeCard<'_>, shape: Shape) -> WelcomeRender {
             &format!(" {M3_MUT}\u{b7}{RESET} "),
             inner_w.saturating_sub(2),
         );
-        let cwd_meta = format!("{M3_MUT}{}{RESET}", truncate_middle(&cwd_clean, inner_w.saturating_sub(4)));
+        let cwd_meta = format!("{M3_MUT}{}{RESET}", crate::i18n::tr("the coding agent for local models"));
 
         lines.push((LineKind::System, top));
-        lines.push((LineKind::System, format!("{M3_BRD}│{RESET}{}{M3_BRD}│{RESET}", center_cell(&format!("{M3_TXT_B}{greeting} {M3_ICE}{username_clean}{M3_TXT_B}!{RESET}"), inner_w))));
+        lines.push((LineKind::System, format!("{M3_BRD}│{RESET}{}{M3_BRD}│{RESET}", center_cell(&format!("{M3_TXT_B}{}{RESET}", truncate_middle(&cwd_clean, inner_w.saturating_sub(2))), inner_w))));
 
         // The top of the same sprite; an old hand-drawn "mini" version changed
         // species when the window got short.
@@ -700,7 +691,7 @@ pub fn render_session_saved_card(session_id: &str, width: usize) -> Vec<String> 
     if inner_text_w < resume_cmd.chars().count() + 8 {
         return vec![
             format!("  \x1b[1;38;2;225;175;95mSession saved.\x1b[0m \x1b[38;2;160;155;145mTo resume:{reset}"),
-            format!("  \x1b[1;38;2;240;235;225m{resume_cmd}{reset}"),
+            format!("  \x1b[1;38;2;232;227;218m{resume_cmd}{reset}"),
         ];
     }
 
@@ -710,11 +701,11 @@ pub fn render_session_saved_card(session_id: &str, width: usize) -> Vec<String> 
     let top = format!("  {border_color}╭─{title_styled}{border_color}{}╮{reset}", "─".repeat(dashes));
 
     let msg = if inner_text_w >= 86 {
-        crate::i18n::tr_fill("To resume: \x1b[1;38;2;240;235;225mflashagent --continue\x1b[0m here, or \x1b[1;38;2;240;235;225m{resume_cmd}\x1b[0m", &[("resume_cmd", &resume_cmd)]).to_string()
+        crate::i18n::tr_fill("To resume: \x1b[1;38;2;232;227;218mflashagent --continue\x1b[0m here, or \x1b[1;38;2;232;227;218m{resume_cmd}\x1b[0m", &[("resume_cmd", &resume_cmd)]).to_string()
     } else if inner_text_w >= resume_cmd.chars().count() + 21 {
-        crate::i18n::tr_fill("To resume next time: \x1b[1;38;2;240;235;225m{resume_cmd}\x1b[0m", &[("resume_cmd", &resume_cmd)]).to_string()
+        crate::i18n::tr_fill("To resume next time: \x1b[1;38;2;232;227;218m{resume_cmd}\x1b[0m", &[("resume_cmd", &resume_cmd)]).to_string()
     } else {
-        crate::i18n::tr_fill("Resume: \x1b[1;38;2;240;235;225m{resume_cmd}\x1b[0m", &[("resume_cmd", &resume_cmd)]).to_string()
+        crate::i18n::tr_fill("Resume: \x1b[1;38;2;232;227;218m{resume_cmd}\x1b[0m", &[("resume_cmd", &resume_cmd)]).to_string()
     };
     let msg_clipped = if visible_width(&msg) > inner_text_w {
         clip_ansi(&msg, inner_text_w)

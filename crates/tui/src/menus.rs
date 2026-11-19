@@ -345,9 +345,9 @@ impl RewindConfirm {
                 let stat = if f.too_large {
                     "\x1b[38;2;135;130;125m(no copy was kept; left as it is)\x1b[0m".to_string()
                 } else if f.will_delete {
-                    format!("\x1b[38;2;230;120;120m-{} (removed)\x1b[0m", f.removed)
+                    format!("\x1b[38;2;230;110;95m-{} (removed)\x1b[0m", f.removed)
                 } else {
-                    format!("\x1b[38;2;145;205;140m+{}\x1b[0m \x1b[38;2;230;120;120m-{}\x1b[0m", f.added, f.removed)
+                    format!("\x1b[38;2;145;205;140m+{}\x1b[0m \x1b[38;2;230;110;95m-{}\x1b[0m", f.added, f.removed)
                 };
                 lines.push((
                     LineKind::System,
@@ -360,7 +360,7 @@ impl RewindConfirm {
         for (label, is_yes) in [(flashagent_tui::i18n::tr("Yes, rewind"), true), (flashagent_tui::i18n::tr("No, cancel"), false)] {
             let is_cur = self.confirm == is_yes;
             let (cursor, label_styled) = if is_cur {
-                (" \x1b[1;38;2;225;175;95m›\x1b[0m", format!("\x1b[1;38;2;245;240;232m{label}\x1b[0m"))
+                (" \x1b[1;38;2;225;175;95m›\x1b[0m", format!("\x1b[1;38;2;232;227;218m{label}\x1b[0m"))
             } else {
                 ("  ", format!("\x1b[38;2;160;155;145m{label}\x1b[0m"))
             };

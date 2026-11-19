@@ -141,6 +141,8 @@ pub struct SettingsView {
     pub effort_choices: Vec<String>,
     /// The provider in use when Settings opened.
     opened_on: Option<String>,
+    /// YOLO is armed but not yet on: the first Enter asks, the second agrees.
+    yolo_armed: bool,
 }
 
 /// What Settings offers before anything is known about the model in use: the
@@ -184,6 +186,7 @@ impl SettingsView {
             context_capacity: 0,
             effort_choices: effort_choices_defaults(),
             opened_on,
+            yolo_armed: false,
         }
     }
 
@@ -205,6 +208,8 @@ impl SettingsView {
             // away.
             (crate::i18n::tr("YOLO mode"), if self.config.yolo_mode {
                 crate::i18n::tr("On (Shift+Tab also offers YOLO: no filters, any tool, any command)").into()
+            } else if self.yolo_armed {
+                crate::i18n::tr("Press Enter again: no filters, any tool, any command").into()
             } else {
                 crate::i18n::tr("Off (Shift+Tab stays within the usual modes)").into()
             }),
@@ -615,9 +620,16 @@ impl SettingsView {
         self.opened_on.as_deref().is_some_and(|name| name != self.config.active_profile().name)
     }
 
-    /// Arms or disarms YOLO. Disarming while YOLO is the chosen mode takes
-    /// the mode with it: a mode whose switch is off cannot stay in force.
+    /// Arms or disarms YOLO. Turning it on takes two Enters: the first shows
+    /// what it means, the second agrees. Disarming while YOLO is the chosen
+    /// mode takes the mode with it: a mode whose switch is off cannot stay in
+    /// force.
     fn toggle_yolo(&mut self) {
+        if !self.config.yolo_mode && !self.yolo_armed {
+            self.yolo_armed = true;
+            return;
+        }
+        self.yolo_armed = false;
         self.config.yolo_mode = !self.config.yolo_mode;
         if !self.config.yolo_mode && self.config.permission_mode.is_yolo() {
             self.config.permission_mode = PermissionMode::AcceptEdits;
@@ -869,18 +881,18 @@ impl SettingsView {
                 )
             } else if is_sel {
                 (
-                    format!("\x1b[1;38;2;240;235;225m{:<label_w$}\x1b[0m", label),
+                    format!("\x1b[1;38;2;232;227;218m{:<label_w$}\x1b[0m", label),
                     format!("\x1b[1;38;2;225;175;95m{val}\x1b[0m"),
                 )
             } else if is_hover {
                 (
-                    format!("\x1b[38;2;200;195;185m{:<label_w$}\x1b[0m", label),
-                    format!("\x1b[38;2;220;215;205m{val}\x1b[0m"),
+                    format!("\x1b[38;2;232;227;218m{:<label_w$}\x1b[0m", label),
+                    format!("\x1b[38;2;232;227;218m{val}\x1b[0m"),
                 )
             } else {
                 (
                     format!("\x1b[38;2;160;155;145m{:<label_w$}\x1b[0m", label),
-                    format!("\x1b[38;2;200;195;185m{val}\x1b[0m"),
+                    format!("\x1b[38;2;232;227;218m{val}\x1b[0m"),
                 )
             };
             lines.push((LineKind::System, pad_row(&format!("{ptr} {label_styled} {val_styled}"))));
@@ -1278,7 +1290,10 @@ mod mouse_tests {
         // General row 3 is the YOLO switch.
         view.selected_index = 3;
         assert_eq!(view.trigger_action(), SettingsAction::None);
-        assert!(view.config.yolo_mode);
+        assert!(!view.config.yolo_mode, "the first Enter only asks");
+        assert!(view.yolo_armed);
+        assert_eq!(view.trigger_action(), SettingsAction::None);
+        assert!(view.config.yolo_mode, "the second Enter agrees");
 
         // With the switch on, the mode row reaches YOLO after Accept All.
         view.config.permission_mode = PermissionMode::Bypass;
