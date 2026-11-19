@@ -14,6 +14,12 @@ pub(crate) struct TokenTracker {
     /// parent's own output. Their work is this turn's work: a turn that spent
     /// three agents and reports only its own text hides most of what it cost.
     pub(crate) subagent_tokens: usize,
+    /// What this turn produced that stays in the conversation, counted by the
+    /// app's own tokenizer: the answer, the thinking and the tool calls. A
+    /// server's `completion` also counts what it billed but will not send back
+    /// (DeepSeek's reasoning is dropped from the next request), so that figure
+    /// can be larger than the window ever holds; this one cannot.
+    turn_retained_tokens: usize,
     /// The children's total across the whole session, so a new turn counts only
     /// what its children produced after it started.
     pub(crate) subagent_seen: usize,
@@ -58,6 +64,7 @@ impl TokenTracker {
         Self {
             model,
             total_model_tokens: 0,
+            turn_retained_tokens: 0,
             request_tokens: 0,
             subagent_tokens: 0,
             subagent_seen: 0,
@@ -81,6 +88,7 @@ impl TokenTracker {
     pub(crate) fn on_turn_start(&mut self, model: String, estimated_prompt_tokens: usize) {
         self.model = model;
         self.total_model_tokens = 0;
+        self.turn_retained_tokens = 0;
         self.reported_usage = false;
         self.request_tokens = 0;
         // The children's session total carries over on purpose: a child still
@@ -143,6 +151,7 @@ impl TokenTracker {
         let count = flashagent_llm::count_tokens(&self.model, &self.request_text);
         let previous = self.request_tokens;
         self.request_tokens = count;
+        self.turn_retained_tokens = self.turn_retained_tokens.saturating_add(count.saturating_sub(previous));
         self.total_model_tokens = self.total_model_tokens.saturating_sub(previous).saturating_add(count);
         self.window.push_back((now, count.saturating_sub(previous)));
     }
@@ -233,6 +242,11 @@ impl TokenTracker {
             // it are not counted here.
             self.request_text.push_str(name);
             self.request_text.push_str(args_json);
+            // The call itself does stay in the conversation, so it is part of
+            // what this turn added to the window.
+            let added = flashagent_llm::count_tokens(&self.model, name)
+                .saturating_add(flashagent_llm::count_tokens(&self.model, args_json));
+            self.turn_retained_tokens = self.turn_retained_tokens.saturating_add(added);
             return;
         }
         self.on_delta(name);
@@ -248,9 +262,26 @@ impl TokenTracker {
         self.subagent_seen = session_total;
     }
 
-    /// What this turn has generated: the parent's own output and its children's.
+    /// What this turn has generated: the parent's own output and its children's,
+    /// summed over every request the turn made. A server's figure, so it can
+    /// include what a provider will not send back (reasoning) or what another
+    /// window held (children). The status line shows the retained figure below.
     pub(crate) fn turn_output(&self) -> usize {
         self.total_model_tokens.saturating_add(self.subagent_tokens)
+    }
+
+    /// What this turn added to the conversation: the answer, the thinking and
+    /// the tool calls, counted with the same tokenizer as the context bar. A
+    /// server's billed completion is a different figure and lives in `/cost`.
+    pub(crate) fn retained_output(&self) -> usize {
+        self.turn_retained_tokens
+    }
+
+    /// What the children produced this session. Their turns are separate
+    /// requests, so their output is shown beside this turn's, not inside it:
+    /// a window holds the parent conversation, not the children's.
+    pub(crate) fn subagent_output(&self) -> usize {
+        self.subagent_tokens
     }
 
     /// Puts back what the children had already produced, for a turn the app
@@ -580,6 +611,39 @@ mod tests {
         t.on_delta("the user asked for a plan, so the plan needs");
         t.on_delta(" what it is for, and that is the first clause");
         assert!(t.turn_output() > 0, "a thought is output too");
+    }
+
+    #[test]
+    fn the_status_output_counts_only_what_the_window_keeps() {
+        let mut t = TokenTracker::new("m".into());
+        t.on_turn_start("m".into(), 0);
+        t.on_delta(&"word ".repeat(100));
+        let retained = t.retained_output();
+        assert!(retained > 0);
+        // A billed completion larger than the text is reasoning the provider
+        // will not replay: it was paid for, but it is not in the window, so the
+        // status figure does not grow with it.
+        t.on_usage(&usage(20_000));
+        assert_eq!(t.retained_output(), retained, "billed and retained are different figures");
+        assert_eq!(t.turn_output(), 20_000, "the billed figure keeps its own meaning");
+        // A tool call does stay in the conversation, so it counts.
+        t.on_tool_call("read_file", r#"{"path":"a.rs"}"#);
+        assert!(t.retained_output() > retained, "a tool call left out of the conversation");
+        // A new turn starts its own count.
+        t.on_turn_start("m".into(), 0);
+        assert_eq!(t.retained_output(), 0, "the last turn's answer is not this one's output");
+    }
+
+    #[test]
+    fn a_child_turn_is_named_apart_from_the_parent_turn() {
+        let mut t = TokenTracker::new("m".into());
+        t.on_turn_start("m".into(), 0);
+        t.on_delta("the parent writes its own answer");
+        let parent = t.retained_output();
+        t.on_subagent_usage(5_000);
+        assert_eq!(t.retained_output(), parent, "a child's output is not added to the parent's");
+        assert_eq!(t.subagent_output(), 5_000);
+        assert_eq!(t.turn_output(), parent + 5_000, "the billed turn figure still carries both");
     }
 
     #[test]

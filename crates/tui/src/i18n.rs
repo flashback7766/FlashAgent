@@ -727,6 +727,7 @@ static RU: &[(&str, &str)] = &[
     ("Connecting to {name} · {url}…", "Подключаемся к {name} · {url}…"),
     ("Already on {name} for this run", "Уже на {name} — только на этот запуск"),
     ("Background task {id} {state} · the agent will be told", "Фоновая задача {id} {state} · агенту сообщат"),
+    ("agents", "агентов"),
     (
         "Background task {id} ended in the session that started it · its output is in /tasks",
         "Фоновая задача {id} завершилась в сессии, где её запустили · вывод есть в /tasks",
