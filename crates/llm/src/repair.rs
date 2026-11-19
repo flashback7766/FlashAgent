@@ -111,13 +111,28 @@ const DIR_ALIASES: &[&str] = &["directory", "dir", "dirPath", "dir_path", "Direc
 
 fn aliases_for(tool: &str) -> &'static [(&'static str, &'static [&'static str])] {
     match tool {
+        "read" => &[("path", PATH_ALIASES)],
+        "edit" => &[
+            ("path", PATH_ALIASES),
+            ("content", &["contents", "text", "file_text", "fileContent", "file_content", "CodeContent", "code", "data"]),
+            ("patch", &["diff", "patch_text", "unified_diff"]),
+        ],
+        "search" => &[
+            ("path", DIR_ALIASES),
+            ("pattern", &["query", "regex", "search", "SearchPattern", "glob", "file_pattern", "Pattern"]),
+            ("glob", &["include", "file_pattern", "Includes"]),
+        ],
+        "git" => &[("path", DIR_ALIASES)],
+        "run_shell" => &[("command", &["cmd", "CommandLine", "command_line", "shell_command", "script"])],
+        "web" => &[("url", &["uri", "link", "href", "Url"]), ("query", &["q", "search", "search_query", "Query"])],
+        "http_request" => &[("url", &["uri", "link", "href", "Url"]), ("body", &["data", "payload"])],
+        // Kept for old calls replayed from a saved session.
         "read_file" | "outline_file" | "view_image" | "patch_file" | "edit_file" => &[("path", PATH_ALIASES)],
         "write_file" => &[
             ("path", PATH_ALIASES),
             ("content", &["contents", "text", "file_text", "fileContent", "file_content", "CodeContent", "code", "data"]),
         ],
         "list_dir" | "git_status" | "git_diff" => &[("path", DIR_ALIASES)],
-        "run_shell" => &[("command", &["cmd", "CommandLine", "command_line", "shell_command", "script"])],
         "grep" => &[("pattern", &["query", "regex", "search", "SearchPattern"]), ("glob", &["include", "file_pattern", "Includes"])],
         "glob" => &[("pattern", &["glob", "file_pattern", "Pattern"])],
         "web_fetch" => &[("url", &["uri", "link", "href", "Url"])],
@@ -291,7 +306,19 @@ fn canonical_names(tool: &str, mut value: serde_json::Value) -> serde_json::Valu
     for (canonical, aliases) in aliases_for(tool) {
         rename_first(obj, canonical, aliases);
     }
-    if tool == "edit_file" {
+    if matches!(tool, "edit" | "edit_file") {
+        if tool == "edit" && !obj.contains_key("mode") {
+            // A model that sent the old shape still gets an edit, and the
+            // fields it filled say which mode it meant.
+            let inferred = if obj.contains_key("patch") {
+                "patch"
+            } else if obj.contains_key("content") {
+                "write"
+            } else {
+                "replace"
+            };
+            obj.insert("mode".to_string(), serde_json::Value::String(inferred.to_string()));
+        }
         normalize_edit_target(obj);
         if let Some(files) = obj.get_mut("files").and_then(|f| f.as_array_mut()) {
             for item in files.iter_mut() {
@@ -331,7 +358,7 @@ fn canonical_names(tool: &str, mut value: serde_json::Value) -> serde_json::Valu
             }
         }
     }
-    if tool == "read_file" {
+    if matches!(tool, "read" | "read_file") {
         rename_first(obj, "files", &["paths", "file_paths", "filePaths"]);
         if let Some(files) = obj.get_mut("files").and_then(|f| f.as_array_mut()) {
             for item in files.iter_mut() {

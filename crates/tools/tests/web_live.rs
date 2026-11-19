@@ -23,6 +23,7 @@ async fn call(name: &str, args: serde_json::Value) -> ToolOutput {
         context_window: Some(200_000),
         mcp_manager: None,
         disabled_tools: None,
+        home: None,
     })
     .unwrap();
     tools

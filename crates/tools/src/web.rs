@@ -153,37 +153,7 @@ pub async fn fetch_text(url: &str) -> Result<String, ToolError> {
     let mut scheme = current.scheme().to_string();
     let mut redirects = 0usize;
     loop {
-        if !matches!(current.scheme(), "http" | "https") {
-            return Err(ToolError::Other(format!("fetch: only http and https URLs can be fetched, not {}", current.scheme())));
-        }
-        let host = current.host_str().ok_or_else(|| ToolError::Other(format!("fetch: {current} has no host")))?.to_string();
-        let bare = host.trim_start_matches('[').trim_end_matches(']').to_string();
-        let port = current.port_or_known_default().unwrap_or(80);
-        let literal = bare.parse::<std::net::IpAddr>().ok();
-        let addrs: Vec<std::net::SocketAddr> = match literal {
-            Some(ip) => vec![std::net::SocketAddr::new(ip, port)],
-            None => tokio::net::lookup_host((bare.as_str(), port))
-                .await
-                .map_err(|e| ToolError::Other(format!("fetch: cannot resolve {bare}: {e}")))?
-                .collect(),
-        };
-        let Some(first) = addrs.first().copied() else {
-            return Err(ToolError::Other(format!("fetch: {bare} has no address")));
-        };
-        let same_approved_local = approved_local
-            .as_ref()
-            .is_some_and(|approved| approved.host == bare && approved.port == port);
-        if !same_approved_local && addrs.iter().any(|a| flashagent_core::is_local_ip(a.ip())) {
-            return Err(ToolError::Other(format!(
-                "fetch: {host} leads to a local address ({}); a local address is fetched only when the URL names it, so it can be approved",
-                first.ip()
-            )));
-        }
-        let mut builder = guarded_client_builder(reqwest::Client::builder());
-        if literal.is_none() {
-            builder = builder.resolve(&bare, first);
-        }
-        let client = builder.build().map_err(|e| ToolError::Other(format!("fetch: {e}")))?;
+        let client = checked_client(&current, approved_local.as_ref()).await?;
         let resp = client.get(current.clone()).send().await.map_err(|e| ToolError::Other(format!("fetch: {e}")))?;
         if resp.status().is_redirection() {
             let location = resp
@@ -209,6 +179,93 @@ pub async fn fetch_text(url: &str) -> Result<String, ToolError> {
         }
         return read_fetched(resp).await;
     }
+}
+
+/// One request to the same checked address a fetch uses. Redirects are not
+/// followed: a POST that turns into a GET is not the request the model asked
+/// for, and a redirect is a new address that has not been approved.
+pub async fn request_text(
+    method: &str,
+    url: &str,
+    headers: &[(String, String)],
+    body: Option<&str>,
+) -> Result<String, ToolError> {
+    let method = reqwest::Method::from_bytes(method.trim().to_ascii_uppercase().as_bytes())
+        .map_err(|e| ToolError::Other(format!("http_request: bad method {method}: {e}")))?;
+    if headers.len() > 32 {
+        return Err(ToolError::Other("http_request: at most 32 headers".into()));
+    }
+    if body.is_some_and(|b| b.len() > 1024 * 1024) {
+        return Err(ToolError::Other("http_request: the body is larger than 1 MiB".into()));
+    }
+    let approved_local = approved_local(url);
+    let current =
+        reqwest::Url::parse(url).map_err(|e| ToolError::Other(format!("http_request: bad URL {url}: {e}")))?;
+    let client = checked_client(&current, approved_local.as_ref()).await?;
+    let mut request = client.request(method, current.clone());
+    for (name, value) in headers {
+        request = request.header(name.as_str(), value.as_str());
+    }
+    if let Some(body) = body {
+        request = request.body(body.to_string());
+    }
+    let resp = request
+        .send()
+        .await
+        .map_err(|e| ToolError::Other(format!("http_request: {e}")))?;
+    if resp.status().is_redirection() {
+        let location = resp
+            .headers()
+            .get(reqwest::header::LOCATION)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("(no location)");
+        return Err(ToolError::Other(format!(
+            "http_request: HTTP {} redirects to {location}; redirects are not followed, call again with the final URL",
+            resp.status()
+        )));
+    }
+    read_fetched(resp).await
+}
+
+/// The client that connects to the address this URL names, after the local
+/// address rule. The address checked is the address connected to.
+async fn checked_client(
+    current: &reqwest::Url,
+    approved_local: Option<&ApprovedLocal>,
+) -> Result<reqwest::Client, ToolError> {
+    if !matches!(current.scheme(), "http" | "https") {
+        return Err(ToolError::Other(format!(
+            "only http and https URLs can be fetched, not {}",
+            current.scheme()
+        )));
+    }
+    let host = current.host_str().ok_or_else(|| ToolError::Other(format!("{current} has no host")))?.to_string();
+    let bare = host.trim_start_matches('[').trim_end_matches(']').to_string();
+    let port = current.port_or_known_default().unwrap_or(80);
+    let literal = bare.parse::<std::net::IpAddr>().ok();
+    let addrs: Vec<std::net::SocketAddr> = match literal {
+        Some(ip) => vec![std::net::SocketAddr::new(ip, port)],
+        None => tokio::net::lookup_host((bare.as_str(), port))
+            .await
+            .map_err(|e| ToolError::Other(format!("cannot resolve {bare}: {e}")))?
+            .collect(),
+    };
+    let Some(first) = addrs.first().copied() else {
+        return Err(ToolError::Other(format!("{bare} has no address")));
+    };
+    let same_approved_local =
+        approved_local.is_some_and(|approved| approved.host == bare && approved.port == port);
+    if !same_approved_local && addrs.iter().any(|a| flashagent_core::is_local_ip(a.ip())) {
+        return Err(ToolError::Other(format!(
+            "{host} leads to a local address ({}); a local address is fetched only when the URL names it, so it can be approved",
+            first.ip()
+        )));
+    }
+    let mut builder = guarded_client_builder(reqwest::Client::builder());
+    if literal.is_none() {
+        builder = builder.resolve(&bare, first);
+    }
+    builder.build().map_err(|e| ToolError::Other(format!("fetch: {e}")))
 }
 
 fn guarded_client_builder(builder: reqwest::ClientBuilder) -> reqwest::ClientBuilder {
