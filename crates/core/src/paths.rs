@@ -104,6 +104,49 @@ fn sync_dir(dir: &Path) {
 #[cfg(not(unix))]
 fn sync_dir(_dir: &Path) {}
 
+/// The same rename-into-place as [`write_atomic`], with the file private at
+/// creation (0600 on Unix). Memory lives under the home directory and may
+/// hold what the user told the model about themselves; it is not for every
+/// account on the machine to read.
+pub fn write_atomic_private(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    let parent = path.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or_else(|| Path::new("."));
+    let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("file");
+    let tmp = parent.join(format!(".{name}.{}.tmp", std::process::id()));
+    #[cfg(unix)]
+    let mut options = {
+        use std::os::unix::fs::OpenOptionsExt;
+        let mut o = std::fs::OpenOptions::new();
+        o.write(true).create(true).truncate(true).mode(0o600);
+        o
+    };
+    #[cfg(not(unix))]
+    let mut options = std::fs::OpenOptions::new();
+    let wrote = options
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(&tmp)
+        .and_then(|mut f| {
+            f.write_all(bytes)?;
+            f.sync_all()
+        })
+        .and_then(|()| {
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let _ = std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600));
+            }
+            std::fs::rename(&tmp, path)
+        });
+    if let Err(e) = wrote {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e);
+    }
+    sync_dir(parent);
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

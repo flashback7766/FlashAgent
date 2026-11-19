@@ -2,8 +2,11 @@
 //! reversible: every fact is listed, forgettable on a key, and a note about
 //! one ("this is wrong") goes straight to the model.
 
+use std::cell::{Cell, RefCell};
+use std::path::PathBuf;
+
 use crossterm::event::{KeyCode, KeyModifiers};
-use flashagent_core::memory_store::{Entry, Scope, Store};
+use flashagent_core::memory_store::{Entry, Scope, Store, INDEX};
 
 use crate::{LineKind, RenderLine};
 
@@ -16,6 +19,8 @@ pub enum MemoryAction {
     Tell { message: String },
     /// `force` rewrites one that is still current.
     Summarize { force: bool },
+    /// Open a memory file, or the index, in the owner's editor.
+    Edit { path: PathBuf },
 }
 
 /// Written by the model.
@@ -132,6 +137,7 @@ pub struct Row {
 
 pub struct MemoryModal {
     pub rows: Vec<Row>,
+    /// Index into the rows the current search leaves visible.
     pub selected: usize,
     pub note: Option<String>,
     pub tab: MemoryTab,
@@ -139,6 +145,34 @@ pub struct MemoryModal {
     /// The "Ask or update" field.
     pub ask: String,
     pub dive_selected: usize,
+    /// The project whose stores are shown; an editor needs a real path.
+    cwd: PathBuf,
+    /// `Some("")` while the search field is open; `Some(text)` filters the
+    /// list. `None` shows everything.
+    pub filter: Option<String>,
+    /// `d` asks once, `d` again forgets. Holds the row the question is about.
+    pub confirm_delete: Option<String>,
+    /// First line of the body shown under the list.
+    pub detail_scroll: usize,
+    /// Entries still in the old layout. They are named on an empty screen so
+    /// `/migrate-memory` is discovered instead of the memory looking lost.
+    pub legacy: usize,
+    /// What a click may reach, as the last render drew it: the list's first
+    /// line, its length, the first row it showed, and the hint line's index.
+    /// A click means what the screen showed, so the layout is stored, not
+    /// guessed.
+    layout: Cell<ClickLayout>,
+    /// The hint words that answer a press, each as the key that acts for it.
+    zones: RefCell<Vec<(usize, usize, char)>>,
+}
+
+/// The list's place on the card at the last render.
+#[derive(Clone, Copy, Default)]
+struct ClickLayout {
+    list_at: usize,
+    list_len: usize,
+    list_from: usize,
+    hint_line: usize,
 }
 
 impl MemoryModal {
@@ -146,14 +180,81 @@ impl MemoryModal {
         let mut rows = Vec::new();
         for scope in [Scope::Project, Scope::Global] {
             if let Some(store) = Store::for_scope(scope, cwd) {
+                // Opening the screen is also how the index becomes editable:
+                // a store that has topics but no index gets one now.
+                let _ = store.ensure();
                 rows.extend(store.list().into_iter().map(|entry| Row { entry, scope }));
             }
         }
-        Self { rows, selected: 0, note: None, tab: MemoryTab::List, summary: SummaryState::None, ask: String::new(), dive_selected: 0 }
+        let legacy = flashagent_core::memory_store::home_dir()
+            .map(|home| flashagent_core::memory_store::legacy_inventory(cwd, &home).count())
+            .unwrap_or(0);
+        Self {
+            rows,
+            selected: 0,
+            note: None,
+            tab: MemoryTab::List,
+            summary: SummaryState::None,
+            ask: String::new(),
+            dive_selected: 0,
+            cwd: cwd.to_path_buf(),
+            filter: None,
+            confirm_delete: None,
+            detail_scroll: 0,
+            legacy,
+            layout: Cell::new(ClickLayout::default()),
+            zones: RefCell::new(Vec::new()),
+        }
+    }
+
+    /// The rows the search leaves, in order. An empty search shows all.
+    pub fn visible_rows(&self) -> Vec<&Row> {
+        let needle = self.filter.as_deref().unwrap_or("").trim().to_lowercase();
+        self.rows
+            .iter()
+            .filter(|row| {
+                needle.is_empty()
+                    || row.entry.name.to_lowercase().contains(&needle)
+                    || row.entry.description.to_lowercase().contains(&needle)
+                    || row.entry.body.to_lowercase().contains(&needle)
+            })
+            .collect()
     }
 
     pub fn current(&self) -> Option<&Row> {
-        self.rows.get(self.selected)
+        self.visible_rows().get(self.selected).copied()
+    }
+
+    fn current_path(&self, row: &Row) -> Option<PathBuf> {
+        Store::for_scope(row.scope, &self.cwd)
+            .map(|store| store.dir().join(row.entry.path()))
+            .filter(|path| path.is_file())
+    }
+
+    /// The index of the store the cursor is in, or the project's when the list
+    /// is empty. `i` opens it.
+    fn current_index(&self) -> PathBuf {
+        let scope = self.current().map_or(Scope::Project, |row| row.scope);
+        Store::for_scope(scope, &self.cwd)
+            .map(|store| store.index_path())
+            .unwrap_or_else(|| self.cwd.join(INDEX))
+    }
+
+    fn move_to(&mut self, next: usize) {
+        self.selected = next;
+        self.detail_scroll = 0;
+        self.confirm_delete = None;
+    }
+
+    fn move_by(&mut self, delta: isize) {
+        let count = self.visible_rows().len();
+        if count == 0 {
+            self.selected = 0;
+            return;
+        }
+        let last = count as isize - 1;
+        let next = (self.selected as isize + delta).clamp(0, last) as usize;
+        self.move_to(next);
     }
 
     pub fn summary_is_stale(&self) -> bool {
@@ -221,18 +322,50 @@ impl MemoryModal {
     /// while the list is what is on the screen: a word being typed or a
     /// summary being written takes no wheel.
     pub fn wheel(&mut self, dir: i32) -> bool {
-        if self.tab != MemoryTab::List || self.note.is_some() || self.rows.is_empty() {
+        if self.tab != MemoryTab::List || self.note.is_some() || self.filter.is_some() {
+            return false;
+        }
+        let count = self.visible_rows().len();
+        if count == 0 {
             return false;
         }
         let was = self.selected;
-        self.selected = (self.selected as isize + dir as isize).clamp(0, self.rows.len() as isize - 1) as usize;
+        self.selected = (self.selected as isize + dir as isize).clamp(0, count as isize - 1) as usize;
+        self.detail_scroll = 0;
+        self.confirm_delete = None;
         self.selected != was
     }
 
     pub fn handle_key(&mut self, code: KeyCode, mods: KeyModifiers) -> MemoryAction {
         if self.tab == MemoryTab::Summary && self.note.is_none() {
             return self.summary_key(code, mods);
-        }        // While a note is typed, keys belong to it.
+        }
+        // A search field takes the letters, as a note does.
+        if let Some(filter) = self.filter.as_mut() {
+            return match code {
+                KeyCode::Esc => {
+                    self.filter = None;
+                    self.selected = 0;
+                    MemoryAction::None
+                }
+                KeyCode::Enter => {
+                    self.filter = Some(filter.clone());
+                    MemoryAction::None
+                }
+                KeyCode::Backspace => {
+                    filter.pop();
+                    self.selected = 0;
+                    MemoryAction::None
+                }
+                KeyCode::Char(c) if !mods.contains(KeyModifiers::CONTROL) => {
+                    filter.push(c);
+                    self.selected = 0;
+                    MemoryAction::None
+                }
+                _ => MemoryAction::None,
+            };
+        }
+        // While a note is typed, keys belong to it.
         if let Some(note) = self.note.as_mut() {
             return match code {
                 KeyCode::Esc => {
@@ -270,8 +403,25 @@ impl MemoryModal {
             };
         }
 
+        // Ctrl+D and the other shortcuts belong to the app, not to a list
+        // where the letter itself is a command.
+        if mods.contains(KeyModifiers::CONTROL) {
+            return MemoryAction::None;
+        }
         match code {
-            KeyCode::Esc | KeyCode::Char('q') => MemoryAction::Close,
+            KeyCode::Esc | KeyCode::Char('q') => {
+                if self.filter.is_some() {
+                    self.filter = None;
+                    self.selected = 0;
+                    return MemoryAction::None;
+                }
+                MemoryAction::Close
+            }
+            KeyCode::Char('/') => {
+                self.filter = Some(String::new());
+                self.selected = 0;
+                MemoryAction::None
+            }
             KeyCode::Tab | KeyCode::Char('s') => {
                 if self.rows.is_empty() {
                     return MemoryAction::None;
@@ -284,32 +434,91 @@ impl MemoryModal {
                 MemoryAction::None
             }
             KeyCode::Up | KeyCode::Char('k') => {
-                self.selected = self.selected.saturating_sub(1);
+                self.move_by(-1);
                 MemoryAction::None
             }
             KeyCode::Down | KeyCode::Char('j') => {
-                if self.selected + 1 < self.rows.len() {
-                    self.selected += 1;
-                }
+                self.move_by(1);
                 MemoryAction::None
             }
-            KeyCode::Char('d') | KeyCode::Delete => match self.current() {
-                Some(row) => MemoryAction::Forget { name: row.entry.name.clone(), scope: row.scope },
-                None => MemoryAction::None,
+            KeyCode::PageUp => {
+                self.detail_scroll = self.detail_scroll.saturating_sub(10);
+                MemoryAction::None
+            }
+            KeyCode::PageDown => {
+                self.detail_scroll = self.detail_scroll.saturating_add(10);
+                MemoryAction::None
+            }
+            KeyCode::Char('i') => {
+                MemoryAction::Edit { path: self.current_index() }
+            }
+            KeyCode::Char('e') | KeyCode::Char('E') => match self.current() {
+                Some(row) => match self.current_path(row) {
+                    Some(path) => MemoryAction::Edit { path },
+                    None => MemoryAction::None,
+                },
+                None => MemoryAction::Edit { path: self.current_index() },
             },
-            KeyCode::Char('e') | KeyCode::Enter => {
-                if self.rows.is_empty() {
+            // A note to the model: the old `e`. The editor is `e` now; the
+            // correction still goes through the conversation.
+            KeyCode::Char('c') | KeyCode::Enter => {
+                if self.current().is_none() {
                     return MemoryAction::None;
                 }
                 self.note = Some(String::new());
                 MemoryAction::None
             }
+            KeyCode::Char('d') | KeyCode::Delete => {
+                let Some(row) = self.current() else { return MemoryAction::None };
+                let name = row.entry.name.clone();
+                let scope = row.scope;
+                let key = format!("{}:{name}", scope.label());
+                if self.confirm_delete.as_deref() == Some(key.as_str()) {
+                    self.confirm_delete = None;
+                    MemoryAction::Forget { name, scope }
+                } else {
+                    self.confirm_delete = Some(key);
+                    MemoryAction::None
+                }
+            }
             _ => MemoryAction::None,
         }
     }
 
-    pub fn render(&self, width: usize) -> Vec<RenderLine> {
+    /// A press on the list screen: a row selects, the row already selected
+    /// opens in the editor, and a hint word acts as its key. "Forget" stays
+    /// with the keyboard — the second press that deletes must be a deliberate
+    /// one. Typing (a note, a search) and the summary keep the keys.
+    pub fn click(&mut self, line: usize, column: usize) -> MemoryAction {
+        if self.note.is_some() || self.filter.is_some() || self.tab == MemoryTab::Summary {
+            return MemoryAction::None;
+        }
+        let zones = self.zones.borrow().clone();
+        for (from, to, key) in zones.iter() {
+            if column >= *from && column < *to {
+                return match *key {
+                    '\x1b' => self.handle_key(KeyCode::Esc, KeyModifiers::NONE),
+                    other => self.handle_key(KeyCode::Char(other), KeyModifiers::NONE),
+                };
+            }
+        }
+        let layout = self.layout.get();
+        if layout.list_len > 0 && line >= layout.list_at && line < layout.list_at + layout.list_len {
+            let at = layout.list_from + (line - layout.list_at);
+            if self.visible_rows().get(at).is_some() {
+                if at == self.selected {
+                    return self.handle_key(KeyCode::Char('e'), KeyModifiers::NONE);
+                }
+                self.move_to(at);
+            }
+        }
+        MemoryAction::None
+    }
+
+    pub fn render(&self, width: usize, height: usize) -> Vec<RenderLine> {
         if self.tab == MemoryTab::Summary {
+            self.layout.set(ClickLayout::default());
+            self.zones.borrow_mut().clear();
             return self.render_summary(width);
         }
         let border = "\x1b[38;2;95;90;85m";
@@ -318,6 +527,7 @@ impl MemoryModal {
         let text = "\x1b[38;2;232;227;218m";
         let bright = "\x1b[1;38;2;232;227;218m";
         let accent = "\x1b[1;38;2;225;175;95m";
+        let warn = "\x1b[38;2;245;160;80m";
         let inner_w = width.saturating_sub(6).min(96);
 
         let mut lines: Vec<RenderLine> = Vec::new();
@@ -345,37 +555,112 @@ impl MemoryModal {
             format!("  {border}│{reset} {clipped}{fill} {border}│{reset}")
         };
 
-        if self.rows.is_empty() {
-            lines.push((LineKind::System, pad("")));
-            lines.push((LineKind::System, pad(&format!("{dim}{}{reset}", crate::i18n::tr("Nothing remembered yet. Facts worth keeping are written as they come up.")))));
+        let visible = self.visible_rows();
+        let height = height.max(8);
+        let list_budget = height.saturating_sub(9).max(1);
+        let list_rows = visible.len().min(list_budget).min((height / 2).max(2)).max(1);
+        let selected = self.selected.min(visible.len().saturating_sub(1));
+        let start = if selected >= list_rows { selected + 1 - list_rows } else { 0 };
+
+        lines.push((LineKind::System, pad("")));
+        if visible.is_empty() {
+            // An empty list has no rows to press; the hints keep the keys.
+            self.layout.set(ClickLayout::default());
+            self.zones.borrow_mut().clear();
+            let said = if self.rows.is_empty() {
+                crate::i18n::tr("Nothing remembered yet. Facts worth keeping are written as they come up.")
+            } else {
+                crate::i18n::tr("Nothing matches the search.")
+            };
+            lines.push((LineKind::System, pad(&format!("{dim}{said}{reset}"))));
+            if self.rows.is_empty() && self.legacy > 0 {
+                lines.push((
+                    LineKind::System,
+                    pad(&format!(
+                        "{warn}{}{reset}",
+                        crate::i18n::tr_fill(
+                            "Old memory: {count} entries. /migrate-memory converts them.",
+                            &[("count", &self.legacy.to_string())]
+                        )
+                    )),
+                ));
+            }
         } else {
-            lines.push((LineKind::System, pad("")));
-            for (i, row) in self.rows.iter().enumerate() {
-                let selected = i == self.selected;
-                let marker = if selected { format!("{accent}›{reset}") } else { " ".to_string() };
+            // The list begins two rows in (title, blank); where the hints sit
+            // is stored once the render reaches them.
+            self.layout.set(ClickLayout { list_at: 2, list_len: list_rows, list_from: start, hint_line: 0 });
+            for (offset, row) in visible.iter().enumerate().skip(start).take(list_rows) {
+                let is_selected = offset == selected;
+                let marker = if is_selected { format!("{accent}›{reset}") } else { " ".to_string() };
                 let scope_tag = match row.scope {
                     Scope::Project => crate::i18n::tr("project"),
                     Scope::Global => crate::i18n::tr("global "),
                 };
-                let name = if selected {
+                let name = if is_selected {
                     format!("{bright}{}{reset}", row.entry.name)
                 } else {
                     format!("{text}{}{reset}", row.entry.name)
                 };
+                let type_tag = format!("{dim}{}{reset}", row.entry.kind.label());
                 lines.push((
                     LineKind::System,
-                    pad(&format!("{marker} {dim}{scope_tag}{reset}  {name}  {dim}{}{reset}", row.entry.description)),
+                    pad(&format!(
+                        "{marker} {dim}{scope_tag}{reset}  {name}  {type_tag}  {dim}{}{reset}",
+                        row.entry.description
+                    )),
+                ));
+            }
+            if visible.len() > list_rows {
+                lines.push((
+                    LineKind::System,
+                    pad(&format!(
+                        "{dim}… {} more{reset}",
+                        visible.len().saturating_sub(start + list_rows)
+                    )),
+                ));
+            }
+            if self.legacy > 0 {
+                lines.push((
+                    LineKind::System,
+                    pad(&format!(
+                        "{warn}{}{reset}",
+                        crate::i18n::tr_fill(
+                            "Old memory: {count} entries. /migrate-memory converts them.",
+                            &[("count", &self.legacy.to_string())]
+                        )
+                    )),
                 ));
             }
 
-            if let Some(row) = self.current() {
+            if let Some(row) = visible.get(selected) {
                 lines.push((LineKind::System, pad("")));
+                let path = self
+                    .current_path(row)
+                    .map(|p| p.display().to_string())
+                    .unwrap_or_else(|| format!("{} memory", row.scope.label()));
                 lines.push((
                     LineKind::System,
-                    pad(&format!("{dim}{} · recorded {}{reset}", row.entry.kind.label(), row.entry.recorded)),
+                    pad(&format!(
+                        "{dim}{} · recorded {} · {path}{reset}",
+                        row.entry.kind.label(),
+                        row.entry.recorded
+                    )),
                 ));
-                for body_line in crate::wrap_styled(&format!("{text}{}{reset}", row.entry.body), inner_w.saturating_sub(4)) {
-                    lines.push((LineKind::System, pad(&body_line)));
+                let detail_budget = height.saturating_sub(list_rows + 9).max(1);
+                let wrapped = crate::wrap_styled(
+                    &format!("{text}{}{reset}", row.entry.body),
+                    inner_w.saturating_sub(4),
+                );
+                let first = self.detail_scroll.min(wrapped.len().saturating_sub(1));
+                for body_line in wrapped.iter().skip(first).take(detail_budget) {
+                    lines.push((LineKind::System, pad(body_line)));
+                }
+                let hidden = wrapped.len().saturating_sub(first + detail_budget);
+                if hidden > 0 {
+                    lines.push((
+                        LineKind::System,
+                        pad(&format!("{dim}… {hidden} more line(s) · PgDn · e opens the file{reset}")),
+                    ));
                 }
             }
         }
@@ -387,11 +672,51 @@ impl MemoryModal {
                 lines.push((LineKind::System, pad(&format!("{text}{note}\x1b[7m \x1b[27m{reset}"))));
                 lines.push((LineKind::System, pad(&crate::key_hints(&[("Enter", "send"), ("Esc", "cancel")], inner_w.saturating_sub(2)))));
             }
+            None if self.filter.is_some() => {
+                let query = self.filter.as_deref().unwrap_or("");
+                lines.push((LineKind::System, pad(&format!("{accent}/{reset} {text}{query}\x1b[7m \x1b[27m{reset}"))));
+                lines.push((LineKind::System, pad(&crate::key_hints(&[("Enter", "keep filter"), ("Esc", "clear")], inner_w.saturating_sub(2)))));
+            }
             None => {
+                if let Some(row) = self.current() {
+                    let key = format!("{}:{}", row.scope.label(), row.entry.name);
+                    if self.confirm_delete.as_deref() == Some(key.as_str()) {
+                        lines.push((
+                            LineKind::System,
+                            pad(&format!(
+                                "{warn}{} \"{}\"? d again to forget it{reset}",
+                                crate::i18n::tr("Forget"),
+                                row.entry.name
+                            )),
+                        ));
+                    }
+                }
                 let hints = crate::key_hints(
-                    &[("↑/↓", "select"), ("d", "forget"), ("e", "correct it"), ("s", "summary"), ("Esc", "close")],
+                    &[
+                        ("↑/↓", "select"),
+                        ("e", "edit"),
+                        ("s", "summary"),
+                        ("i", "index"),
+                        ("d", "forget"),
+                        ("c", "correct it"),
+                        ("/", "search"),
+                        ("Esc", "close"),
+                    ],
                     inner_w.saturating_sub(2),
                 );
+                // The hint words are buttons, except the ones a click must not
+                // be: "forget" deletes on the second press, and that stays a
+                // key's job. The content starts four cells in, past the border.
+                let pairs = [("↑/↓", "select"), ("e", "edit"), ("s", "summary"), ("i", "index"), ("d", "forget"), ("c", "correct it"), ("/", "search"), ("Esc", "close")];
+                let keys: [Option<char>; 8] = [None, Some('e'), Some('s'), Some('i'), None, Some('c'), Some('/'), Some('\x1b')];
+                let mut layout = self.layout.get();
+                layout.hint_line = lines.len();
+                self.layout.set(layout);
+                *self.zones.borrow_mut() = crate::welcome::key_hint_zones(&pairs, inner_w.saturating_sub(2))
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(i, zone)| zone.zip(keys[i]).map(|((from, to), key)| (from + 4, to + 4, key)))
+                    .collect();
                 lines.push((LineKind::System, pad(&hints)));
             }
         }
@@ -511,7 +836,7 @@ mod tests {
                     entry: Entry {
                         name: name.into(),
                         description: description.into(),
-                        kind: Kind::Decision,
+                        kind: Kind::Project,
                         recorded: today(),
                         body: "The fact itself, at length.".into(),
                     },
@@ -524,6 +849,13 @@ mod tests {
             summary: SummaryState::None,
             ask: String::new(),
             dive_selected: 0,
+            cwd: PathBuf::new(),
+            filter: None,
+            confirm_delete: None,
+            detail_scroll: 0,
+            legacy: 0,
+            layout: Cell::new(ClickLayout::default()),
+            zones: RefCell::new(Vec::new()),
         }
     }
 
@@ -534,17 +866,52 @@ mod tests {
             ("prefers-short-answers", "the user wants short answers", Scope::Global),
         ]);
         m.handle_key(KeyCode::Down, KeyModifiers::NONE);
+        assert_eq!(m.handle_key(KeyCode::Char('d'), KeyModifiers::NONE), MemoryAction::None, "the first d asks");
         assert_eq!(
             m.handle_key(KeyCode::Char('d'), KeyModifiers::NONE),
-            MemoryAction::Forget { name: "prefers-short-answers".into(), scope: Scope::Global }
+            MemoryAction::Forget { name: "prefers-short-answers".into(), scope: Scope::Global },
+            "the second d forgets"
         );
+    }
+
+    #[test]
+    fn a_click_picks_a_row_and_acts_like_the_keys() {
+        let mut m = modal_with(vec![
+            ("build-uses-just", "the build is driven by just", Scope::Project),
+            ("prefers-short-answers", "the user wants short answers", Scope::Global),
+        ]);
+        m.render(80, 60);
+        // The list starts two rows in; the first row selects.
+        assert_eq!(m.click(2, 3), MemoryAction::None);
+        assert_eq!(m.current().map(|r| r.entry.name.as_str()), Some("build-uses-just"));
+        // The second row selects too.
+        assert_eq!(m.click(3, 3), MemoryAction::None);
+        assert_eq!(m.current().map(|r| r.entry.name.as_str()), Some("prefers-short-answers"));
+        // The row already selected acts as `e` does — the click is the key's
+        // path, whatever that path returns for a row with no file behind it.
+        assert_eq!(m.click(3, 3), m.handle_key(KeyCode::Char('e'), KeyModifiers::NONE));
+        // A hint word answers where the line drew it; "forget" is not among
+        // the words a click may reach.
+        m.render(80, 60);
+        let pairs = [("↑/↓", "select"), ("e", "edit"), ("s", "summary"), ("i", "index"), ("d", "forget"), ("c", "correct it"), ("/", "search"), ("Esc", "close")];
+        let zones = crate::welcome::key_hint_zones(&pairs, 78);
+        let hint_line = m.layout.get().hint_line;
+        let (e_from, _) = zones[1].expect("edit is drawn");
+        assert_eq!(m.click(hint_line, e_from + 4), MemoryAction::None, "`e` on a row with no file says nothing, and so does the word");
+        // The summary word opens the summary, as `s` does.
+        assert_eq!(m.click(hint_line, zones[2].unwrap().0 + 4), MemoryAction::Summarize { force: false }, "the summary word opens the summary, as `s` does");
+        m.tab = MemoryTab::List;
+        m.summary = SummaryState::None;
+        // Where "d forget" is drawn, a click does nothing.
+        let (d_from, _) = zones[4].expect("forget is drawn on a wide screen");
+        assert_eq!(m.click(hint_line, d_from + 4), MemoryAction::None, "forget stays with the keyboard");
     }
 
     #[test]
     fn a_note_reaches_the_model_with_the_memory_it_is_about() {
         // The user should not have to retype the memory's name.
         let mut m = modal_with(vec![("build-uses-just", "the build is driven by just", Scope::Project)]);
-        m.handle_key(KeyCode::Char('e'), KeyModifiers::NONE);
+        m.handle_key(KeyCode::Char('c'), KeyModifiers::NONE);
         for c in "это уже не так, теперь make".chars() {
             m.handle_key(KeyCode::Char(c), KeyModifiers::NONE);
         }
@@ -562,7 +929,7 @@ mod tests {
             ("a-fact", "one", Scope::Project),
             ("b-fact", "two", Scope::Project),
         ]);
-        m.handle_key(KeyCode::Char('e'), KeyModifiers::NONE);
+        m.handle_key(KeyCode::Char('c'), KeyModifiers::NONE);
         for c in "jd".chars() {
             assert_eq!(m.handle_key(KeyCode::Char(c), KeyModifiers::NONE), MemoryAction::None);
         }
@@ -573,7 +940,7 @@ mod tests {
     #[test]
     fn an_abandoned_note_leaves_the_list_working() {
         let mut m = modal_with(vec![("a-fact", "one", Scope::Project)]);
-        m.handle_key(KeyCode::Char('e'), KeyModifiers::NONE);
+        m.handle_key(KeyCode::Char('c'), KeyModifiers::NONE);
         assert_eq!(m.handle_key(KeyCode::Esc, KeyModifiers::NONE), MemoryAction::None, "esc cancels the note");
         assert_eq!(m.handle_key(KeyCode::Esc, KeyModifiers::NONE), MemoryAction::Close, "and then closes the screen");
     }
@@ -581,7 +948,7 @@ mod tests {
     #[test]
     fn an_empty_memory_screen_still_renders_and_closes() {
         let mut m = modal_with(vec![]);
-        let lines = m.render(80);
+        let lines = m.render(80, 40);
         let dump: String = lines.iter().map(|(_, t)| crate::strip_ansi(t)).collect::<Vec<_>>().join("\n");
         assert!(dump.contains("Nothing remembered yet"), "{dump}");
         assert!(dump.contains("s summary") && dump.contains("Esc close") && dump.contains('╰'), "{dump}");
@@ -595,7 +962,7 @@ mod tests {
             ("a-very-long-memory-name-that-keeps-going", "a description long enough to run past the edge of a narrow window", Scope::Project),
         ]);
         for width in [40usize, 60, 80, 120] {
-            for (_, row) in m.render(width) {
+            for (_, row) in m.render(width, 60) {
                 assert!(crate::visible_width(&row) <= width, "{width}: {:?}", crate::strip_ansi(&row));
             }
         }
@@ -605,7 +972,7 @@ mod tests {
     fn the_summary_is_asked_for_once_and_shown_when_it_arrives() {
         let mut m = modal_with(vec![("uses-byd", "drives a BYD Sealion 07", Scope::Global)]);
         assert_eq!(m.handle_key(KeyCode::Char('s'), KeyModifiers::NONE), MemoryAction::Summarize { force: false });
-        let dump = |m: &MemoryModal| m.render(90).iter().map(|(_, t)| crate::strip_ansi(t)).collect::<Vec<_>>().join("\n");
+        let dump = |m: &MemoryModal| m.render(90, 60).iter().map(|(_, t)| crate::strip_ansi(t)).collect::<Vec<_>>().join("\n");
         assert!(dump(&m).contains("writing it up"), "{}", dump(&m));
 
         let (sections, dive) = parse_summary(
@@ -652,6 +1019,54 @@ mod tests {
         assert!(!m.summary_is_stale());
         m.rows[0].entry.description = "former editor".into();
         assert!(m.summary_is_stale(), "description edits must invalidate the summary");
+    }
+
+    #[test]
+    fn a_search_narrows_the_list_and_esc_brings_it_back() {
+        let mut m = modal_with(vec![
+            ("build-uses-just", "the build is driven by just", Scope::Project),
+            ("prefers-short-answers", "the user wants short answers", Scope::Global),
+        ]);
+        m.handle_key(KeyCode::Char('/'), KeyModifiers::NONE);
+        for c in "just".chars() {
+            m.handle_key(KeyCode::Char(c), KeyModifiers::NONE);
+        }
+        assert_eq!(m.visible_rows().len(), 1);
+        assert_eq!(m.visible_rows()[0].entry.name, "build-uses-just");
+        assert_eq!(m.handle_key(KeyCode::Enter, KeyModifiers::NONE), MemoryAction::None);
+        assert_eq!(m.filter.as_deref(), Some("just"), "Enter keeps the filter");
+        assert_eq!(m.handle_key(KeyCode::Esc, KeyModifiers::NONE), MemoryAction::None);
+        assert!(m.filter.is_none(), "Esc clears it before closing the screen");
+        assert_eq!(m.visible_rows().len(), 2);
+    }
+
+    #[test]
+    fn a_search_that_matches_nothing_says_so() {
+        let mut m = modal_with(vec![("a-fact", "one", Scope::Project)]);
+        m.filter = Some("no such fact".into());
+        let dump: String = m.render(80, 40).iter().map(|(_, t)| crate::strip_ansi(t)).collect::<Vec<_>>().join("\n");
+        assert!(dump.contains("Nothing matches the search."), "{dump}");
+    }
+
+    #[test]
+    fn the_editor_opens_the_file_under_the_cursor_or_the_index() {
+        let mut m = modal_with(vec![("a-fact", "one", Scope::Project)]);
+        assert!(matches!(m.handle_key(KeyCode::Char('e'), KeyModifiers::NONE), MemoryAction::None), "there is no file on disk in this fixture");
+        let MemoryAction::Edit { path } = m.handle_key(KeyCode::Char('i'), KeyModifiers::NONE) else {
+            panic!("i opens the index");
+        };
+        assert!(path.ends_with("MEMORY.md"), "{}", path.display());
+    }
+
+    #[test]
+    fn page_down_scrolls_a_long_body_instead_of_overflowing() {
+        let mut m = modal_with(vec![("long", "a long fact", Scope::Project)]);
+        m.rows[0].entry.body = (1..=40).map(|i| format!("line {i}")).collect::<Vec<_>>().join("\n");
+        assert_eq!(m.detail_scroll, 0);
+        m.handle_key(KeyCode::PageDown, KeyModifiers::NONE);
+        assert_eq!(m.detail_scroll, 10);
+        let dump: String = m.render(80, 24).iter().map(|(_, t)| crate::strip_ansi(t)).collect::<Vec<_>>().join("\n");
+        assert!(dump.contains("line 11"), "the window did not move:\n{dump}");
     }
 
     #[test]
