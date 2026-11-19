@@ -132,7 +132,7 @@ fn really_invoked() -> BTreeSet<String> {
         "task",
         "memory",
         "user_interaction",
-        "update_plan",
+        "plan",
         "agent",
     ]
     .iter()
@@ -188,7 +188,7 @@ fn what_the_model_is_offered(
 #[tokio::test]
 async fn every_offered_tool_is_checked_here() {
     let project = Project::new();
-    // `update_plan` is offered only during /goal.
+    // The plan tool is offered in ordinary chat too; the list here is the model's.
     project.tools.set_goal_mode(true);
     let (composite, _finished) = what_the_model_is_offered(&project);
     let offered: BTreeSet<String> = composite.specs().into_iter().map(|s| s.name).collect();
@@ -643,9 +643,10 @@ async fn a_plan_is_written_read_back_and_cleared_during_a_goal() {
     let write = composite
         .execute(&ToolCall {
             id: "t".into(),
-            name: "update_plan".into(),
+            name: "plan".into(),
             args_json: serde_json::json!({
-                "steps": [
+                "action": "create",
+                "items": [
                     {"status": "in_progress", "text": "read the code"},
                     {"status": "pending", "text": "fix it"}
                 ]
@@ -653,7 +654,16 @@ async fn a_plan_is_written_read_back_and_cleared_during_a_goal() {
             .to_string(),
         })
         .await;
-    assert!(!write.is_error, "update_plan refused a plan the model wrote: {}", write.content);
+    assert!(!write.is_error, "plan refused a list the model wrote: {}", write.content);
+    // A step is marked without sending the list again.
+    let write = composite
+        .execute(&ToolCall {
+            id: "t2".into(),
+            name: "plan".into(),
+            args_json: serde_json::json!({ "action": "done", "steps": ["fix it"] }).to_string(),
+        })
+        .await;
+    assert!(!write.is_error, "plan refused a mark: {}", write.content);
 }
 
 #[tokio::test]

@@ -253,7 +253,7 @@ pub const SUBAGENT_REVIEW_RULES: &str = "SUBAGENT REPORTS:\n\
 /// next step, check it, say what happened.
 pub const METHOD: &str = "HOW TO WORK:\n\
      - Read the request for what \"done\" means, then take the next step toward it. Acting beats describing: the answer to a question is an answer, and the answer to a change is the change.\n\
-     - A task with several steps gets its plan (update_plan) before the first one; a task you can finish in a step or two gets none. A plan is your own call, not a courtesy, and a plan written as text is not a plan: it cannot be followed and the user cannot watch it move.\n\
+     - A task with several steps gets its plan (the `plan` tool: `create` before the first step, then `done` on each step and `change` when the plan itself changes) before the first one; a task you can finish in a step or two gets none. A plan is your own call, not a courtesy, and a plan written as text is not a plan: it cannot be followed and the user cannot watch it move.\n\
      - Finish what you started. Do not stop halfway through a sequence because its first part worked; the steps after it are usually the ones that were the point.\n\
      - Check the work before you call it done: run what can be run, and read back what you wrote. If the check cannot be run here, say so instead of saying it passed.\n\
      - When something fails, find out why before you change approach.\n\
