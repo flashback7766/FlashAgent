@@ -3,7 +3,7 @@ use flashagent_tui::i18n::{tr, tr_fill};
 
 /// The tools the prompt talks about, and whether they are on offer.
 ///
-/// The prompt describes `spawn_agent` and `ask_user`, and the owner can
+/// The prompt describes `agent` and `user_interaction`, and the owner can
 /// switch either off. A prompt that describes a tool the model was not
 /// offered sends it looking for something that is not there, and a turn is
 /// spent on the refusal.
@@ -17,7 +17,7 @@ impl OfferedTools {
     /// What the model can call right now.
     pub(crate) fn from_specs(specs: &[flashagent_llm::ToolSpec]) -> Self {
         let has = |name: &str| specs.iter().any(|s| s.name == name);
-        Self { subagents: has("spawn_agent"), ask_user: has("ask_user") }
+        Self { subagents: has("agent"), ask_user: has("user_interaction") }
     }
 }
 
@@ -162,56 +162,40 @@ impl App {
         }
     }
 
-    /// Marks where the live context line starts, so the next turn replaces it
-    /// rather than stacking another one underneath.
+    /// Where the live context line used to start in older saved sessions.
+    /// New prompts never carry one: a line that moves would move the whole
+    /// cached prefix with it.
     pub(crate) const CONTEXT_LINE_MARK: &str = "\n\n[Context]";
 
-    /// Rewrites the last line of the system prompt with what the context costs
-    /// now, so the model can see the room it has left instead of finding out by
-    /// being cut off.
-    ///
-    /// It goes at the very end for the same reason the compacted summary does, and
-    /// it moves in steps for a third reason: see below.
-    pub(crate) fn refresh_context_line(&mut self) {
-        let used = self.context_usage.total_used();
-        let capacity = self.context_usage.total_capacity;
-        // Quantised, and this is the whole trick. The provider caches the prefix of
-        // a request, so a system message that changes on every turn invalidates
-        // everything after it: the memory block and the whole conversation are
-        // read again for a number that moved by a few hundred tokens. Rounding down
-        // to a twentieth of the window moves this line about twenty times in a
-        // session instead of once a turn, and between those the prefix holds.
-        let (used, capacity) = if capacity > 0 {
-            let step = (capacity / 20).max(1);
-            (used / step * step, capacity)
-        } else {
-            (used / 4_000 * 4_000, capacity)
-        };
-        let line = if capacity > 0 {
-            format!("\n\n[Context] {used} of {capacity} tokens used, {} left.", capacity.saturating_sub(used))
-        } else {
-            format!(
-                "\n\n[Context] {used} tokens used. The size of this window is not known, so nothing is counted against it."
-            )
-        };
-        let Some(system) = self.history.first_mut().filter(|m| m.role == flashagent_llm::Role::System) else {
-            return;
-        };
-        if let Some(at) = system.content.find(Self::CONTEXT_LINE_MARK) {
-            system.content.truncate(at);
+
+/// The prompt tier follows the model actually running. A switch from a local
+/// 16k model to a cloud 200k one should not keep the compact prompt, and the
+/// reverse should not send four thousand tokens to a 3B model. The level is
+/// stable between switches, so the cached prefix stays put.
+pub(crate) fn refresh_prompt_tier(&mut self, cx: &LoopCtx<'_>) {
+        let local = crate::backend_is_local(cx.source);
+        let reasoning = crate::model_reasoning_supported(cx.source, &self.current_model);
+        let detail = flashagent_core::PromptDetail::auto(local, self.context_usage.total_capacity, &self.config.prompt_detail);
+        if self.prompt_config.detail != detail
+            || self.prompt_config.reasoning_supported != reasoning
+            || self.prompt_config.local != local
+        {
+            self.prompt_config.detail = detail;
+            self.prompt_config.reasoning_supported = reasoning;
+            self.prompt_config.local = local;
+            self.apply_personality();
         }
-        system.content.push_str(&line);
     }
 
 pub(crate) fn start_turn(&mut self, cx: &LoopCtx<'_>, budgets: GoalBudgets) {
         if self.running || self.compacting { return; }
+        self.refresh_prompt_tier(cx);
         self.sync_system_prompt(OfferedTools::from_specs(&cx.perm.specs()));
         // Here, not only for typed prompts: a /goal, a skill or Ctrl+R measured
         // their growth from a turn long gone and compacted too early.
         self.context_before_turn = self.context_usage.total_used();
         self.context_usage.invalidate_server();
-        update_context_usage(&self.current_model, &mut self.context_usage, &self.history, cx.memory_block, &self.chat, cx.perm);
-        self.refresh_context_line();
+        update_context_usage(&self.current_model, &mut self.context_usage, &self.history, &self.memory_block, &self.chat, cx.perm);
         cx.cancel.store(false, Ordering::Relaxed);
         self.suggested_prompt = None;
         self.custom_placeholder = None;
@@ -301,10 +285,47 @@ pub(crate) fn start_turn(&mut self, cx: &LoopCtx<'_>, budgets: GoalBudgets) {
         true
     }
 
+    /// A new user-initiated turn: a reconnect timer from the failed turn must
+    /// not fire into it.
+    pub(crate) fn clear_retry_state(&mut self) {
+        self.retry_after_error = false;
+        self.auto_retry_attempt = 0;
+        self.retry_generation = self.retry_generation.wrapping_add(1);
+        self.reconnecting = None;
+    }
+
+    /// Continue a turn that stopped at an error, keeping everything that ran
+    /// before it. The note is a user message because the API needs one after a
+    /// partial assistant answer; it names what not to repeat.
+    pub(crate) fn resume_failed_turn(&mut self, cx: &LoopCtx<'_>) -> bool {
+        if self.running || self.compacting || self.history.is_empty() {
+            return false;
+        }
+        self.retry_generation = self.retry_generation.wrapping_add(1);
+        self.reconnecting = None;
+        self.retry_after_error = false;
+        self.history.push(flashagent_llm::ChatMessage::user(
+            "[The previous attempt stopped here because of a connection error. Continue from this point. Do not repeat a tool call whose result is already above; use that result. If the last step failed, correct it and continue. Do not start over.]"
+        ));
+        self.chat.push_system(tr("Continuing from the failed step"));
+        self.flush_switch_notice();
+        self.renderer.scroll_to_bottom();
+        self.last_expanded = false;
+        self.start_turn(cx, GoalBudgets::steps_only(self.max_steps));
+        true
+    }
+
     /// Ctrl+R and /regenerate. False when there is no prompt to answer again.
     pub(crate) fn regenerate(&mut self, cx: &LoopCtx<'_>) -> bool {
         if !self.may_regenerate() {
             return false;
+        }
+        if self.retry_after_error {
+            // A failed turn kept its completed tool calls and partial answer.
+            // Repeating the whole prompt would throw that work away and run the
+            // same tools twice; resume from the point that failed instead.
+            self.auto_retry_attempt = 0;
+            return self.resume_failed_turn(cx);
         }
         let Some(user_idx) = self.history.iter().rposition(flashagent_core::is_prompt) else {
             return false;
@@ -479,9 +500,13 @@ pub(crate) fn start_turn(&mut self, cx: &LoopCtx<'_>, budgets: GoalBudgets) {
             Ok((h, reason)) => {
                 self.history = h;
                 self.turn_history = None;
+                self.retry_after_error = false;
+                self.auto_retry_attempt = 0;
+                self.reconnecting = None;
+                self.retry_generation = self.retry_generation.wrapping_add(1);
                 // A style picked while the turn ran was applied to the history it replaced.
                 self.apply_personality();
-                update_context_usage(&self.current_model, &mut self.context_usage, &self.history, cx.memory_block, &self.chat, cx.perm);
+                update_context_usage(&self.current_model, &mut self.context_usage, &self.history, &self.memory_block, &self.chat, cx.perm);
                 // The turn just read all of it. A later change (interrupted turn closed,
                 // compaction) makes a new prefix, which is warmed.
                 self.note_prompt_cached(cx.source, cx.perm);
@@ -533,14 +558,44 @@ pub(crate) fn start_turn(&mut self, cx: &LoopCtx<'_>, budgets: GoalBudgets) {
                 // Keep the steps that already ran and changed files.
                 self.history = h;
                 self.turn_history = None;
+                self.retry_after_error = true;
                 self.apply_personality();
                 flashagent_core::mark_cut_short(&mut self.history, flashagent_core::CutShort::ByError);
                 // The steps that did run changed files, and this note is what tells
                 // the next turn to check them. Losing power here is the one moment
                 // that note has to survive, so it goes to disk with the history.
                 self.autosave(cx.session_id, cx.cwd_display);
-                update_context_usage(&self.current_model, &mut self.context_usage, &self.history, cx.memory_block, &self.chat, cx.perm);
+                update_context_usage(&self.current_model, &mut self.context_usage, &self.history, &self.memory_block, &self.chat, cx.perm);
                 self.chat.on_event(&LoopEvent::Done(DoneReason::Failed));
+                // A dropped connection gets a few silent reconnects. It resumes
+                // from the failure point, so a tool that already ran is not run
+                // again; the status line says which attempt this is.
+                let max = self.config.network_retries;
+                if max > 0 && self.auto_retry_attempt < max && retryable_error(&e) {
+                    self.auto_retry_attempt += 1;
+                    self.retry_generation = self.retry_generation.wrapping_add(1);
+                    let generation = self.retry_generation;
+                    self.reconnecting = Some((self.auto_retry_attempt, max));
+                    self.chat.push_line(
+                        LineKind::System,
+                        format!("  \x1b[38;2;245;160;80m{}\x1b[0m", tr_fill(
+                            "Connection lost · reconnecting {n}/{max}…",
+                            &[("n", &self.auto_retry_attempt.to_string()), ("max", &max.to_string())],
+                        )),
+                    );
+                    let delay = std::time::Duration::from_secs(1u64 << (self.auto_retry_attempt.saturating_sub(1).min(4)));
+                    let tx = cx.tx.clone();
+                    tokio::spawn(async move {
+                        tokio::time::sleep(delay).await;
+                        let _ = tx.send(UiEvent::Retry { generation });
+                    });
+                    self.renderer.request_reprint();
+                    self.run_queued_commands(cx).await;
+                    self.deliver_task_notices(cx);
+                    return Flow::Next;
+                }
+                self.reconnecting = None;
+                self.auto_retry_attempt = 0;
                 // Plain explanation first, the raw text underneath. A connection that
                 // dropped is told apart from a server that refused: only the first one
                 // can leave a half-written answer on screen, and that is what the user
@@ -569,7 +624,7 @@ pub(crate) fn start_turn(&mut self, cx: &LoopCtx<'_>, budgets: GoalBudgets) {
                         format!("  \x1b[38;2;120;115;110m{}\x1b[0m", explained.raw.trim()),
                     );
                 }
-                self.notice(tr("Ctrl+R retries the last prompt"));
+                self.notice(tr("Ctrl+R continues from the failed step"));
             }
         }
         self.run_queued_commands(cx).await;
@@ -612,6 +667,27 @@ pub(crate) fn is_transport_cut(raw: &str) -> bool {
 /// "it failed" reads as though nothing was written, and the text that is on
 /// screen looks like the whole answer. `None` for every other failure, which
 /// said no before there was anything to cut.
+/// Errors a reconnect can plausibly fix. A bad key, a missing model or a
+/// context that is too long is not one: retrying them only spends time.
+fn retryable_error(raw: &str) -> bool {
+    if is_transport_cut(raw) {
+        return true;
+    }
+    let lower = raw.to_lowercase();
+    if ["401", "403", "404", "invalid api key", "model not found", "context length", "too long", "content policy"]
+        .iter()
+        .any(|m| lower.contains(m))
+    {
+        return false;
+    }
+    [
+        "429", "rate limit", "too many requests", "502", "503", "504", "529", "overloaded",
+        "temporarily unavailable", "timed out", "timeout", "unreachable", "dns", "connect",
+    ]
+    .iter()
+    .any(|m| lower.contains(m))
+}
+
 pub(crate) fn cut_off_notice(raw: &str, arrived: usize) -> Option<String> {
     if !is_transport_cut(raw) {
         return None;
@@ -685,6 +761,16 @@ fn recap_idle() -> std::time::Duration {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_dropped_connection_retries_and_a_bad_key_does_not() {
+        assert!(retryable_error("stream interrupted: the server closed the connection"));
+        assert!(retryable_error("HTTP 429: rate limit exceeded"));
+        assert!(retryable_error("503 Service Unavailable: overloaded gateway"));
+        assert!(!retryable_error("401 Unauthorized: invalid api key"));
+        assert!(!retryable_error("model not found: no-such-model"));
+        assert!(!retryable_error("context length exceeded: the prompt is too long"));
+    }
 
     #[test]
     fn a_second_regenerate_cannot_start_while_the_first_answer_is_written() {

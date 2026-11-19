@@ -1467,7 +1467,7 @@ pub const STOPPED_RESULT: &str = "stopped by the user while it ran: it may have 
 
 /// Quick local writes, let finish when the turn is stopped.
 fn finishes_when_stopped(tool: &str) -> bool {
-    matches!(tool, "write_file" | "edit_file" | "patch_file" | "memory_create" | "memory_update" | "memory_remove")
+    matches!(tool, "edit" | "write_file" | "edit_file" | "patch_file" | "memory")
 }
 
 const TRUNCATED_RESULT: &str = "not executed: your output hit the token limit while writing this call, so its arguments may be incomplete. Send the call again, shorter if needed (e.g. split a large write).";

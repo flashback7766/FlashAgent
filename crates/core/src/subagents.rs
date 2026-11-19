@@ -415,6 +415,9 @@ pub struct SubagentHost {
     /// Where one agent's message finds another.
     mailbox: Arc<Mailbox>,
     max_live: usize,
+    /// The task of every running child, so the person can stop one from the
+    /// interface. Removed when the child ends, however it ends.
+    handles: Arc<std::sync::Mutex<std::collections::HashMap<String, tokio::task::AbortHandle>>>,
 }
 
 impl SubagentHost {
@@ -450,6 +453,7 @@ impl SubagentHost {
             mailbox: Arc::new(Mailbox::new(outbound.clone())),
             outbound,
             max_live: DEFAULT_MAX_LIVE,
+            handles: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
         };
         (host, done)
     }
@@ -496,6 +500,26 @@ impl SubagentHost {
             mailbox,
             outbound,
             max_live: DEFAULT_MAX_LIVE,
+            handles: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+        }
+    }
+
+    /// A running child by id. This is the person at the keyboard, not a model:
+    /// the message arrives as steering, between the child's steps.
+    pub fn message(&self, id: &str, text: &str) -> Result<String, String> {
+        self.mailbox.deliver("user", "the user", id, text)
+    }
+
+    /// Stop a running child. Aborting drops its guards, so its row closes and
+    /// the parent is told it stopped, exactly as for a child that chose to.
+    pub fn stop(&self, id: &str) -> bool {
+        let handle = self.handles.lock().unwrap_or_else(|p| p.into_inner()).remove(id);
+        match handle {
+            Some(handle) => {
+                handle.abort();
+                true
+            }
+            None => false,
         }
     }
 
@@ -565,8 +589,12 @@ impl SubagentHost {
         let (steer_tx, steer_rx) = mpsc::unbounded_channel();
         mailbox.register(&id, &role.name, steer_tx.clone());
         let handle_id = id.clone();
+        let handles = self.handles.clone();
 
+        let guard_id = handle_id.clone();
+        let guard_handles = handles.clone();
         let task = tokio::spawn(async move {
+            let _handle = HandleGuard { id: guard_id, handles: guard_handles };
             // Decrements even when the task is aborted mid-run, and takes the
             // child out of the mailbox: a message to a finished child is
             // refused, not dropped.
@@ -691,7 +719,44 @@ impl SubagentHost {
             SubagentResult { answer, done }
         });
 
+        if let Ok(mut map) = handles.lock() {
+            map.insert(handle_id.clone(), task.abort_handle());
+        }
         SubagentHandle { id: handle_id, task }
+    }
+}
+
+struct HandleGuard {
+    id: String,
+    handles: Arc<std::sync::Mutex<std::collections::HashMap<String, tokio::task::AbortHandle>>>,
+}
+
+impl Drop for HandleGuard {
+    fn drop(&mut self) {
+        if let Ok(mut map) = self.handles.lock() {
+            map.remove(&self.id);
+        }
+    }
+}
+
+/// A handle the app keeps for the interface: stop a running child, or write to
+/// it between its steps. No model tool is involved; this is the person.
+#[derive(Clone)]
+pub struct SubagentControl {
+    host: Arc<SubagentHost>,
+}
+
+impl SubagentControl {
+    pub fn new(host: Arc<SubagentHost>) -> Self {
+        Self { host }
+    }
+
+    pub fn stop(&self, id: &str) -> bool {
+        self.host.stop(id)
+    }
+
+    pub fn message(&self, id: &str, text: &str) -> Result<String, String> {
+        self.host.message(id, text)
     }
 }
 
@@ -971,14 +1036,13 @@ pub const KNOWN_ROLES: &[&str] = &["researcher", "coder", "reviewer", "planner"]
 /// a typo would quietly hand a researcher a way to edit, or take away the one
 /// tool it needs.
 pub const READ_ONLY_TOOLS: &[&str] = &[
-    "read_file", "list_dir", "glob", "grep", "outline_file", "env_info", "git_status", "git_diff",
+    "read", "search", "env_info", "git", "skill",
 ];
 
 /// The same, plus the two that go out to the network: a researcher that cannot
 /// check the documentation is a researcher with half the job missing.
 pub const RESEARCH_TOOLS: &[&str] = &[
-    "read_file", "list_dir", "glob", "grep", "outline_file", "env_info", "git_status", "git_diff",
-    "web_fetch", "web_search",
+    "read", "search", "env_info", "git", "skill", "web",
 ];
 
 /// What a role may touch, and the prompt that tells it so. The list is the
@@ -1251,8 +1315,8 @@ mod tests {
 
         let _ = done.recv().await;
         let given = seen.lock().unwrap().clone();
-        assert!(given.contains(&"read_file".to_string()), "a researcher reads: {given:?}");
-        assert!(!given.contains(&"write_file".to_string()), "a researcher must not write: {given:?}");
+        assert!(given.contains(&"read".to_string()), "a researcher reads: {given:?}");
+        assert!(!given.contains(&"edit".to_string()), "a researcher must not write: {given:?}");
         assert!(!given.contains(&"run_shell".to_string()), "a researcher must not run commands: {given:?}");
     }
 
@@ -1288,8 +1352,8 @@ mod tests {
             assert!(out.content.contains("reviewer"), "the refusal names the roles: {}", out.content);
             let _ = done.recv().await;
             let given = seen.lock().unwrap().clone();
-            assert!(given.iter().any(|t| t == "read_file"), "`{role}` reads: {given:?}");
-            assert!(!given.iter().any(|t| t == "write_file"), "`{role}` must not write: {given:?}");
+            assert!(given.iter().any(|t| t == "read"), "`{role}` reads: {given:?}");
+            assert!(!given.iter().any(|t| t == "edit"), "`{role}` must not write: {given:?}");
             assert!(!given.iter().any(|t| t == "run_shell"), "`{role}` must not run commands: {given:?}");
         }
 
