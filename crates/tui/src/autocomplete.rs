@@ -96,7 +96,9 @@ pub fn builtin_commands() -> Vec<AutocompleteItem> {
         AutocompleteItem::new("/settings", tr("Open interactive settings tab (or press Tab on empty prompt)"), AutocompleteCategory::Command),
         AutocompleteItem::new("/theme", tr("Preview a color theme or switch with /theme <name>"), AutocompleteCategory::Command),
         AutocompleteItem::new("/sampling", tr("Sampling parameters, for those who tune them"), AutocompleteCategory::Command),
+        AutocompleteItem::new("/agents", tr("Subagents: their live transcript, message or stop one"), AutocompleteCategory::Command),
         AutocompleteItem::new("/memory", tr("See what FlashAgent remembers; forget or correct a fact"), AutocompleteCategory::Command),
+        AutocompleteItem::new("/migrate-memory", tr("Convert the old memory layout to MEMORY.md + topic files, with a backup"), AutocompleteCategory::Command),
         AutocompleteItem::new("/whatsnew", tr("Show what changed in the latest releases"), AutocompleteCategory::Command),
         AutocompleteItem::new("/context", tr("Show detailed context window token breakdown"), AutocompleteCategory::Command),
         AutocompleteItem::new("/usage", tr("Session, history and lifetime cost and tokens, plus provider limits"), AutocompleteCategory::Command),
@@ -106,6 +108,7 @@ pub fn builtin_commands() -> Vec<AutocompleteItem> {
         AutocompleteItem::new("/provider", tr("Switch to another saved provider, local or cloud; add or edit them"), AutocompleteCategory::Command),
         AutocompleteItem::new("/verbose", tr("Toggle verbose mode for thoughts and tool calls (all, last, off)"), AutocompleteCategory::Command),
         AutocompleteItem::new("/mode", tr("Cycle permission mode (Planning, Manual, Accept Edits, Accept All, YOLO when enabled)"), AutocompleteCategory::Command),
+        AutocompleteItem::new("/prompt", tr("How much system prompt a model gets: auto, compact, standard or full"), AutocompleteCategory::Command),
         AutocompleteItem::new("/goal", tr("Autonomous run: /goal <task> (limits in Settings → Goal)"), AutocompleteCategory::Command),
         AutocompleteItem::new("/resume", tr("Pick a saved session from this folder and continue it"), AutocompleteCategory::Command),
         AutocompleteItem::new("/mcp", tr("List and manage Model Context Protocol servers"), AutocompleteCategory::Command),
@@ -432,6 +435,31 @@ impl AutocompletePopup {
         }
     }
 
+    /// The first item the render shows. A click on a popup row names this
+    /// plus the row's offset, so one windowing answers both.
+    fn visible_start(&self) -> usize {
+        const MAX_VISIBLE: usize = 5;
+        let total = self.items.len();
+        if total <= MAX_VISIBLE || self.selected < MAX_VISIBLE / 2 {
+            0
+        } else if self.selected + (MAX_VISIBLE / 2) >= total {
+            total - MAX_VISIBLE
+        } else {
+            self.selected - (MAX_VISIBLE / 2)
+        }
+    }
+
+    /// The item a popup row holds: row 0 is the top border, the rows after it
+    /// are items in the shown window, the last row is the bottom border.
+    pub fn click_item(&self, row: usize) -> Option<usize> {
+        const MAX_VISIBLE: usize = 5;
+        let shown = self.items.len().min(MAX_VISIBLE);
+        if row == 0 || row > shown {
+            return None;
+        }
+        Some(self.visible_start() + row - 1)
+    }
+
     pub fn render(&self, width: usize) -> Vec<RenderLine> {
         let mut lines = Vec::new();
         let inner_w = width.saturating_sub(2);
@@ -445,15 +473,9 @@ impl AutocompletePopup {
             format!("{border_color}╭─\x1b[38;2;232;227;218m{title}{border_color}{}╮{reset}", "─".repeat(top_dashes)),
         ));
 
+        let start_idx = self.visible_start();
         const MAX_VISIBLE: usize = 5;
         let total = self.items.len();
-        let start_idx = if total <= MAX_VISIBLE || self.selected < MAX_VISIBLE / 2 {
-            0
-        } else if self.selected + (MAX_VISIBLE / 2) >= total {
-            total - MAX_VISIBLE
-        } else {
-            self.selected - (MAX_VISIBLE / 2)
-        };
         let end_idx = (start_idx + MAX_VISIBLE).min(total);
 
         for (i, item) in self.items[start_idx..end_idx].iter().enumerate() {

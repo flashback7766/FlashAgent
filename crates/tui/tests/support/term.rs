@@ -51,6 +51,9 @@ impl Home {
             "setup_completed": true,
             "backend_url": url,
             "model": super::mock_server::MODEL,
+            // The scenarios assert the full prompt unless they say otherwise;
+            // auto would give this local test server the compact tier.
+            "prompt_detail": "full",
             "last_seen_version": version(),
             "auto_check_updates": false,
         });

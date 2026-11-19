@@ -1,4 +1,5 @@
-//! Sent prompts, kept between launches so ↑ and Ctrl+F reach older ones. One
+//! Sent prompts and commands, kept between launches so ↑ and Ctrl+F reach
+//! older ones. One
 //! JSON string per line in `~/.flashagent/prompt_history.jsonl`; appends keep
 //! concurrent writers from mixing bytes. Saved only when sessions are saved.
 
