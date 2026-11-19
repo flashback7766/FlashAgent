@@ -94,8 +94,11 @@ pub(crate) fn build_model_menu(source: &BackendSource, provider: &str) -> Select
     for m in models {
         let summary = m.capabilities_summary();
         let load_tag = if m.is_loaded { "● loaded" } else { flashagent_tui::i18n::tr("○ available") };
-        let desc = format!("{load_tag} · {summary}");
-        items.push(SelectItem::with_description(m.id.clone(), desc, m.id.clone()));
+        // The label is the name in prose, the description keeps the id the
+        // API answers to — a name alone cannot be typed back anywhere.
+        let label = m.display_name.as_deref().map(str::trim).filter(|n| !n.is_empty()).map(str::to_string).unwrap_or_else(|| flashagent_tui::prettify_model_id(&m.id));
+        let desc = format!("{load_tag} · {} · {summary}", m.id);
+        items.push(SelectItem::with_description(label, desc, m.id.clone()));
     }
     SelectMenu::new(title, items).with_noun(flashagent_tui::select::Noun::MODELS).with_custom_entry()
 }

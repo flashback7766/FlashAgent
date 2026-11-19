@@ -501,9 +501,9 @@ impl App {
 
     /// Writes the remembered switch above the message that is about to go out.
     /// One rule even when the provider and its model changed together.
-    pub(crate) fn flush_switch_notice(&mut self) {
+    pub(crate) fn flush_switch_notice(&mut self, source: &BackendSource) {
         let pending = std::mem::take(&mut self.pending_switch);
-        let Some(label) = pending.label(&self.current_model, &self.current_effort) else { return };
+        let Some(label) = pending.label(&self.model_display(source, &self.current_model), &self.current_effort) else { return };
         if self.chat.push_model_notice(&label) {
             self.renderer.request_reprint();
         }
@@ -564,7 +564,7 @@ impl App {
                 format!("{text}  [{}]", labels.join(", "))
             }
         };
-        self.flush_switch_notice();
+        self.flush_switch_notice(cx.source);
         self.chat.push_user(&shown);
         let mut user_msg = ChatMessage::user(text);
         if !self.attachments.is_empty() {
@@ -636,7 +636,7 @@ impl App {
         self.apply_personality();
         self.refresh_welcome_state(cx.source, cx.mascot_mood);
         // A switch made before the goal belongs above the goal card, not inside it.
-        self.flush_switch_notice();
+        self.flush_switch_notice(cx.source);
 
         let (w, _) = crossterm::terminal::size().unwrap_or((100, 24));
         let card_w = flashagent_tui::content_width(w as usize);
@@ -692,9 +692,10 @@ impl App {
              2. Plan, research, edit, execute, and verify completely on your own.\n\
              3. Thoroughly test and verify your changes before finishing.\n\
              4. Conclude with a clear structured summary of what was accomplished.\n\
-             5. Call update_plan with your whole step-by-step plan before starting, \
-             and again whenever a step finishes or the plan changes: the person \
-             who started this run watches it live and has no other way to see where \
+             5. Record the whole step-by-step list with the plan tool's `create` \
+             action before starting, and only send `change` when the list itself \
+             changes; mark every step `done` when it finishes: the person who \
+             started this run watches it live and has no other way to see where \
              the run stands.\n\n\
              {budget_rule}",
             task_desc,
@@ -734,7 +735,7 @@ impl App {
             return;
         };
         self.clear_retry_state();
-        self.flush_switch_notice();
+        self.flush_switch_notice(cx.source);
         self.chat.push_user(&format!("/skill:{name}"));
         self.history.push(ChatMessage::user(format!("Execute skill: {name}\n\nSkill Instructions:\n{skill_content}")));
         self.begin_snapshot_turn(cx);
@@ -774,7 +775,7 @@ impl App {
         use flashagent_tui::usage_view::{SessionUsage, UsageView};
         let session = SessionUsage {
             provider: self.config.active_profile().name.clone(),
-            model: self.current_model.clone(),
+            model: self.model_display(cx.source, &self.current_model),
             totals: self.cost.totals().clone(),
             upstream: self.cost.upstream_total(),
             allowance: self.cost.allowance(),

@@ -308,7 +308,7 @@ pub(crate) fn start_turn(&mut self, cx: &LoopCtx<'_>, budgets: GoalBudgets) {
             "[The previous attempt stopped here because of a connection error. Continue from this point. Do not repeat a tool call whose result is already above; use that result. If the last step failed, correct it and continue. Do not start over.]"
         ));
         self.chat.push_system(tr("Continuing from the failed step"));
-        self.flush_switch_notice();
+        self.flush_switch_notice(cx.source);
         self.renderer.scroll_to_bottom();
         self.last_expanded = false;
         self.start_turn(cx, GoalBudgets::steps_only(self.max_steps));
@@ -352,7 +352,7 @@ pub(crate) fn start_turn(&mut self, cx: &LoopCtx<'_>, budgets: GoalBudgets) {
         self.chat.truncate_to_last_user();
         // The retry is the first request to use a switch made since the last
         // answer; the rule goes below the prompt it answers again.
-        self.flush_switch_notice();
+        self.flush_switch_notice(cx.source);
         self.renderer.scroll_to_bottom();
         self.last_expanded = false;
         self.start_turn(cx, GoalBudgets::steps_only(self.max_steps));
