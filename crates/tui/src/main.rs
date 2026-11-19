@@ -267,7 +267,14 @@ struct BackendStartup {
 fn display_cwd(cwd: &std::path::Path) -> String {
     let home_str = std::env::var("HOME").or_else(|_| std::env::var("USERPROFILE")).unwrap_or_default();
     if !home_str.is_empty() {
-        cwd.strip_prefix(&home_str).map(|rel| {
+        // Both sides are read resolved: macOS hands out /var/folders/… as a
+        // home while the process cwd answers as /private/var/folders/…, and a
+        // prefix match on the written names never fires, so a home under a
+        // symlinked path showed its full spelling instead of ~.
+        let home = std::path::Path::new(&home_str);
+        let home = home.canonicalize().unwrap_or_else(|_| home.to_path_buf());
+        let cwd = cwd.canonicalize().unwrap_or_else(|_| cwd.to_path_buf());
+        cwd.strip_prefix(&home).map(|rel| {
             let s = rel.to_string_lossy();
             if s.is_empty() { "~".to_string() } else { format!("~/{}", s.trim_start_matches('/')) }
         }).unwrap_or_else(|_| cwd.display().to_string())
