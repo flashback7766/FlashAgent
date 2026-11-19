@@ -1,5 +1,16 @@
 # Changelog
 
+## b702 — The setup check leaves cloud models alone
+
+- **A cloud model is not tool-tested behind the owner's back.** The run after
+  setup sent the full tool-calling check (around twenty small requests) to
+  whatever model the wizard had just saved, metered cloud APIs included. A
+  cloud backend — a preset that wants a key, or an https address typed by hand
+  — now opens the chat directly with a line saying the check was skipped;
+  servers on this machine or the local network keep the check.
+  `flashagent --tool-test` and Settings → Run tool test still run it on any
+  model, cloud included, because those are the times the owner asked.
+
 ## b701 — Everything that was supposed to be in b700
 
 - **YOLO is a mode you arm before you can reach it.** Settings → General has a
