@@ -9,6 +9,75 @@
 
 use std::collections::BTreeMap;
 
+/// Token and money totals over any set of requests. The same shape is used for
+/// the session, one provider and one model, so the view can add them up
+/// without a second set of field names.
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+pub struct UsageTotals {
+    pub requests: u64,
+    pub prompt_tokens: u64,
+    pub completion_tokens: u64,
+    pub cached_tokens: u64,
+    pub cache_written_tokens: u64,
+    pub reasoning_tokens: u64,
+    pub cost: f64,
+    pub upstream_cost: f64,
+    pub allowance: f64,
+    pub priced_requests: u64,
+    pub allowance_requests: u64,
+}
+
+impl UsageTotals {
+    pub fn add_usage(&mut self, usage: &flashagent_llm::Usage) {
+        self.requests = self.requests.saturating_add(1);
+        self.prompt_tokens = self.prompt_tokens.saturating_add(usage.prompt.unwrap_or(0).max(0) as u64);
+        self.completion_tokens = self.completion_tokens.saturating_add(usage.completion.unwrap_or(0).max(0) as u64);
+        self.cached_tokens = self.cached_tokens.saturating_add(usage.cached.unwrap_or(0).max(0) as u64);
+        self.cache_written_tokens =
+            self.cache_written_tokens.saturating_add(usage.cache_written.unwrap_or(0).max(0) as u64);
+        self.reasoning_tokens = self.reasoning_tokens.saturating_add(usage.reasoning.unwrap_or(0).max(0) as u64);
+        if let Some(cost) = usage.cost.filter(|c| c.is_finite() && *c >= 0.0) {
+            self.cost += cost;
+            self.priced_requests = self.priced_requests.saturating_add(1);
+        }
+        if let Some(upstream) = usage.cost_details.and_then(|d| d.upstream_cost).filter(|c| c.is_finite() && *c >= 0.0) {
+            self.upstream_cost += upstream;
+        }
+        if let Some(counted) = usage.allowance.filter(|c| c.is_finite() && *c >= 0.0) {
+            self.allowance += counted;
+            self.allowance_requests = self.allowance_requests.saturating_add(1);
+        }
+    }
+
+    pub fn merge(&mut self, other: &Self) {
+        self.requests = self.requests.saturating_add(other.requests);
+        self.prompt_tokens = self.prompt_tokens.saturating_add(other.prompt_tokens);
+        self.completion_tokens = self.completion_tokens.saturating_add(other.completion_tokens);
+        self.cached_tokens = self.cached_tokens.saturating_add(other.cached_tokens);
+        self.cache_written_tokens = self.cache_written_tokens.saturating_add(other.cache_written_tokens);
+        self.reasoning_tokens = self.reasoning_tokens.saturating_add(other.reasoning_tokens);
+        self.cost += other.cost;
+        self.upstream_cost += other.upstream_cost;
+        self.allowance += other.allowance;
+        self.priced_requests = self.priced_requests.saturating_add(other.priced_requests);
+        self.allowance_requests = self.allowance_requests.saturating_add(other.allowance_requests);
+    }
+
+    /// The share of the prompt that came from the cache, when the API said
+    /// enough to know it.
+    pub fn cache_hit_percent(&self) -> Option<f64> {
+        let counted = self.cached_tokens.saturating_add(self.cache_written_tokens);
+        (counted > 0).then(|| 100.0 * self.cached_tokens as f64 / self.prompt_tokens.max(1) as f64)
+    }
+
+    /// The token figure that actually says how much text went through: the
+    /// cached prefix is part of the prompt and is not added again.
+    pub fn total_tokens(&self) -> u64 {
+        self.prompt_tokens.saturating_add(self.completion_tokens)
+    }
+}
+
 /// One backend's share of the bill.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct ProviderCost {
@@ -16,12 +85,23 @@ pub struct ProviderCost {
     pub name: String,
     pub total: f64,
     pub turns: u64,
+    pub usage: UsageTotals,
+}
+
+/// One provider-and-model pair, for the view's model rows.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ModelCost {
+    pub provider: String,
+    pub model: String,
+    pub usage: UsageTotals,
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct CostLedger {
     /// The order turns arrived, so `/cost` reads like a story.
     providers: BTreeMap<String, ProviderCost>,
+    models: BTreeMap<(String, String), UsageTotals>,
+    usage: UsageTotals,
     total: f64,
     /// Turns that actually came back with a price. Turns without one are not
     /// counted as free either: they are simply not known.
@@ -59,6 +139,7 @@ impl CostLedger {
             name: provider.to_string(),
             total: 0.0,
             turns: 0,
+            usage: UsageTotals::default(),
         });
         entry.total += cost;
         entry.turns += 1;
@@ -71,12 +152,44 @@ impl CostLedger {
         (self.upstream_turns > 0).then_some(self.upstream_total)
     }
 
-    /// A turn's share of the bill and of any plan's allowance, from the usage
-    /// the server sent. The main loop and a child's turns both come through
-    /// here: a child's turn is the same account's.
-    pub fn record_usage(&mut self, provider: &str, usage: &flashagent_llm::Usage) {
+    /// A request's tokens and its share of the bill and of any plan's
+    /// allowance, from the usage the server sent. The main loop and a child's
+    /// turns both come through here: a child's turn is the same account's.
+    pub fn record_usage(&mut self, provider: &str, model: &str, usage: &flashagent_llm::Usage) {
         self.record_with_details(provider, usage.cost, usage.cost_details.and_then(|d| d.upstream_cost));
         self.record_allowance(usage.allowance);
+        self.usage.add_usage(usage);
+        let entry = self.providers.entry(provider.to_string()).or_insert_with(|| ProviderCost {
+            name: provider.to_string(),
+            total: 0.0,
+            turns: 0,
+            usage: UsageTotals::default(),
+        });
+        entry.usage.add_usage(usage);
+        self.models.entry((provider.to_string(), model.to_string())).or_default().add_usage(usage);
+    }
+
+    /// The session's tokens and money, in one shape.
+    pub fn totals(&self) -> &UsageTotals {
+        &self.usage
+    }
+
+    /// Every provider-and-model pair, most spent first.
+    pub fn by_model(&self) -> Vec<ModelCost> {
+        let mut all: Vec<ModelCost> = self
+            .models
+            .iter()
+            .map(|((provider, model), usage)| ModelCost { provider: provider.clone(), model: model.clone(), usage: usage.clone() })
+            .collect();
+        all.sort_by(|a, b| {
+            b.usage
+                .cost
+                .partial_cmp(&a.usage.cost)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| b.usage.total_tokens().cmp(&a.usage.total_tokens()))
+                .then_with(|| a.model.cmp(&b.model))
+        });
+        all
     }
 
     /// A turn counted against a plan's monthly allowance: the provider's own
@@ -177,14 +290,46 @@ mod tests {
             allowance: Some(0.0042),
             ..Default::default()
         };
-        ledger.record_usage("OpenCode Go", &usage);
+        ledger.record_usage("OpenCode Go", "deepseek", &usage);
         assert_eq!(ledger.total(), Some(0.002));
         assert_eq!(ledger.upstream_total(), Some(0.0015));
         assert_eq!(ledger.allowance(), Some((0.0042, 1)), "a child's turn is the same account's");
         // A turn that says nothing adds nothing.
-        ledger.record_usage("OpenCode Go", &flashagent_llm::Usage::default());
+        ledger.record_usage("OpenCode Go", "deepseek", &flashagent_llm::Usage::default());
         assert_eq!(ledger.priced_turns(), 1, "a turn that prices nothing is not priced");
         assert_eq!(ledger.total(), Some(0.002));
+    }
+
+    #[test]
+    fn tokens_are_kept_beside_the_bill_by_provider_and_model() {
+        let mut ledger = CostLedger::default();
+        let usage = flashagent_llm::Usage {
+            prompt: Some(1_000),
+            completion: Some(200),
+            cached: Some(900),
+            reasoning: Some(50),
+            cost: Some(0.002),
+            ..Default::default()
+        };
+        ledger.record_usage("OpenRouter", "alpha", &usage);
+        // The same model again, with a colder prompt and no price.
+        ledger.record_usage(
+            "OpenRouter",
+            "alpha",
+            &flashagent_llm::Usage { prompt: Some(500), completion: Some(100), cached: Some(100), ..Default::default() },
+        );
+        let totals = ledger.totals();
+        assert_eq!(
+            (totals.requests, totals.prompt_tokens, totals.completion_tokens, totals.cached_tokens, totals.reasoning_tokens),
+            (2, 1_500, 300, 1_000, 50)
+        );
+        assert_eq!(totals.priced_requests, 1, "a request the server did not price is not priced");
+        assert!((totals.cache_hit_percent().unwrap() - 66.666).abs() < 0.01, "one hit share over both prompts");
+        assert_eq!(ledger.by_provider()[0].usage.requests, 2, "the provider keeps its own tokens");
+        let models = ledger.by_model();
+        assert_eq!(models.len(), 1);
+        assert_eq!((models[0].provider.as_str(), models[0].model.as_str()), ("OpenRouter", "alpha"));
+        assert_eq!(models[0].usage.total_tokens(), 1_800);
     }
 
     #[test]

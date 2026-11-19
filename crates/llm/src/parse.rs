@@ -385,10 +385,19 @@ impl ChunkParser {
             // prices: a subscription sends no per-turn cost, so this is the
             // figure that was spent.
             let allowance = crate::types::allowance_in(usage);
+            // The thinking inside the completion, where the API counts it apart.
+            let reasoning = usage
+                .get("completion_tokens_details")
+                .and_then(|d| d.get("reasoning_tokens"))
+                .and_then(Value::as_i64)
+                .or_else(|| usage.get("reasoning_tokens").and_then(Value::as_i64))
+                .filter(|n| *n >= 0);
             events.push(LlmEvent::Usage(crate::types::Usage {
                 prompt,
                 completion,
                 cached,
+                cache_written,
+                reasoning,
                 mtp,
                 cost,
                 cost_details,

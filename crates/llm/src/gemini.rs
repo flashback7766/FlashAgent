@@ -602,6 +602,8 @@ fn read_usage(meta: &Value) -> Option<Usage> {
             completion,
             completion_measurement: crate::types::CompletionMeasurement::Unavailable,
             cached: count("cachedContentTokenCount"),
+            cache_written: None,
+            reasoning: count("thoughtsTokenCount"),
             mtp: None,
             cost: None,
             cost_details: None,
@@ -1116,7 +1118,7 @@ mod tests {
             }),
         ]);
         let usages: Vec<Usage> = ok_events(decode(&[&stream])).into_iter().filter_map(|e| if let LlmEvent::Usage(u) = e { Some(u) } else { None }).collect();
-        assert_eq!(usages, vec![Usage { prompt: Some(100), completion: Some(50), completion_measurement: crate::types::CompletionMeasurement::Unavailable, cached: Some(64), mtp: None, cost: None, cost_details: None, ..Default::default() }]);
+        assert_eq!(usages, vec![Usage { prompt: Some(100), completion: Some(50), completion_measurement: crate::types::CompletionMeasurement::Unavailable, cached: Some(64), cache_written: None, reasoning: Some(30), mtp: None, cost: None, cost_details: None, ..Default::default() }]);
     }
 
     #[test]

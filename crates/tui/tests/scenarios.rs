@@ -497,7 +497,7 @@ fn sending_the_next_prompt_stops_the_recap_still_being_written() {
 
 #[test]
 fn the_recap_waits_until_the_user_has_gone_quiet() {
-    let server = MockServer::start(vec![Reply::Text("First answer.".into())]);
+    let server = MockServer::start(vec![Reply::Text("First answer.".into()), Reply::Text("Second answer.".into())]);
     let home = Home::new();
     home.set_up(&server.url);
     // Keep typing for longer than the quiet period, waiting until each key is
@@ -515,8 +515,20 @@ fn the_recap_waits_until_the_user_has_gone_quiet() {
     let recaps = || server.requests().iter().filter(|r| !r.is_turn() && r.body.to_string().contains("conversation analyzer")).count();
 
     ask(&term, "first question", "First answer.");
-    // Typing keeps it back, and so does pasting, each for longer than the
-    // period: the model stays free for the next question. A Windows console
+    // The first turn also names the session, so its call is expected. Wait for
+    // it, then the count is the baseline typing must not move.
+    let deadline = std::time::Instant::now() + WAIT;
+    while recaps() == 0 {
+        assert!(std::time::Instant::now() < deadline, "the first turn did not name the session");
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    let baseline = recaps();
+    // The quiet rule is about the ordinary turns: the first one names the
+    // session at once, so a second turn is where typing has to hold the recap
+    // back.
+    ask(&term, "second question", "Second answer.");
+    // Typing keeps the next one back, and so does pasting, each for longer than
+    // the period: the model stays free for the next question. A Windows console
     // turns a paste into keys.
     //
     // The pause between keys is fixed and nothing waits for the screen in
@@ -532,11 +544,11 @@ fn the_recap_waits_until_the_user_has_gone_quiet() {
         std::thread::sleep(Duration::from_millis(800));
     }
     term.wait_for(&format!("› {}", "z".repeat(32)), WAIT);
-    assert_eq!(recaps(), 0, "the recap was asked for while the user was typing");
+    assert_eq!(recaps(), baseline, "the recap was asked for while the user was typing");
 
     term.send(ESC);
     let deadline = std::time::Instant::now() + WAIT;
-    while recaps() == 0 {
+    while recaps() == baseline {
         assert!(std::time::Instant::now() < deadline, "no recap once the user went quiet");
         std::thread::sleep(Duration::from_millis(100));
     }
@@ -5155,7 +5167,7 @@ fn a_goal_whose_turn_failed_hands_the_mode_back() {
 /// holds, so it runs while the model works. It used to be answered with
 /// "Unknown command /cost · did you mean /cost?".
 #[test]
-fn the_cost_of_the_session_can_be_asked_while_the_model_works() {
+fn the_usage_menu_can_be_asked_while_the_model_works() {
     let server = MockServer::start(vec![Reply::Slow { text: "thinking about it".into(), per_word: Duration::from_millis(300) }]);
     let home = Home::new();
     let term = ready(&home, &server);
@@ -5164,9 +5176,9 @@ fn the_cost_of_the_session_can_be_asked_while_the_model_works() {
     term.send(ENTER);
     term.wait_for(RUNNING_HINT, WAIT);
 
-    term.type_text("/cost");
+    term.type_text("/usage");
     term.send(ENTER);
-    let screen = term.wait_for("in this session reported a price", WAIT);
+    let screen = term.wait_for("[Session]", WAIT);
     assert!(
         !screen.contains("Unknown command"),
         "the command was not run while the model worked:\n{screen}"
@@ -5351,4 +5363,35 @@ fn a_resumed_session_carries_the_summary_and_not_the_markers() {
         !history.contains("Full Earlier Transcript Archive"),
         "the archive marker went into the prompt:\n{history}"
     );
+}
+
+#[test]
+fn usage_opens_as_tabs_with_the_session_numbers_and_provider_limits() {
+    let server = MockServer::start(vec![Reply::Text("Answered.".into())]);
+    let home = Home::new();
+    let term = ready(&home, &server);
+    ask(&term, "what did this cost", "Answered.");
+
+    term.type_text("/usage");
+    term.send(ENTER);
+    term.wait_for("[Session]", WAIT);
+    term.wait_for("Identity", WAIT);
+    term.wait_for("Tokens", WAIT);
+    term.wait_for("Context", WAIT);
+
+    // Tabs are the four datasets: this session, the saved sessions, the
+    // lifetime file, and what the providers say is left.
+    term.send(TAB);
+    term.wait_for("[History]", WAIT);
+    term.wait_for("Saved sessions", WAIT);
+    term.send(TAB);
+    term.wait_for("[Lifetime]", WAIT);
+    term.wait_for("All runs", WAIT);
+    term.send(TAB);
+    term.wait_for("[Limits]", WAIT);
+    // The mock server is on this machine: there is no account to ask.
+    term.wait_for("this server runs on your machine", WAIT);
+
+    term.send(ESC);
+    term.wait_for(PROMPT, WAIT);
 }

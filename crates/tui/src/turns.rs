@@ -39,10 +39,14 @@ impl App {
     }
 
     /// The recap is one more request to the model, which on a local server holds
-    /// the next question up. It is written only once the user has gone quiet.
+    /// the next question up. It is written only once the user has gone quiet,
+    /// except on the first turn: that call also names the session, and the
+    /// picker shows the conversation under that name from the start. The name
+    /// is taken from the opening exchange even if this call runs much later.
     pub(crate) fn schedule_recap(&mut self) {
         self.cancel_recap();
-        self.recap_due = Some(std::time::Instant::now() + recap_idle());
+        let first_turn = self.history.iter().filter(|m| flashagent_core::is_prompt(m)).count() <= 1;
+        self.recap_due = Some(std::time::Instant::now() + if first_turn { std::time::Duration::ZERO } else { recap_idle() });
     }
 
     /// Typing means the user is still here.
@@ -415,6 +419,8 @@ pub(crate) fn start_turn(&mut self, cx: &LoopCtx<'_>, budgets: GoalBudgets) {
         if let Some(path) = flashagent_llm::measurements_path() {
             flashagent_llm::save_measurements(&path);
         }
+        // The lifetime counter takes the same point in the turn.
+        self.flush_usage_history();
         // A turn can end while its mid-turn compaction is still writing (Esc,
         // a failed request). The card promised a summary, so it is withdrawn
         // rather than left spinning in a transcript that will never change.

@@ -30,6 +30,7 @@ pub mod startup;
 pub mod tasks_view;
 pub mod tools_view;
 pub mod theme;
+pub mod usage_view;
 #[cfg(test)]
 mod untranslated;
 mod tool_cards;
@@ -128,6 +129,8 @@ pub enum UiEvent {
     },
     /// A background command of this session ended.
     TaskEnded(flashagent_tools::TaskNotice),
+    /// One provider answered the limits check `/usage` asked for.
+    UsageLimits { provider: String, outcome: flashagent_llm::limits::LimitsOutcome },
     /// Something a running subagent did, tagged with which child did it.
     SubagentEvent(flashagent_core::SubagentEvent),
     /// What a child has finished, said, or what the parent made of a report.

@@ -21,6 +21,7 @@ pub mod snapshots;
 pub mod subagents;
 pub mod task_notices;
 pub mod toolcheck;
+pub mod usage_history;
 
 pub use budget::Budget;
 pub use config::{AppConfig, BackendPreset, ColorTheme, RgbColor, SamplingPreset, ThemeColors, ThemePalette, UpdateChannel};

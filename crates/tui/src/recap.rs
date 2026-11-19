@@ -35,11 +35,13 @@ pub(crate) fn script_language(text: &str) -> Option<&'static str> {
 /// off at the token limit loses the title and keeps the recap.
 pub(crate) type RecapAndTitle = (String, Option<String>, Option<String>);
 
-pub(crate) async fn generate_llm_recap_and_suggestion(
-    source: &BackendSource,
-    history: &[ChatMessage],
-) -> Option<RecapAndTitle> {
+/// The messages one recap call is made of. The opening exchange names the
+/// session and the latest exchange is what the recap and the suggestion are
+/// about; both are in one request so the extra call a local server pays for
+/// happens once, not twice.
+pub(crate) fn build_recap_messages(history: &[ChatMessage]) -> Option<Vec<ChatMessage>> {
     let last_user_idx = history.iter().rposition(flashagent_core::is_prompt)?;
+
     let user_msg = history.get(last_user_idx)?;
     let raw_prompt = extract_user_prompt(&user_msg.content);
     let user_prompt = if raw_prompt.trim().is_empty() && !user_msg.images.is_empty() {
@@ -55,15 +57,36 @@ pub(crate) async fn generate_llm_recap_and_suggestion(
         return None;
     }
 
+    // The title names the conversation from its opening, not from whatever
+    // exchange the recap happened to run after: by the time the user has gone
+    // quiet enough for this call, they may have sent five prompts, and a name
+    // taken from the fifth describes the last thing done rather than the
+    // session's subject.
+    let first_user_idx = history.iter().position(flashagent_core::is_prompt)?;
+    let first_user = history.get(first_user_idx)?;
+    let first_raw = extract_user_prompt(&first_user.content);
+    let first_prompt = if first_raw.trim().is_empty() && !first_user.images.is_empty() {
+        "[image]".to_string()
+    } else {
+        first_raw.to_string()
+    };
+    let first_answer = history[first_user_idx + 1..]
+        .iter()
+        .find(|m| m.role == flashagent_llm::Role::Assistant && !m.content.trim().is_empty())
+        .map(|m| m.content.as_str())
+        .unwrap_or("");
+
     let user_snip = flashagent_tui::truncate_middle(user_prompt, 200);
     let asst_snip = flashagent_tui::truncate_middle(asst_text, 600);
+    let opening_snip = flashagent_tui::truncate_middle(&first_prompt, 200);
+    let opening_answer = flashagent_tui::truncate_middle(first_answer, 400);
 
     let system_prompt =
         "You are a conversation analyzer. Return strictly JSON with the following fields:\n\
         {\n  \
-          \"recap\": \"one concise past-tense sentence of what was explained or done\",\n  \
+          \"recap\": \"one concise past-tense sentence of what was explained or done in the latest exchange\",\n  \
           \"suggestion\": \"the next message the USER will send to the assistant, in imperative mood, about the work just done (e.g. 'Show Swift code examples', 'Explain how safety works', 'Run the tests and fix what fails'). It must name a concrete subject that already came up, and the assistant must be able to act on it without asking the user anything back. A message that asks the user to choose, specify or describe what they want is the assistant talking, not the user - never write one. If there is no concrete subject yet (a greeting, small talk), return an empty string. Write it in the language of the conversation. Do not repeat the existing query!\",\n  \
-          \"title\": \"a name for this conversation: 3 to 7 words naming its concrete subject, in the language of the conversation. Not a sentence, no quotes around it\"\n\
+          \"title\": \"a name for this conversation, taken from Conversation opening and not from the latest exchange: 3 to 7 words naming the concrete subject of the opening request, in the language of the conversation. Not a sentence, no quotes around it\"\n\
         }\n\
         Do NOT generate any internal thinking or explanations. Start immediately with { and return only valid JSON.";
 
@@ -74,13 +97,24 @@ pub(crate) async fn generate_llm_recap_and_suggestion(
         ),
         None => String::new(),
     };
-    let user_turn_info =
-        format!("User prompt: {user_snip}\nAssistant response: {asst_snip}{language_rule}");
+    let user_turn_info = format!(
+        "Conversation opening (the title names this, even when later work has moved on):\n\
+         User prompt: {opening_snip}\nAssistant response: {opening_answer}{language_rule}\n\n\
+         Latest exchange (the recap and suggestion are about this):\n\
+         User prompt: {user_snip}\nAssistant response: {asst_snip}"
+    );
     let query_messages = vec![
         ChatMessage::system(system_prompt),
         ChatMessage::user(user_turn_info),
     ];
+    Some(query_messages)
+}
 
+pub(crate) async fn generate_llm_recap_and_suggestion(
+    source: &BackendSource,
+    history: &[ChatMessage],
+) -> Option<RecapAndTitle> {
+    let query_messages = build_recap_messages(history)?;
     let turn_opts = flashagent_llm::TurnOptions {
         thinking: flashagent_llm::ThinkingEffort::Off,
         custom_effort: Some("none".to_string()),
@@ -378,4 +412,32 @@ pub(crate) fn is_generic_suggestion(text: &str) -> bool {
         || trimmed == "what next"
         || trimmed == "continue"
         || trimmed == "next"
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_title_is_asked_from_the_opening_exchange_even_late_in_the_session() {
+        let mut history = vec![
+            ChatMessage::system("system"),
+            ChatMessage::user("first request: fix the parser"),
+            ChatMessage::assistant("The parser is fixed."),
+            ChatMessage::user("later: add tests"),
+            ChatMessage::assistant("The tests are added."),
+        ];
+        let messages = build_recap_messages(&history).expect("a recap for the latest answer");
+        let body = &messages[1].content;
+        let opening = body.find("Conversation opening").expect("the opening is named");
+        let latest = body.find("Latest exchange").expect("the latest exchange is named");
+        assert!(opening < latest);
+        assert!(body[opening..latest].contains("fix the parser"), "the opening request is missing: {body}");
+        assert!(body[opening..latest].contains("The parser is fixed."), "the opening answer is missing: {body}");
+        assert!(body[latest..].contains("add tests") && body[latest..].contains("The tests are added."));
+
+        // The latest turn has no answer yet: there is no recap to write.
+        history.pop();
+        assert!(build_recap_messages(&history).is_none());
+    }
 }
