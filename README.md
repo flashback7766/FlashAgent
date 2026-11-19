@@ -31,7 +31,7 @@
    irm https://raw.githubusercontent.com/flashback7766/FlashAgent/main/install.ps1 | iex
    ```
 
-2. **Start a model server**: [LM Studio](https://lmstudio.ai), [Ollama](https://ollama.com) or [llama.cpp](https://github.com/ggml-org/llama.cpp) (`llama-server --jinja`), with a model that calls tools. Qwen3.6 and Gemma 4 models scored 6/8 to 8/8 on the tool-calling test that ships with the app (`flashagent --tool-test`); the method and the raw results are in [docs/tool-calling.md](docs/tool-calling.md). No machine for it? A cloud API works too: OpenCode Go, Anthropic, OpenAI, Gemini, OpenRouter and [more](#connecting-a-model).
+2. **Start a model server**: [LM Studio](https://lmstudio.ai), [Ollama](https://ollama.com) or [llama.cpp](https://github.com/ggml-org/llama.cpp) (`llama-server --jinja`), with a model that calls tools. Qwen3.6 and Gemma 4 models pass the tool-calling test that ships with the app (`flashagent --tool-test`); the method and the raw results are in [docs/tool-calling.md](docs/tool-calling.md). No machine for it? A cloud API works too: OpenCode Go, Anthropic, OpenAI, Gemini, OpenRouter and [more](#connecting-a-model).
 
 3. **Run it in your project:**
 
@@ -45,7 +45,7 @@
 
 - **Built for local models.** It reads the loaded model, its context window and its reasoning presets from LM Studio, Ollama, llama.cpp or vLLM. Cloud APIs work too (Anthropic and Gemini through their own protocols, the rest through OpenAI-compatible ones), and `/provider` moves the conversation between a local server and a cloud one without a restart.
 - **Tool calls that work.** Native tool calls, a recovery parser for calls written as text, JSON repair, and a `--tool-test` run that shows which models keep up.
-- **Small, and you stay in control.** One 19 MB binary and about 58 MB of memory when idle (about 47 MB of that is the tokenizer table), four permission modes, a safe mode that leaves only reading and editing inside the project, and approval cards that show the exact command or diff.
+- **Small, and you stay in control.** One 19 MB binary and about 58 MB of memory when idle (about 47 MB of that is the tokenizer table), five permission modes (the fifth, YOLO, stays hidden until you enable it), a safe mode that leaves only reading and editing inside the project, and approval cards that show the exact command or diff.
 
 <table>
 <tr>
@@ -71,7 +71,7 @@ own documentation is the truth, not this table.
 | | FlashAgent | Claude Code | Codex CLI | Gemini CLI | aider | OpenCode |
 | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
 | Runs with no account, against a local server | ✓ LM Studio, Ollama, llama.cpp, vLLM | — needs an Anthropic plan | ~ OpenAI-compatible endpoints, incl. local | — needs a Google key | ✓ via LiteLLM | ✓ |
-| Cloud APIs | 19 presets, 4 native protocols | one vendor | one vendor + compatible endpoints | one vendor | many via LiteLLM | many |
+| Cloud APIs | 21 presets, 4 native protocols | one vendor | one vendor + compatible endpoints | one vendor | many via LiteLLM | many |
 | What you install | one 19 MB static binary, ~58 MB idle | Node | binary | Node | Python | binary |
 | Telemetry | none: there is nothing to turn off | docs | docs | docs | docs | docs |
 | Checks the model can call tools (`--tool-test`) | ✓ 20 scenarios, scores in the README | — | — | — | — | — |
@@ -300,7 +300,7 @@ Settings live in `~/.flashagent/config.json` (`%USERPROFILE%\.flashagent\config.
 | `FLASHAGENT_API_KEY` | Key for any provider that has none saved and none in its own variable |
 | `FLASHAGENT_CONFIG_PATH` | Use this config file instead of `~/.flashagent/config.json` |
 | `FLASHAGENT_TRUST_DIR` | Set to anything: skip the folder trust question, like `--yes` |
-| `BRAVE_API_KEY` | `web_search` uses Brave Search instead of DuckDuckGo |
+| `BRAVE_API_KEY` | `web` search uses Brave Search instead of DuckDuckGo |
 | `VISUAL`, `EDITOR` | Editor for <kbd>Ctrl</kbd>+<kbd>E</kbd> when Settings names none (otherwise `nano`) |
 | `FLASHAGENT_TOOL_TEST_JSON` | `--tool-test` also writes its raw results to this file |
 | `FLASHAGENT_DEV` | `1` turns self-updates off |
@@ -312,9 +312,11 @@ On Windows, `run_shell` uses Git Bash when Git for Windows is installed and `cmd
 
 ## What it can do
 
-**Tools** — `read_file`, `write_file`, `edit_file` (exact replacements, line ranges, regular expressions or several cursors in one call; tolerant of CRLF and quote styles), `patch_file` (unified diffs), `list_dir`, `glob`, `grep` (parallel), `outline_file`, `git_status`, `git_diff`, `run_shell` (foreground with a ten-minute ceiling, or background tasks you can poll and kill; timeouts kill the whole process tree; on Windows it runs Git Bash when installed, cmd.exe otherwise), `env_info`, `ask_user` (interactive choices in the composer), memory tools, `spawn_agent` (subagents that inherit your permissions), `view_image` (offered when the model can see images), and `web_fetch` / `web_search` (on by default, run like a read; turn them off in Settings). `/tools` lists what the model may call, and Space turns one off for good — the schemas and the prompt both lose it. You can attach images yourself too: <kbd>Ctrl</kbd>+<kbd>V</kbd> pastes a screenshot from the clipboard, and dropping an image file on the prompt attaches it.
+**Tools** — fourteen, one thing per job: `read` (text, an outline of a file, or an image on disk), `search` (list a directory, find files by glob, or grep contents in parallel), `edit` (write a file, exact replacements, line ranges or a unified diff; several files in one call, applied all or none), `git` (status, diff, log, show, blame), `run_shell` (foreground with a ten-minute ceiling, or `background: true` to detach; timeouts kill the whole process tree; on Windows it runs Git Bash when installed, cmd.exe otherwise), `task` (list, read or stop background tasks), `env_info`, `web` (search or fetch a page; on by default, run like a read, turned off in Settings), `http_request` (a method, headers and a body), `memory` (view, create, correct, forget or rename a fact it is told to keep), `user_interaction` (reaches you in the composer: choices with free text, a file to attach, a handoff file to edit and return, a form, a step-by-step walk, a one-way notice), `agent` (spawn, message or review subagents that inherit your permissions), and `skill` (list and run the project's skills) with `update_plan` beside them. MCP servers add their own tools. `/tools` lists what the model may call, and Space or a click turns one off for good — the schemas and the prompt both lose it. You can attach images yourself too: <kbd>Ctrl</kbd>+<kbd>V</kbd> pastes a screenshot from the clipboard, and dropping an image file on the prompt attaches it.
 
-**Permission modes** — cycle with <kbd>Shift</kbd>+<kbd>Tab</kbd> or `/mode`:
+**Subagents** — the model can hand wide work (a search across many files, a review) to a child that runs with your permissions and reports back. `/agents` — or a click on a pinned subagent row — opens the child's own chat: what it did, thinking included, live while it works. From there you can message it, stop it, copy its report, or put the report into the conversation.
+
+**Permission modes** — cycle with <kbd>Shift</kbd>+<kbd>Tab</kbd> or `/mode`, or click the mode label on the status line:
 
 | Mode | File edits | Shell | External (MCP) tools |
 | :--- | :--- | :--- | :--- |
@@ -322,12 +324,17 @@ On Windows, `run_shell` uses Git Bash when Git for Windows is installed and `cmd
 | **Manual** | ask, with diff | ask | ask (`read_only` ones run) |
 | **Accept Edits** (first run) | run | ask | ask (`read_only` ones run) |
 | **Accept All** | run | run, except dangerous commands (`rm -rf`, `sudo`, `git push --force`, `git reset --hard`, ...), which ask | run |
+| **YOLO** (only after Settings → General turns it on) | run | run; the dangerous-command list stands down | run |
 
 **Safe mode** (`/safe`) sits on top of the permission mode: reading and editing inside the project, and nothing else. The shell, the web and the subagents are off, and a project MCP server asks every time. The footer says when it is on.
 
-FlashAgent starts in the mode you left it in. Reads inside the project and web tools are always allowed. Reading or writing a file outside the project asks in Manual and Accept Edits, is allowed in Accept All (where the shell already reaches any file), and is refused in Planning and during `/goal`. Fetching a local address (`localhost`, your local network, a cloud metadata endpoint) asks in every mode and is refused in Planning and during `/goal`. Approval cards offer **Allow**, **Always** and **Deny**; "Always" on a shell command stores a narrow per-command rule in the config, it survives a restart, and `/rules` shows what stands and takes a rule back. There is no sandbox: commands and edits run with your user's rights, so the mode and the approval card are what stands between the model and your files.
+FlashAgent starts in the mode you left it in. Reads inside the project and web tools are always allowed. Reading or writing a file outside the project asks in Manual and Accept Edits, is allowed in Accept All and YOLO (where the shell already reaches any file), and is refused in Planning and during `/goal`. Fetching a local address (`localhost`, your local network, a cloud metadata endpoint) asks in every mode and is refused in Planning and during `/goal`. Approval cards offer **Allow**, **Always** and **Deny**; "Always" on a shell command stores a narrow per-command rule in the config, it survives a restart, and `/rules` shows what stands and takes a rule back. There is no sandbox: commands and edits run with your user's rights, so the mode and the approval card are what stands between the model and your files.
 
 **Interface** — English or Russian, chosen in Settings → General and switched on the spot: the footer, `/help`, the panels, the cards and the notifications follow the choice. The system prompt stays English, and the model answers in the language the user wrote in.
+
+**The system prompt comes in three sizes** — compact (~650 tokens: the loop, the tools, how to edit and verify), standard (~2,100) and full (~3,900, the whole method). Auto follows the model: a small local model gets the compact one, a large cloud model the full one. `/prompt compact|standard|full` pins a size, `/prompt auto` follows the model again.
+
+**When a turn fails** — a dropped connection, a rate limit or an overloaded gateway reconnects on its own, and the status line says `reconnecting 1/3` while it waits. When the retries run out, <kbd>Ctrl</kbd>+<kbd>R</kbd> continues the turn from the failure point: the tool calls that already ran are kept, and nothing runs twice. A bad key or a missing model is not retried.
 
 **Reasoning** — readable thoughts or Responses summaries are folded by default; <kbd>F2</kbd> or <kbd>Ctrl</kbd>+<kbd>O</kbd> opens them, and “click to show all” expands a long preview. Encrypted reasoning replay is opaque state returned to the provider, not text the app can display. Supported Responses reasoning models are asked for a summary even at the provider's default effort. Reasoning token usage alone still does not mean the provider sent a readable summary.
 
@@ -374,9 +381,9 @@ Roles match the app's existing RGB palette and nearby shades at frame output, pr
 }
 ```
 
-**Memory & rules** — `MEMORY.md`, `CLAUDE.md`, `AGENTS.md`, `.cursorrules`, `.agents/rules/*.md` and `~/.flashagent/MEMORY.md` are picked up automatically and injected within a token budget (whole files when they fit, outlines when they do not). In `MEMORY.md` the owner's text is an instruction and the index the model writes is a record: the prompt says so, and a fact is read through `memory_read` rather than obeyed as an order.
+**Memory & rules** — rule files (`MEMORY.md`, `CLAUDE.md`, `AGENTS.md`, `.cursorrules`, `.agents/rules/*.md` in the project; `~/.flashagent/` globally) are picked up automatically and injected within a token budget (whole files when they fit, outlines when they do not). They are instructions, and they outrank memory. Memory itself is a vault: a `MEMORY.md` index plus one topic file per fact, under `~/.flashagent/projects/<project>/memory/` for the project and `~/.flashagent/memory/` for facts about you. Only the index rides with the prompt, fitted to a budget and read once per session so the provider's prompt cache keeps matching; a fact's body is read through the `memory` tool only when the model needs it. Files are private (0600 in a 0700 directory), written atomically, and never followed through symlinks. `/memory` shows what is remembered and lets you correct or forget a fact; `/migrate-memory` converts an older install's one-file store, with a backup taken first.
 
-**Sessions** — conversations are saved on exit. `flashagent --continue` picks up the latest one in the current folder; `flashagent --resume` (or `/resume` inside the app) lists this folder's sessions to choose from; `flashagent --resume <session_id>` opens one directly. `/compact` summarizes older turns to free context, and it happens automatically near the limit; a conversation too large for one window is compressed in pieces that fit, and the exact archive stays in the session file. One live card shows the summary and elapsed time, then its input/output token counts; the context gauge updates as soon as compaction finishes. `/rewind` takes turns back: files and conversation return to before the turn you pick.
+**Sessions** — conversations are saved on exit, and a session is named by the model from its opening request. `flashagent --continue` picks up the latest one in the current folder; `flashagent --resume` (or `/resume` inside the app) lists this folder's sessions by name; `flashagent --resume <session_id>` opens one directly. `/compact` summarizes older turns to free context, and it happens automatically near the limit; a conversation too large for one window is compressed in pieces that fit, and the exact archive stays in the session file. One live card shows the summary and elapsed time, then its input/output token counts; the context gauge updates as soon as compaction finishes. `/rewind` takes turns back: files and conversation return to before the turn you pick.
 
 **Autonomous mode (`/goal <task>`)** — runs the task end to end in Accept All mode with maximum reasoning effort. It has no limits unless you set them in Settings → Goal (steps, time, generated tokens). Dangerous shell commands are refused outright during the run. If the model asks you something and you do not answer within two minutes, it picks the most reasonable option itself and says so in its summary. It keeps a live plan on screen, commits what it changed every ten steps inside a git repository, and ends with a factual report card — steps, generated tokens, elapsed, files created and edited, shell commands that failed, and whether a limit cut the run short — built from what the loop did, not from what the model says it did. Your previous permission mode and effort are restored afterwards, and `/rewind` takes the run's file changes back.
 
@@ -388,7 +395,7 @@ Roles match the app's existing RGB palette and nearby shades at frame output, pr
 
 <img src="docs/screenshots/gifs/update-progress.gif" width="100%" alt="/update checking, downloading and installing an update">
 
-**What leaves your machine** — requests to the provider in use; update checks against GitHub Releases (on by default, off with Settings → Updates → Auto-update); `web_fetch` requests to the pages the model asks for and `web_search` queries to DuckDuckGo, or Brave Search with `BRAVE_API_KEY` (on by default, off with Settings → LLM → Web tools); and whatever the MCP servers you add do. There is no telemetry.
+**What leaves your machine** — requests to the provider in use; update checks against GitHub Releases (on by default, off with Settings → Updates → Auto-update); `web` requests to the pages the model asks for and its search queries to DuckDuckGo, or Brave Search with `BRAVE_API_KEY` (on by default, off with Settings → LLM → Web tools); and whatever the MCP servers you add do. There is no telemetry.
 
 ---
 
@@ -412,13 +419,13 @@ Roles match the app's existing RGB palette and nearby shades at frame output, pr
 | <kbd>F4</kbd> / <kbd>Ctrl</kbd>+<kbd>T</kbd> | Thinking effort presets reported by the model |
 | Click | Open or fold that one thought or tool call |
 | <kbd>Ctrl</kbd>+<kbd>O</kbd> / <kbd>Alt</kbd>+<kbd>O</kbd> | Expand last / all reasoning blocks |
-| <kbd>Ctrl</kbd>+<kbd>R</kbd> | Regenerate the last answer |
-| <kbd>Ctrl</kbd>+<kbd>E</kbd> | Compose the prompt in your editor |
+| <kbd>Ctrl</kbd>+<kbd>R</kbd> | Regenerate the last answer · after a failed turn: continue it from where it failed |
+| <kbd>Ctrl</kbd>+<kbd>X</kbd> then <kbd>Ctrl</kbd>+<kbd>E</kbd> | Compose the prompt in your external editor, as in bash |
 | <kbd>Ctrl</kbd>+<kbd>U</kbd> | Check for an update now and install it · or show the download already under way |
 | <kbd>→</kbd> | Accept the suggested follow-up prompt |
 | <kbd>PgUp</kbd> / <kbd>PgDn</kbd> · <kbd>Shift</kbd>+<kbd>↑</kbd> / <kbd>Shift</kbd>+<kbd>↓</kbd> · mouse wheel | Scroll the conversation; the prompt stays where it is · <kbd>End</kbd> or <kbd>Esc</kbd> returns to the bottom |
 
-Type `/help` for every slash command: `/goal`, `/mode`, `/model`, `/provider`, `/theme`, `/effort`, `/context`, `/compact`, `/rewind`, `/resume`, `/mcp`, `/skills`, `/tools`, `/rules`, `/safe`, `/sampling`, `/notices`, `/cost`, `/tasks`, `/diff`, `/commit`, `/export`, `/update`, `/channel`, `/exit` and more.
+Type `/help` for every slash command: `/goal`, `/mode`, `/model`, `/provider`, `/theme`, `/effort`, `/context`, `/compact`, `/rewind`, `/resume`, `/mcp`, `/skills`, `/tools`, `/rules`, `/safe`, `/sampling`, `/notices`, `/usage`, `/memory`, `/migrate-memory`, `/agents`, `/prompt`, `/tasks`, `/diff`, `/commit`, `/export`, `/update`, `/channel`, `/whatsnew`, `/exit` and more.
 
 ---
 

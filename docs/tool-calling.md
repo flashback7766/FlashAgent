@@ -48,7 +48,7 @@ almost every model, so they are there to catch a regression rather than to
 separate prompts.
 
 The five delegation scenarios use a different system prompt (with the delegation
-rules enabled) and the delegation tool set (`spawn_agent`, `send_message`). They
+rules enabled) and the delegation tool set (`agent` actions). They
 are run separately so the check can measure what the model does when the rules
 about subagents are actually in front of it.
 
