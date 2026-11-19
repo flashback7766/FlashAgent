@@ -854,6 +854,12 @@ pub(crate) enum HoverTarget {
     Gauge,
     /// The permission-mode label at the start of the status line.
     Mode,
+    /// The plan box's header in the screen's top-right corner.
+    Plan,
+    /// The provider's name on the status line.
+    Provider,
+    /// The model's name on the status line.
+    Model,
     /// The "more lines below" marker.
     Marker,
 }
@@ -961,6 +967,9 @@ struct App {
     /// The model's own checklist for whatever it is doing, in any session and
     /// not only under /goal.
     plan: Vec<flashagent_tools::plan_tool::PlanStep>,
+    /// The plan box on screen was sent away (Esc, or a click on its header);
+    /// the next plan call brings it back.
+    plan_hidden: bool,
     context_request_tokens: usize,
     /// The arguments of the call now running, so a finished call can be read
     /// back without the loop having to carry them a second time.
@@ -1638,6 +1647,7 @@ fn initial_app(init: InitialApp) -> App {
             .unwrap_or_default(),
         usage_dirty: false,
         plan: Vec::new(),
+        plan_hidden: false,
         last_tool_args: String::new(),
         context_request_tokens: 0,
         prompt_config: system_prompt_config,

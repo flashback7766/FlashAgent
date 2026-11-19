@@ -742,3 +742,101 @@ pub fn shown_controls(text: &str) -> String {
     }
     out
 }
+
+/// A model id the way its maker writes it in prose: `deepseek-v4.1-flash`
+/// reads as "DeepSeek V4.1 Flash". A server that names its models itself
+/// outranks this — the id is only prettified when nothing better was said.
+/// Display only: every API call keeps the raw id.
+pub fn prettify_model_id(raw: &str) -> String {
+    // Families whose spelling is one word, not a capital + lowercase tail.
+    const BRANDS: &[(&str, &str)] = &[("deepseek", "DeepSeek"), ("chatglm", "ChatGLM"), ("opencode", "OpenCode"), ("openai", "OpenAI")];
+    const ACRONYMS: &[&str] = &["gpt", "glm", "mtp", "moe", "vl", "it", "ocr", "tts", "vlm", "api"];
+    let raw = raw.trim();
+    let (base, quant) = match raw.split_once('@') {
+        Some((base, quant)) => (base, Some(quant)),
+        None => (raw, None),
+    };
+    let mut out = Vec::new();
+    for token in base.split(['-', '_']) {
+        if token.is_empty() {
+            continue;
+        }
+        // A version with a leading v keeps its shape and gains a capital:
+        // "v4.1" reads as "V4.1".
+        let number = token.strip_prefix('v').filter(|rest| rest.chars().all(|c| c.is_ascii_digit() || c == '.'));
+        if let Some(number) = number {
+            out.push(format!("V{number}"));
+            continue;
+        }
+        if let Some((_, brand)) = BRANDS.iter().find(|(low, _)| token.eq_ignore_ascii_case(low)) {
+            out.push((*brand).to_string());
+            continue;
+        }
+        // OpenAI names the o-series by a bare letter and a number ("o3",
+        // "4o"): that is a name, not a size, and it stands as written.
+        let looks_like_o_series = (token.starts_with(['o', 'O']) && token[1..].chars().all(|c| c.is_ascii_digit()))
+            || (token.ends_with(['o', 'O']) && token[..token.len() - 1].chars().all(|c| c.is_ascii_digit()));
+        if looks_like_o_series {
+            out.push(token.to_string());
+            continue;
+        }
+        // A size ("35b") or a shape ("a3b"): the letters are units, and units
+        // are written in capitals.
+        let letters_end = token.find(|c: char| !c.is_ascii_digit()).unwrap_or(token.len());
+        let (digits, tail) = token.split_at(letters_end);
+        if !digits.is_empty() && tail.chars().all(|c| c.is_ascii_alphabetic()) && !tail.is_empty() {
+            out.push(format!("{digits}{}", tail.to_uppercase()));
+            continue;
+        }
+        if ACRONYMS.iter().any(|a| token.eq_ignore_ascii_case(a)) {
+            out.push(token.to_uppercase());
+            continue;
+        }
+        // A short shape code — "a3b", "e4b" — is shouted whole, like a size.
+        if token.len() <= 4 && token.starts_with(|c: char| c.is_ascii_alphabetic()) && token.contains(|c: char| c.is_ascii_digit()) {
+            out.push(token.to_uppercase());
+            continue;
+        }
+        // A token that starts with a digit ("4o", "3.6") stands as it is;
+        // everything else takes a capital and keeps the rest.
+        let mut chars = token.chars();
+        match chars.next() {
+            Some(first) if first.is_ascii_digit() => out.push(token.to_string()),
+            Some(first) => {
+                let mut word = first.to_uppercase().collect::<String>();
+                word.push_str(chars.as_str());
+                out.push(word);
+            }
+            None => {}
+        }
+    }
+    let mut text = out.join(" ");
+    if let Some(quant) = quant {
+        // A quantization tag is a code, and codes are shouted: iq3_xxs reads
+        // as IQ3_XXS.
+        if !text.is_empty() {
+            text.push_str(" @ ");
+        }
+        text.push_str(&quant.to_uppercase());
+    }
+    text
+}
+
+#[cfg(test)]
+mod prettify_tests {
+    use super::*;
+
+    #[test]
+    fn ids_read_as_their_makers_write_them() {
+        assert_eq!(prettify_model_id("deepseek-v4.1-flash"), "DeepSeek V4.1 Flash");
+        assert_eq!(prettify_model_id("qwen3.6-35b-a3b-mtp@iq3_xxs"), "Qwen3.6 35B A3B MTP @ IQ3_XXS");
+        assert_eq!(prettify_model_id("qwen3-coder-30b"), "Qwen3 Coder 30B");
+        assert_eq!(prettify_model_id("gpt-4o"), "GPT 4o");
+        assert_eq!(prettify_model_id("gemma-4-e4b-it"), "Gemma 4 E4B IT");
+        assert_eq!(prettify_model_id("mock-model"), "Mock Model");
+        // A name the server wrote itself survives untouched, capital letters
+        // and all.
+        assert_eq!(prettify_model_id("DeepSeek V4.1 Flash"), "DeepSeek V4.1 Flash");
+        assert_eq!(prettify_model_id(""), "");
+    }
+}

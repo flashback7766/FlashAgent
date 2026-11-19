@@ -17,6 +17,20 @@ pub(crate) fn server_mood(switching: bool, answered: bool, silent: bool, since_s
 }
 
 impl App {
+    /// The model's name as the screen shows it: the server's own name when it
+    /// gave one, the id prettified when it did not. Every API call keeps the
+    /// raw id; this is for eyes only.
+    pub(crate) fn model_display(&self, source: &BackendSource, raw: &str) -> String {
+        if raw.is_empty() {
+            return raw.to_string();
+        }
+        source
+            .discovery()
+            .and_then(|disc| disc.model(raw).and_then(|m| m.display_name.clone()))
+            .filter(|name| !name.trim().is_empty())
+            .unwrap_or_else(|| flashagent_tui::prettify_model_id(raw))
+    }
+
     /// One event from the terminal, the agent loop or a background task.
     pub(crate) async fn on_ui_event(&mut self, cx: &mut LoopCtx<'_>, ev: UiEvent) -> Flow {
         match ev {
@@ -640,13 +654,23 @@ impl App {
                 }
                 // The plan belongs to the session, not to a /goal run: a model
                 // that planned a long task in ordinary chat shows it the same
-                // way, updated in place as it works through the steps.
-                if !*is_error && self.last_tool_name.as_deref() == Some("update_plan") {
-                    if let Some(steps) = flashagent_tools::plan_tool::parse_plan(&self.last_tool_args) {
-                        self.plan = steps;
-                        let block = format_plan(&self.plan);
-                        self.chat.update_or_push_turn_system("plan:", &block);
-                        self.renderer.request_reprint();
+                // way, updated in place as it works through the steps. The box
+                // in the corner holds the plan when it fits; the transcript
+                // keeps one short line then, and the whole checklist only when
+                // the box has no room.
+                if !*is_error && matches!(self.last_tool_name.as_deref(), Some("plan") | Some("update_plan")) {
+                    if let Some(action) = flashagent_tools::plan_tool::parse_plan_args(&self.last_tool_args) {
+                        if flashagent_tools::plan_tool::apply_plan_action(&mut self.plan, action) {
+                            self.plan_hidden = false;
+                            let (w, h) = self.last_term_size;
+                            let block = if crate::render::plan_box_size(w as usize, h as usize, self.plan.len()).is_some() {
+                                flashagent_tools::plan_tool::format_plan_summary(&self.plan)
+                            } else {
+                                format_plan(&self.plan)
+                            };
+                            self.chat.update_or_push_turn_system("plan:", &block);
+                            self.renderer.request_reprint();
+                        }
                     }
                 }
                 self.turn_phase = TurnPhase::AfterTool;
@@ -727,7 +751,16 @@ impl App {
         let Some(ledger) = self.goal_ledger.as_mut() else { return };
         let plan_changed = ledger.on_event(e);
         if plan_changed {
-            let block = format_plan(ledger.plan());
+            // The box in the corner reads one plan, whoever updated it: the
+            // goal ledger's copy is mirrored here so both paths feed it.
+            self.plan = ledger.plan().to_vec();
+            self.plan_hidden = false;
+            let (w, h) = self.last_term_size;
+            let block = if crate::render::plan_box_size(w as usize, h as usize, ledger.plan().len()).is_some() {
+                flashagent_tools::plan_tool::format_plan_summary(ledger.plan())
+            } else {
+                format_plan(ledger.plan())
+            };
             self.chat.update_or_push_turn_system("plan:", &block);
             self.renderer.request_reprint();
         }
@@ -951,6 +984,21 @@ impl App {
         if self.renderer.scroll_marker_press(m.row) {
             return Some(HoverTarget::Marker);
         }
+        // The plan box's header: a press sends the box away until the plan
+        // changes again.
+        if let Some((row, from, to)) = self.renderer.plan_zone {
+            if (m.row as usize) == row && (from..to).contains(&(m.column as usize)) {
+                return Some(HoverTarget::Plan);
+            }
+        }
+        // The status row's provider and model names are buttons: one opens the
+        // provider menu, the other the model menu.
+        if self.renderer.status_provider_press(m.row, m.column) {
+            return Some(HoverTarget::Provider);
+        }
+        if self.renderer.status_model_press(m.row, m.column) {
+            return Some(HoverTarget::Model);
+        }
         if (m.row as usize) < self.renderer.chat_rows_on_screen {
             if let Some(row) = self.renderer.chat_row_at(m.row) {
                 // A thought or tool call lights its row; a welcome-card
@@ -1052,12 +1100,36 @@ impl App {
             self.renderer.request_reprint();
             return;
         }
+        // The provider's name opens what /provider opens; the model's name
+        // opens what F3 opens. A switch itself waits for the turn to end, as
+        // it always has.
+        if self.renderer.status_provider_press(m.row, m.column) {
+            self.zone_flash = self.renderer.status_provider_zone().map(|(row, from, to)| (row, from, to, flashagent_tui::anim::now_ms()));
+            self.open_overlay(Overlay::Provider(flashagent_tui::providers::provider_menu(&self.config)));
+            self.renderer.request_reprint();
+            return;
+        }
+        if self.renderer.status_model_press(m.row, m.column) {
+            self.zone_flash = self.renderer.status_model_zone().map(|(row, from, to)| (row, from, to, flashagent_tui::anim::now_ms()));
+            self.open_model_menu(cx.source);
+            self.renderer.request_reprint();
+            return;
+        }
         // The "more lines below" marker returns to the bottom, as End does.
         if self.renderer.scroll_marker_press(m.row) {
             self.zone_flash = Some((m.row, 0, self.last_term_size.0 as usize, flashagent_tui::anim::now_ms()));
             self.renderer.scroll_offset = 0;
             self.renderer.request_reprint();
             return;
+        }
+        // The plan box's header sends the box away; the next plan call brings
+        // it back.
+        if let Some((row, from, to)) = self.renderer.plan_zone {
+            if (m.row as usize) == row && (from..to).contains(&(m.column as usize)) {
+                self.plan_hidden = true;
+                self.renderer.request_reprint();
+                return;
+            }
         }
         // The welcome card's own buttons: Swift opens Settings, the model
         // opens the model menu, and the Quick Commands keys act as pressed.
