@@ -34,8 +34,15 @@ pub use diff::unified;
 pub use flashagent_llm::base64_encode;
 pub use effort_memory::{EffortMemory, ModelBias, TurnOutcome};
 pub use loop_::{is_prompt, mark_cut_short, stopped_by_user, AgentLoop, Compaction, Compactor, CutShort, Steer, CANCELLED_RESULT, STOPPED_RESULT, DoneReason, LoopConfig, LoopError, LoopEvent, LlmSource, ToolExec, ToolOutput, WritePreview};
-pub use memory_store::{Entry as MemoryEntry, Kind as MemoryEntryKind, Scope as MemoryScope, Store as MemoryStore};
-pub use memory::{collect, injection_block, outline, MemoryDoc, MemoryKind, GLOBAL_FILENAME};
+pub use memory_store::{
+    backup_legacy, import_legacy, legacy_inventory, project_slug, remove_legacy_project_dir,
+    split_generated, strip_legacy_index, Entry as MemoryEntry, Kind as MemoryEntryKind,
+    LegacyEntry, LegacyInventory, MemoryError, Scope as MemoryScope, Store as MemoryStore, INDEX as MEMORY_INDEX,
+};
+pub use memory::{
+    collect, collect_rules, context as memory_context, default_scope, injection_block, memory_docs,
+    outline, MemoryDoc, MemoryKind,
+};
 pub use paths::{expand_home, resolve_path};
 pub use permissions::{
     is_local_host, is_local_ip, is_read_only_shell, parse_chain, path_is_inside, set_shell_dialect, url_host,
@@ -43,11 +50,11 @@ pub use permissions::{
     PermissionedTools, RuleSet, ShellDialect, Verdict,
 };
 pub use personality::{BaseStyle, Level as TraitLevel, Personality, Trait as PersonalityTrait};
-pub use prompt::{build_system_prompt, SystemPromptConfig};
+pub use prompt::{build_system_prompt, PromptDetail, SystemPromptConfig};
 pub use task_notices::{is_task_notice, NoticeInbox, TASK_NOTICE_NOTE, TASK_NOTICE_OPENING};
 pub use snapshots::{FilePreview, RewindReport, Rewindable, SnapshotStore};
 pub use subagents::{
-    AgentRole, ChildUsage, Mailbox, MessageTool, ReviewTool, SpawnRefused, SubagentEvent,
-    SubagentFinished, SubagentHandle, SubagentHost, SubagentMessage, SubagentOutbound,
+    AgentRole, ChildUsage, Mailbox, MessageTool, ReviewTool, SpawnRefused, SubagentControl,
+    SubagentEvent, SubagentFinished, SubagentHandle, SubagentHost, SubagentMessage, SubagentOutbound,
     SubagentResult, SubagentReview, SubagentSpec, SubagentTool, SubagentToolFactory, ReviewVerdict,
 };

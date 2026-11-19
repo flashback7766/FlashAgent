@@ -8,15 +8,15 @@ use std::sync::Mutex;
 
 use serde::{Deserialize, Serialize};
 
-use crate::memory_store::{self, Kind, Mutation, Scope, Store};
+use crate::memory_store::{self, Scope, Store};
 
 /// Larger files are not copied; rewind reports them.
 const MAX_SNAPSHOT_BYTES: u64 = 8 * 1024 * 1024;
 
-const WRITING_TOOLS: &[&str] = &["write_file", "edit_file", "patch_file"];
-/// Project memory is files in the project like any other; global memory in
-/// `~/.flashagent` is the user's own and is left as it is.
-const MEMORY_TOOLS: &[&str] = &["memory_create", "memory_update", "memory_remove"];
+const WRITING_TOOLS: &[&str] = &["edit", "write_file", "edit_file", "patch_file"];
+/// Project memory is the model's own notes and can be taken back with the
+/// turn; global memory is the user's and is left as it is.
+const MEMORY_TOOLS: &[&str] = &["memory"];
 
 /// State before the turn first touched the file.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -164,25 +164,66 @@ impl SnapshotStore {
 
     fn before_memory(&self, tool: &str, args_json: &str, stores: impl Fn(Scope) -> Option<Store>) {
         let Some(args) = flashagent_llm::effective_args(args_json, tool) else { return };
-        let Some(title) = args.get("title").and_then(|t| t.as_str()) else { return };
-        let scope = args.get("scope").and_then(|s| s.as_str());
-        let kind = args.get("type").and_then(|k| k.as_str()).map(Kind::parse);
-        let mutation = match tool {
-            "memory_create" => Mutation::Create,
-            "memory_update" => Mutation::Update,
-            "memory_remove" => Mutation::Remove,
-            _ => return,
-        };
-        memory_store::transaction(|_| {
-            let Some(target) = memory_store::resolve_in(scope, kind, title, mutation, stores) else { return };
-            // Global memory is personal; rewind only owns the project's files.
-            // A rejected create never arms an unrelated same-name file either.
-            if target.scope != Scope::Project || mutation == Mutation::Create && target.existing.is_some() {
-                return;
+        let command = args.get("command").and_then(|c| c.as_str()).unwrap_or("view");
+        if !matches!(command, "create" | "str_replace" | "insert" | "delete" | "rename" | "import") {
+            return;
+        }
+        let kind = args.get("type").and_then(|k| k.as_str()).map(memory_store::Kind::parse);
+        let raw_scope = args.get("scope").and_then(|s| s.as_str()).map(str::trim).filter(|s| !s.is_empty());
+        // `import` names its source in `from`; a project import into the
+        // target scope is the only one that touches project files. Everything
+        // else follows the same default the tool itself uses.
+        let from = args.get("from").and_then(|v| v.as_str()).map(|s| Scope::parse(Some(s))).unwrap_or(Scope::Project);
+        let mut scope = if command == "import" {
+            match raw_scope {
+                Some(s) if s.eq_ignore_ascii_case("project") || s.eq_ignore_ascii_case("global") => Scope::parse(Some(s)),
+                _ if kind.is_some_and(memory_store::Kind::is_personal) => Scope::Global,
+                _ => from,
             }
-            self.keep_before(self.resolve(&target.store.index_path().to_string_lossy()));
-            self.keep_before(self.resolve(&target.path().to_string_lossy()));
-        });
+        } else {
+            crate::memory::default_scope(raw_scope, kind)
+        };
+        // A correction with no scope finds the file the way the tool does:
+        // project first, then global. Snapshotting the wrong store would make
+        // rewind restore an index beside a note it did not touch.
+        if raw_scope.is_none() && matches!(command, "str_replace" | "insert" | "delete" | "rename") {
+            let path = args.get("old_path").or_else(|| args.get("path")).and_then(|v| v.as_str());
+            if let Some(path) = path {
+                let in_project = stores(Scope::Project).is_some_and(|s| s.get(path).is_some());
+                let in_global = stores(Scope::Global).is_some_and(|s| s.get(path).is_some());
+                if !in_project && in_global {
+                    scope = Scope::Global;
+                }
+            }
+        }
+        // Global memory is personal; rewind only owns the project's files.
+        if scope != Scope::Project {
+            return;
+        }
+        let Some(store) = stores(Scope::Project) else { return };
+        let names: Vec<String> = match command {
+            "rename" => ["old_path", "new_path", "path"].into_iter()
+                .filter_map(|key| args.get(key).and_then(|v| v.as_str()))
+                .filter_map(|raw| memory_store::file_name(raw).ok())
+                .collect(),
+            "import" => ["to", "path"].into_iter()
+                .filter_map(|key| args.get(key).and_then(|v| v.as_str()))
+                .filter_map(|raw| memory_store::file_name(raw).ok())
+                .collect(),
+            _ => ["path"].into_iter()
+                .filter_map(|key| args.get(key).and_then(|v| v.as_str()))
+                .filter_map(|raw| memory_store::file_name(raw).ok())
+                .collect(),
+        };
+        self.keep_before(self.resolve(&store.index_path().to_string_lossy()));
+        for name in names {
+            if name == memory_store::INDEX {
+                continue;
+            }
+            if let Ok(file) = memory_store::file_name(&name) {
+                self.keep_before(self.resolve(&store.dir().join(file).to_string_lossy()));
+            }
+        }
     }
 
     fn keep_before(&self, path: PathBuf) {
@@ -239,7 +280,7 @@ impl SnapshotStore {
     /// Also takes back every later turn: each file returns to how it was before
     /// the first of them touched it.
     pub fn rewind(&self, turn: usize) -> RewindReport {
-        memory_store::transaction(|_| self.rewind_locked(turn))
+        memory_store::transaction(|| self.rewind_locked(turn))
     }
 
     fn rewind_locked(&self, turn: usize) -> RewindReport {
@@ -930,13 +971,13 @@ mod tests {
     }
 
     #[test]
-    fn nothing_is_recorded_outside_a_turn_or_for_tools_that_do_not_write_files() {
+    fn nothing_is_recorded_outside_a_turn_or_for_a_memory_read() {
         let (project, _snaps, s) = store();
         std::fs::write(project.path().join("a.txt"), "x").unwrap();
         s.before_write("write_file", &args("a.txt"));
         s.begin_turn("p");
         s.before_write("run_shell", r#"{"command":"rm a.txt"}"#);
-        s.before_write("memory_create", &args("a.txt"));
+        s.before_write("memory", r#"{"command":"view","path":"a-fact"}"#);
         s.before_write("read_file", &args("a.txt"));
         assert_eq!(s.rewindable(&["p"])[0].files, 0);
     }
@@ -944,92 +985,92 @@ mod tests {
     #[test]
     fn a_project_memory_written_in_the_turn_is_taken_back_too() {
         let (project, _snaps, s) = store();
-        let index = project.path().join("MEMORY.md");
-        std::fs::write(&index, "# Memory\n").unwrap();
+        let store = Store::at(project.path().join(".memory"), Scope::Project);
         s.begin_turn("p");
-        s.before_write("memory_create", r#"{"title":"Tests use nextest","content":"x","scope":"project"}"#);
-        std::fs::create_dir_all(project.path().join("memory")).unwrap();
-        let note = project.path().join("memory").join("tests-use-nextest.md");
-        std::fs::write(&note, "x").unwrap();
-        std::fs::write(&index, "# Memory\n- tests-use-nextest\n").unwrap();
+        let args = r#"{"command":"create","path":"tests-use-nextest","scope":"project"}"#;
+        s.before_memory("memory", args, |scope| (scope == Scope::Project).then(|| store.clone()));
+        std::fs::create_dir_all(store.dir()).unwrap();
+        std::fs::write(store.index_path(), "# Memory\n- tests-use-nextest\n").unwrap();
+        std::fs::write(store.dir().join("tests-use-nextest.md"), "x").unwrap();
         let preview = s.preview_rewind(0);
         assert_eq!(preview.len(), 2, "{preview:?}");
         s.rewind(0);
-        assert!(!note.exists());
-        assert_eq!(std::fs::read_to_string(&index).unwrap(), "# Memory\n");
+        assert!(!store.dir().join("tests-use-nextest.md").exists());
+        assert!(!store.index_path().exists());
     }
 
     #[test]
     fn a_global_memory_write_does_not_arm_a_rewind_of_the_project_index() {
         let (project, _snaps, s) = store();
-        let global = tempfile::tempdir().unwrap();
+        let store = Store::at(project.path().join(".memory"), Scope::Project);
         s.begin_turn("p");
-        s.before_memory("memory_create", r#"{"title":"favourite editor","type":"preference","kind":"decision"}"#, |scope| {
-            Some(Store::new(match scope { Scope::Project => project.path(), Scope::Global => global.path() }))
+        // A user fact with no explicit scope goes to global memory; rewind
+        // owns the project's notes, not the person's.
+        s.before_memory("memory", r#"{"command":"create","path":"favourite-editor","type":"user"}"#, |scope| {
+            (scope == Scope::Project).then(|| store.clone())
         });
-        let index = project.path().join("MEMORY.md");
-        std::fs::write(&index, "# Memory\n\nhand written\n").unwrap();
+        std::fs::create_dir_all(store.dir()).unwrap();
+        std::fs::write(store.index_path(), "# Memory\n\nhand written\n").unwrap();
         assert_eq!(s.rewindable(&["p"])[0].files, 0, "a global preference armed project files");
         assert!(s.preview_rewind(0).is_empty());
         let report = s.rewind(0);
         assert!(report.failed.is_empty(), "{report:?}");
-        assert_eq!(std::fs::read_to_string(index).unwrap(), "# Memory\n\nhand written\n");
+        assert_eq!(std::fs::read_to_string(store.index_path()).unwrap(), "# Memory\n\nhand written\n");
     }
 
     #[test]
-    fn an_explicit_memory_scope_never_records_the_other_same_name() {
-        for (tool, scope, kept) in [
-            ("memory_create", "global", 0),
-            ("memory_update", "global", 0),
-            ("memory_remove", "global", 0),
-            ("memory_update", "project", 2),
-            ("memory_remove", "project", 2),
+    fn an_explicit_memory_scope_never_records_the_other_store() {
+        for (command, scope, extra, kept) in [
+            ("create", "global", "", 0),
+            ("str_replace", "global", r#","old_str":"a","new_str":"b""#, 0),
+            ("create", "project", "", 2),
+            ("str_replace", "project", r#","old_str":"a","new_str":"b""#, 2),
+            ("delete", "project", "", 2),
+            ("rename", "project", r#","old_path":"one","new_path":"two""#, 3),
         ] {
             let (project, _snaps, s) = store();
-            let global = tempfile::tempdir().unwrap();
-            let project_store = Store::new(project.path());
-            let global_store = Store::new(global.path());
-            for (store, text) in [(&project_store, "project note"), (&global_store, "personal note")] {
-                std::fs::create_dir_all(store.dir()).unwrap();
-                std::fs::write(store.dir().join("Build Notes.md"), text).unwrap();
-                std::fs::write(store.dir().join("build-notes.md"), "separate slug note").unwrap();
-                std::fs::write(store.index_path(), text).unwrap();
-            }
+            let project_store = Store::at(project.path().join(".memory"), Scope::Project);
+            let global_store = Store::at(project.path().join("global"), Scope::Global);
             s.begin_turn("p");
-            let args = serde_json::json!({"title":"Build Notes", "scope":scope}).to_string();
-            s.before_memory(tool, &args, |scope| Some(match scope {
-                Scope::Project => project_store.clone(), Scope::Global => global_store.clone(),
+            let args = format!(r#"{{"command":"{command}","path":"one","scope":"{scope}"{extra}}}"#);
+            s.before_memory("memory", &args, |scope| Some(match scope {
+                Scope::Project => project_store.clone(),
+                Scope::Global => global_store.clone(),
             }));
             let st = s.state.lock().unwrap();
             let files = &st.manifest.turns[0].files;
-            assert_eq!(files.len(), kept, "{tool} in {scope}: {files:?}");
-            assert!(files.iter().all(|f| f.path.starts_with(&s.cwd)), "a personal path was recorded: {files:?}");
-            assert!(files.iter().all(|f| f.path.file_name().unwrap() != "build-notes.md"), "the unrelated slug was recorded: {files:?}");
+            assert_eq!(files.len(), kept, "{command} in {scope}: {files:?}");
+            assert!(files.iter().all(|f| f.path.starts_with(&s.cwd)), "a path outside the project was recorded: {files:?}");
+            assert!(
+                files.iter().all(|f| f.path.file_name().unwrap() != "build-notes.md"),
+                "an unrelated name was recorded: {files:?}"
+            );
             drop(st);
-            s.rewind(0);
-            assert_eq!(std::fs::read_to_string(global_store.dir().join("Build Notes.md")).unwrap(), "personal note");
         }
     }
 
     #[test]
     fn project_scope_creation_does_not_snapshot_a_global_same_name() {
         let (project, _snaps, s) = store();
-        let global = tempfile::tempdir().unwrap();
-        let global_store = Store::new(global.path());
+        let global_store = Store::at(project.path().join("global"), Scope::Global);
         std::fs::create_dir_all(global_store.dir()).unwrap();
         std::fs::write(global_store.dir().join("new-fact.md"), "personal note").unwrap();
+        let project_store = Store::at(project.path().join(".memory"), Scope::Project);
         s.begin_turn("p");
-        s.before_memory("memory_create", r#"{"title":"New fact","scope":"project","type":"preference"}"#, |scope| {
-            Some(Store::new(match scope { Scope::Project => project.path(), Scope::Global => global.path() }))
+        s.before_memory("memory", r#"{"command":"create","path":"new-fact","scope":"project"}"#, |scope| {
+            Some(match scope {
+                Scope::Project => project_store.clone(),
+                Scope::Global => global_store.clone(),
+            })
         });
-        std::fs::create_dir_all(project.path().join("memory")).unwrap();
-        std::fs::write(project.path().join("memory/new-fact.md"), "created").unwrap();
-        std::fs::write(project.path().join("MEMORY.md"), "new index").unwrap();
+        std::fs::create_dir_all(project_store.dir()).unwrap();
+        std::fs::write(project_store.dir().join("new-fact.md"), "created").unwrap();
+        std::fs::write(project_store.index_path(), "new index").unwrap();
         assert_eq!(s.rewindable(&["p"])[0].files, 2);
         let report = s.rewind(0);
         assert!(report.failed.is_empty(), "{report:?}");
-        assert!(!project.path().join("MEMORY.md").exists());
-        assert!(!project.path().join("memory/new-fact.md").exists());
+        assert!(!project_store.index_path().exists());
+        assert!(!project_store.dir().join("new-fact.md").exists());
         assert_eq!(std::fs::read_to_string(global_store.dir().join("new-fact.md")).unwrap(), "personal note");
     }
 
