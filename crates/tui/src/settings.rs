@@ -1,6 +1,6 @@
 //! Settings screen (`/settings`, or Tab on empty input).
 
-use flashagent_core::{AppConfig, PersonalityTrait};
+use flashagent_core::{AppConfig, PermissionMode, PersonalityTrait};
 use crossterm::event::{KeyCode, KeyModifiers};
 use crate::{LineKind, RenderLine};
 
@@ -200,6 +200,14 @@ impl SettingsView {
                 if model.is_empty() { crate::i18n::tr("(auto-detected)").to_string() } else { model.clone() }
             }),
             (crate::i18n::tr("Permission mode"), crate::i18n::tr(self.config.permission_mode.label()).to_string()),
+            // The switch that arms the fifth Shift+Tab step. Off is the whole
+            // safety story: until it is on, nothing puts YOLO one keystroke
+            // away.
+            (crate::i18n::tr("YOLO mode"), if self.config.yolo_mode {
+                crate::i18n::tr("On (Shift+Tab also offers YOLO: no filters, any tool, any command)").into()
+            } else {
+                crate::i18n::tr("Off (Shift+Tab stays within the usual modes)").into()
+            }),
             (crate::i18n::tr("Safe mode"), if self.config.safe_mode {
                 crate::i18n::tr("On (reading and editing inside the project; no shell, no web, no subagents)").into()
             } else { crate::i18n::tr("Off").into() }),
@@ -403,30 +411,34 @@ impl SettingsView {
                 0 => SettingsAction::OpenProviders,
                 1 => SettingsAction::OpenModelMenu,
                 2 => {
-                    self.config.permission_mode = self.config.permission_mode.next();
+                    self.config.permission_mode = self.config.permission_mode.next_with_yolo(self.config.yolo_mode);
                     SettingsAction::None
                 }
                 3 => {
-                    self.config.safe_mode = !self.config.safe_mode;
+                    self.toggle_yolo();
                     SettingsAction::None
                 }
                 4 => {
-                    self.config.crash_reports = !self.config.crash_reports;
+                    self.config.safe_mode = !self.config.safe_mode;
                     SettingsAction::None
                 }
                 5 => {
-                    self.config.auto_save_sessions = !self.config.auto_save_sessions;
+                    self.config.crash_reports = !self.config.crash_reports;
                     SettingsAction::None
                 }
                 6 => {
-                    self.cycle_editor();
+                    self.config.auto_save_sessions = !self.config.auto_save_sessions;
                     SettingsAction::None
                 }
                 7 => {
+                    self.cycle_editor();
+                    SettingsAction::None
+                }
+                8 => {
                     self.cycle_language();
                     SettingsAction::None
                 }
-                8 => SettingsAction::OpenWizard,
+                9 => SettingsAction::OpenWizard,
                 _ => SettingsAction::None,
             },
             SettingsTab::Updates => match self.selected_index {
@@ -522,12 +534,13 @@ impl SettingsView {
             SettingsTab::General => match self.selected_index {
                 0 => self.cycle_provider(delta),
                 1 => self.cycle_model(),
-                2 => self.config.permission_mode = self.config.permission_mode.next(),
-                3 => self.config.safe_mode = !self.config.safe_mode,
-                4 => self.config.crash_reports = !self.config.crash_reports,
-                5 => self.config.auto_save_sessions = !self.config.auto_save_sessions,
-                6 => self.cycle_editor(),
-                7 => self.cycle_language(),
+                2 => self.config.permission_mode = self.config.permission_mode.next_with_yolo(self.config.yolo_mode),
+                3 => self.toggle_yolo(),
+                4 => self.config.safe_mode = !self.config.safe_mode,
+                5 => self.config.crash_reports = !self.config.crash_reports,
+                6 => self.config.auto_save_sessions = !self.config.auto_save_sessions,
+                7 => self.cycle_editor(),
+                8 => self.cycle_language(),
                 _ => {}
             },
             SettingsTab::Updates => match self.selected_index {
@@ -600,6 +613,15 @@ impl SettingsView {
     /// Another provider than the one Settings opened on.
     fn provider_picked(&self) -> bool {
         self.opened_on.as_deref().is_some_and(|name| name != self.config.active_profile().name)
+    }
+
+    /// Arms or disarms YOLO. Disarming while YOLO is the chosen mode takes
+    /// the mode with it: a mode whose switch is off cannot stay in force.
+    fn toggle_yolo(&mut self) {
+        self.config.yolo_mode = !self.config.yolo_mode;
+        if !self.config.yolo_mode && self.config.permission_mode.is_yolo() {
+            self.config.permission_mode = PermissionMode::AcceptEdits;
+        }
     }
 
     fn cycle_editor(&mut self) {
@@ -1237,15 +1259,44 @@ mod mouse_tests {
     #[test]
     fn a_click_selects_its_row_and_the_selected_row_acts() {
         let mut view = SettingsView::new(AppConfig::default(), Vec::new());
-        // General tab: 0 provider, 1 model, 2 mode, 3 safe mode.
-        assert_eq!(view.click(FIRST_ITEM_LINE + 3, 10, 100), SettingsAction::None);
-        assert_eq!(view.selected_index, 3, "the first click only focuses the row");
+        // General tab: 0 provider, 1 model, 2 mode, 3 YOLO, 4 safe mode.
+        assert_eq!(view.click(FIRST_ITEM_LINE + 4, 10, 100), SettingsAction::None);
+        assert_eq!(view.selected_index, 4, "the first click only focuses the row");
         let before = view.config.safe_mode;
-        assert_eq!(view.click(FIRST_ITEM_LINE + 3, 10, 100), SettingsAction::None);
+        assert_eq!(view.click(FIRST_ITEM_LINE + 4, 10, 100), SettingsAction::None);
         assert_eq!(view.config.safe_mode, !before, "the focused row acts, as Enter would");
         // The note, the hints and the border belong to the card, not to a row.
         assert_eq!(view.click(FIRST_ITEM_LINE + 40, 10, 100), SettingsAction::None);
-        assert_eq!(view.selected_index, 3, "nothing below the rows moved the selection");
+        assert_eq!(view.selected_index, 4, "nothing below the rows moved the selection");
+    }
+
+    #[test]
+    fn the_yolo_switch_arms_the_fifth_mode_and_disarming_drops_it() {
+        use flashagent_core::PermissionMode;
+        let mut view = SettingsView::new(AppConfig::default(), Vec::new());
+        assert!(!view.config.yolo_mode, "YOLO is off on a fresh config");
+        // General row 3 is the YOLO switch.
+        view.selected_index = 3;
+        assert_eq!(view.trigger_action(), SettingsAction::None);
+        assert!(view.config.yolo_mode);
+
+        // With the switch on, the mode row reaches YOLO after Accept All.
+        view.config.permission_mode = PermissionMode::Bypass;
+        view.selected_index = 2;
+        view.trigger_action();
+        assert_eq!(view.config.permission_mode, PermissionMode::Yolo);
+
+        // Turning the switch off while YOLO is chosen takes the mode with it.
+        view.selected_index = 3;
+        view.trigger_action();
+        assert!(!view.config.yolo_mode);
+        assert_eq!(view.config.permission_mode, PermissionMode::AcceptEdits, "a mode whose switch is off cannot stay in force");
+
+        // And the cycle is back to four: Accept All goes to Planning.
+        view.config.permission_mode = PermissionMode::Bypass;
+        view.selected_index = 2;
+        view.trigger_action();
+        assert_eq!(view.config.permission_mode, PermissionMode::Planning);
     }
 
     #[test]

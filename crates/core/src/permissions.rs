@@ -19,6 +19,11 @@ pub enum PermissionMode {
     AcceptEdits,
     /// Nothing is asked.
     Bypass,
+    /// Nothing is asked and nothing is held back: the command blacklist, the
+    /// `/goal` refusals and the outside-the-project rails do not apply. Only
+    /// reachable while YOLO is enabled in Settings; safe mode and the tools
+    /// the owner switched off still win.
+    Yolo,
 }
 
 
@@ -37,30 +42,52 @@ impl<'de> serde::Deserialize<'de> for PermissionMode {
             "manual" | "ask" => Ok(Self::Manual),
             "acceptedits" | "edits" => Ok(Self::AcceptEdits),
             "bypass" | "acceptall" | "all" => Ok(Self::Bypass),
+            "yolo" => Ok(Self::Yolo),
             _ => Err(serde::de::Error::custom(format!(
-                "unknown permission mode {raw:?} (expected Planning, Manual, AcceptEdits or Bypass)"
+                "unknown permission mode {raw:?} (expected Planning, Manual, AcceptEdits, Bypass or Yolo)"
             ))),
         }
     }
 }
 
 impl PermissionMode {
-    pub fn next(self) -> Self {
+    /// The next mode in the Shift+Tab cycle. YOLO is a fifth step, and only
+    /// when Settings has enabled it: a mode nobody armed is not offered.
+    pub fn next_with_yolo(self, yolo: bool) -> Self {
         match self {
             Self::Planning => Self::Manual,
             Self::Manual => Self::AcceptEdits,
             Self::AcceptEdits => Self::Bypass,
+            Self::Bypass if yolo => Self::Yolo,
             Self::Bypass => Self::Planning,
+            Self::Yolo => Self::Planning,
         }
     }
 
-    pub fn prev(self) -> Self {
+    pub fn prev_with_yolo(self, yolo: bool) -> Self {
         match self {
+            Self::Planning if yolo => Self::Yolo,
             Self::Planning => Self::Bypass,
             Self::Manual => Self::Planning,
             Self::AcceptEdits => Self::Manual,
             Self::Bypass => Self::AcceptEdits,
+            Self::Yolo => Self::Bypass,
         }
+    }
+
+    /// The cycle as it is with YOLO off, which is every place that has no
+    /// Settings to ask.
+    pub fn next(self) -> Self {
+        self.next_with_yolo(false)
+    }
+
+    pub fn prev(self) -> Self {
+        self.prev_with_yolo(false)
+    }
+
+    /// Whether this mode ignores every permission rail.
+    pub fn is_yolo(self) -> bool {
+        self == Self::Yolo
     }
 
     pub fn label(self) -> &'static str {
@@ -69,6 +96,7 @@ impl PermissionMode {
             Self::Manual => "Manual",
             Self::AcceptEdits => "Accept Edits",
             Self::Bypass => "Accept All",
+            Self::Yolo => "YOLO",
         }
     }
 }
@@ -982,6 +1010,10 @@ impl PermissionState {
         if !is_local_host(&host) {
             return None;
         }
+        // YOLO is the answer to every one of these cards, said in advance.
+        if self.mode().is_yolo() {
+            return None;
+        }
         if self.goal_active() {
             return Some(Verdict::Deny(format!("{host} is a local address; local addresses are not fetched during /goal")));
         }
@@ -1004,6 +1036,9 @@ impl PermissionState {
         }
         let outside = named_paths(&call.name, &call.args_json).into_iter().find(|p| !path_is_inside(&root, p))?;
         let done = if category == Category::Write { "written" } else { "read" };
+        if self.mode().is_yolo() {
+            return None;
+        }
         if self.goal_active() {
             return Some(Verdict::Deny(format!(
                 "{outside} is outside the project; files outside it are not {done} during /goal"
@@ -1132,7 +1167,7 @@ impl PermissionState {
         match self.category(&call.name) {
             Category::Read | Category::Net => Verdict::Allow,
             Category::Write => match mode {
-                PermissionMode::Bypass | PermissionMode::AcceptEdits => Verdict::Allow,
+                PermissionMode::Yolo | PermissionMode::Bypass | PermissionMode::AcceptEdits => Verdict::Allow,
                 PermissionMode::Planning => Verdict::Deny("planning mode is read-only".into()),
                 PermissionMode::Manual if always => Verdict::Allow,
                 PermissionMode::Manual => Verdict::NeedApproval { diff: diff() },
@@ -1151,6 +1186,9 @@ impl PermissionState {
                         PermissionMode::Planning => Verdict::Deny(
                             "planning mode only runs commands that just read (ls, cat, grep, git log, ...)".into(),
                         ),
+                        // YOLO does not ask about the blacklist, and does not
+                        // let /goal turn it back into a refusal either.
+                        PermissionMode::Yolo => Verdict::Allow,
                         PermissionMode::Bypass if self.goal_active() => Verdict::Deny(format!(
                             "refused during /goal: {reason}; find a safer way or leave it for the user"
                         )),
@@ -1163,7 +1201,7 @@ impl PermissionState {
                     return Verdict::Allow;
                 }
                 match mode {
-                    PermissionMode::Bypass => Verdict::Allow,
+                    PermissionMode::Yolo | PermissionMode::Bypass => Verdict::Allow,
                     PermissionMode::Manual | PermissionMode::AcceptEdits if always => Verdict::Allow,
                     PermissionMode::Planning if cmd.as_deref().is_some_and(|c| {
                         let root = self.project_root.lock().expect("root lock").clone();
@@ -1179,7 +1217,7 @@ impl PermissionState {
                 }
             }
             Category::Mcp => match mode {
-                PermissionMode::Bypass => Verdict::Allow,
+                PermissionMode::Yolo | PermissionMode::Bypass => Verdict::Allow,
                 PermissionMode::Planning => {
                     Verdict::Deny("external tools are not available in planning mode".into())
                 }
@@ -2405,6 +2443,88 @@ mod tests {
 
         assert_eq!(m.prev(), PermissionMode::Bypass);
         assert_eq!(m.prev().prev(), PermissionMode::AcceptEdits);
+    }
+
+    #[test]
+    fn yolo_is_a_fifth_step_only_while_it_is_enabled() {
+        assert_eq!(PermissionMode::Bypass.next_with_yolo(true), PermissionMode::Yolo);
+        assert_eq!(PermissionMode::Yolo.next_with_yolo(true), PermissionMode::Planning);
+        assert_eq!(PermissionMode::Planning.prev_with_yolo(true), PermissionMode::Yolo);
+        assert_eq!(PermissionMode::Yolo.prev_with_yolo(true), PermissionMode::Bypass);
+
+        // Left in Settings off, the mode is not offered at all: the cycle is
+        // the four that were there before.
+        assert_eq!(PermissionMode::Bypass.next_with_yolo(false), PermissionMode::Planning);
+        assert_eq!(PermissionMode::Yolo.next_with_yolo(false), PermissionMode::Planning);
+        assert_eq!(PermissionMode::Planning.prev_with_yolo(false), PermissionMode::Bypass);
+        assert_eq!(PermissionMode::Yolo.label(), "YOLO");
+
+        let stored = serde_json::from_str::<PermissionMode>("\"yolo\"").unwrap();
+        assert_eq!(stored, PermissionMode::Yolo, "a hand-edited config keeps YOLO");
+    }
+
+    #[test]
+    fn yolo_lets_through_what_even_accept_all_holds() {
+        let dir = project();
+        let blacklisted = call("run_shell", r#"{"command":"sh -c 'echo hi'"}"#);
+        let bypass = PermissionState::new(PermissionMode::Bypass, Arc::new(DenyAllGate));
+        assert!(
+            matches!(bypass.decide(&blacklisted, || None), Verdict::NeedApproval { .. }),
+            "Accept All still asks about a blacklisted command"
+        );
+
+        let yolo = PermissionState::new(PermissionMode::Yolo, Arc::new(DenyAllGate));
+        yolo.set_project_root(dir.path().to_path_buf());
+        assert_eq!(yolo.decide(&blacklisted, || None), Verdict::Allow, "the blacklist is off in YOLO");
+        assert_eq!(
+            yolo.decide(&call("read_file", r#"{"path":"/etc/hosts"}"#), || None),
+            Verdict::Allow,
+            "a file outside the project"
+        );
+        assert_eq!(
+            yolo.decide(&call("web_fetch", r#"{"url":"http://192.168.1.1/admin"}"#), || None),
+            Verdict::Allow,
+            "a local address"
+        );
+
+        // A /goal run is unattended, not filtered: the mode the owner chose
+        // stays the mode in force.
+        yolo.set_goal_active(true);
+        assert_eq!(yolo.decide(&blacklisted, || None), Verdict::Allow, "/goal does not put the blacklist back");
+        assert_eq!(
+            yolo.decide(&call("read_file", r#"{"path":"/etc/hosts"}"#), || None),
+            Verdict::Allow,
+            "/goal does not put the project rail back"
+        );
+        assert_eq!(
+            yolo.decide(&call("web_fetch", r#"{"url":"http://localhost:1234/v1/models"}"#), || None),
+            Verdict::Allow,
+            "/goal does not put the local-address rail back"
+        );
+    }
+
+    #[tokio::test]
+    async fn yolo_does_not_turn_a_switched_off_tool_back_on() {
+        struct Writes;
+        #[async_trait]
+        impl ToolExec for Writes {
+            async fn execute(&self, _call: &ToolCall) -> ToolOutput {
+                ToolOutput { content: "wrote".into(), is_error: false, images: Vec::new() }
+            }
+            fn specs(&self) -> Vec<ToolSpec> {
+                vec![]
+            }
+            fn as_any(&self) -> &dyn std::any::Any {
+                self
+            }
+        }
+
+        let state = Arc::new(PermissionState::new(PermissionMode::Yolo, Arc::new(AllowAllGate)));
+        let tools = PermissionedTools::new(Arc::new(Writes), None, state);
+        tools.set_disabled_tools(vec!["write_file".into()]);
+        let out = tools.execute(&call("write_file", r#"{"path":"a.txt","content":"x"}"#)).await;
+        assert!(out.is_error, "a tool the owner switched off ran in YOLO");
+        assert!(out.content.contains("switched off"), "{}", out.content);
     }
 
     #[test]

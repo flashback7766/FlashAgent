@@ -778,10 +778,14 @@ pub(crate) fn format_status_left(
     awaiting_user: bool,
     goal_progress: Option<&str>,
     mode_label: &str,
+    yolo: bool,
     expand_status: &str,
 ) -> String {
     let mode_str = if is_goal_active {
         format!("\x1b[1;38;2;225;175;95m{}\x1b[0m", flashagent_tui::i18n::tr("[Goal: Autonomous]"))
+    } else if yolo {
+        // The one mode with no brakes says so in the color of a warning.
+        format!("\x1b[1;38;2;225;115;105m[{mode_label}]\x1b[0m")
     } else {
         format!("\x1b[38;2;145;205;140m[{mode_label}]\x1b[0m")
     };
@@ -988,6 +992,7 @@ fn footer_status(width: usize, context_usage: &ContextUsage, st: &FrameState<'_>
         awaiting_user,
         st.goal_progress,
         &mode_label,
+        st.mode.is_yolo(),
         &format!("{}{expand_status}", tasks_status(st.background_tasks)),
     );
     fit_status_row(width, &left_telemetry, &format_provider(st.provider.0, st.provider.1), &gauge_str)
@@ -2508,8 +2513,20 @@ mod footer_tests {
     }
 
     #[test]
+    fn the_yolo_mode_is_the_one_warning_colour_in_the_status_row() {
+        let yolo = format_status_left(false, false, false, None, "YOLO", true, "");
+        assert!(yolo.contains("[YOLO]"));
+        assert!(yolo.contains("225;115;105"), "YOLO does not stand out: {yolo:?}");
+        let manual = format_status_left(false, false, false, None, "Manual", false, "");
+        assert!(manual.contains("145;205;140"), "the usual mode keeps its colour: {manual:?}");
+        // A goal run's own banner still wins: it says who is driving.
+        let goal = format_status_left(true, true, false, None, "YOLO", true, "");
+        assert!(goal.contains("Goal: Autonomous"));
+    }
+
+    #[test]
     fn the_status_row_never_exceeds_the_window() {
-        let left = format_status_left(false, false, false, None, "Manual", "");
+        let left = format_status_left(false, false, false, None, "Manual", false, "");
         let provider = format_provider("Anthropic", "claude-opus-5-5");
         for width in 1..120 {
             let (row, _) = fit_status_row(width, &left, &provider, "");
@@ -2519,7 +2536,7 @@ mod footer_tests {
 
     #[test]
     fn the_status_row_drops_the_model_then_the_provider() {
-        let left = format_status_left(false, false, false, None, "Manual", "");
+        let left = format_status_left(false, false, false, None, "Manual", false, "");
         let provider_only = format_provider("Anthropic", "");
         let provider = format_provider("Anthropic", "claude-opus-5-5");
         let (with_provider, _) = fit_status_row(visible_width(&left) + visible_width(&provider_only) + 4, &left, &provider, "");
@@ -2535,7 +2552,7 @@ mod footer_tests {
 
     #[test]
     fn the_gauges_columns_are_the_ones_a_click_on_the_status_end_hits() {
-        let left = format_status_left(false, false, false, None, "Manual", "");
+        let left = format_status_left(false, false, false, None, "Manual", false, "");
         let provider = format_provider("OpenCode Go", "deepseek-v4.1-flash");
         let width = 100;
         let (row, gauge_vis) = fit_status_row(width, &left, &provider, "1% · 9.5K/1M");

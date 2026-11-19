@@ -105,7 +105,7 @@ pub fn builtin_commands() -> Vec<AutocompleteItem> {
         AutocompleteItem::new("/model", tr("Open model selection menu or switch model"), AutocompleteCategory::Command),
         AutocompleteItem::new("/provider", tr("Switch to another saved provider, local or cloud; add or edit them"), AutocompleteCategory::Command),
         AutocompleteItem::new("/verbose", tr("Toggle verbose mode for thoughts and tool calls (all, last, off)"), AutocompleteCategory::Command),
-        AutocompleteItem::new("/mode", tr("Cycle permission mode (Planning, Manual, Accept Edits, Accept All)"), AutocompleteCategory::Command),
+        AutocompleteItem::new("/mode", tr("Cycle permission mode (Planning, Manual, Accept Edits, Accept All, YOLO when enabled)"), AutocompleteCategory::Command),
         AutocompleteItem::new("/goal", tr("Autonomous run: /goal <task> (limits in Settings → Goal)"), AutocompleteCategory::Command),
         AutocompleteItem::new("/resume", tr("Pick a saved session from this folder and continue it"), AutocompleteCategory::Command),
         AutocompleteItem::new("/mcp", tr("List and manage Model Context Protocol servers"), AutocompleteCategory::Command),
@@ -198,6 +198,7 @@ pub fn sub_commands(input: &str) -> Option<Vec<AutocompleteItem>> {
             AutocompleteItem::new("/mode edits", tr("Auto-approve file edits, ask on shell commands"), AutocompleteCategory::Command),
             AutocompleteItem::new("/mode planning", tr("Read-only planning mode (modifications blocked)"), AutocompleteCategory::Command),
             AutocompleteItem::new("/mode bypass", tr("Bypass all approval gates (full autonomy)"), AutocompleteCategory::Command),
+            AutocompleteItem::new("/mode yolo", tr("No filters at all: any tool and any command (enable YOLO in Settings first)"), AutocompleteCategory::Command),
         ])
     } else if lower.starts_with("/mcp ") || lower == "/mcp" {
         Some(vec![
