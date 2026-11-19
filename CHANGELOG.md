@@ -1,5 +1,155 @@
 # Changelog
 
+## b725 — Memory you can walk through, tools that are one thing, and a prefix that never moves
+
+- **Memory is a vault, not four tools.** The old one-fact-per-file store with
+  a generated block inside `MEMORY.md` is replaced by the layout Claude Code
+  uses: a plain `MEMORY.md` index and one topic file per fact under
+  `~/.flashagent/projects/<project-slug>/memory/`, with global memory under
+  `~/.flashagent/memory/`. The index is what every turn carries; a body is
+  read only when the model needs it. Project rules (`CLAUDE.md`, `AGENTS.md`,
+  `.cursorrules`, `.flashagent/rules`) stay instructions and still outrank the
+  index, which is fenced as a record and never as an order.
+- **One `memory` tool with commands.** `view`, `create`, `str_replace`,
+  `insert`, `delete` and `rename` replace `memory_read`, `memory_create`,
+  `memory_update` and `memory_remove`. A name is a file name, not a path:
+  separators, `..`, absolute paths and symlinks are refused, and every write
+  is private (0600 in a 0700 directory) and lands atomically. The index line
+  is kept for the model, so a `create` cannot forget to link its fact.
+- **The memory index is loaded once per session, not rewritten per turn.** The
+  two indexes and the rules are measured in the model's tokens and fitted to
+  the budget at startup; a record that does not fit is shortened or named,
+  never allowed to push the user's rules out. A fact written by the model
+  reaches the next session's prompt; the current conversation does not move
+  its own prefix to make room for it.
+- **`/memory` is a browser.** The list scrolls to the terminal height, `e`
+  opens the selected file in `$EDITOR`, `i` opens `MEMORY.md`, `/` searches
+  names and bodies, `PgUp`/`PgDn` move a long body, and forgetting a fact asks
+  for `d` twice. The summary tab remains, and opening the screen creates a
+  missing index so it is editable instead of invisible.
+- **`/migrate-memory` moves the old store without losing it.**
+  `/migrate-memory` lists what is old, `run` copies everything to
+  `~/.flashagent/memory-backup/<date>-<time>/` and lets the agent read each
+  old body and import it as a new topic with the right scope and type;
+  `verify` counts what arrived; `cleanup confirm` removes the old project
+  files and generated index blocks only after that confirmation. The old
+  global directory is already the new global store, so its migrated topics
+  stay in place. Until a fact has moved it stays visible in the prompt as a
+  legacy record.
+- **The welcome card stays above the conversation.** The first prompt no
+  longer takes it away, and a `/goal` no longer does either: the card is the
+  state of the session — model, provider, context, memory — not a splash
+  screen. It updates in place when the model, effort or provider changes.
+- **The composer is at the top, where the conversation starts.** The welcome
+  card and the input sit under the first line and the transcript grows
+  downward, as it did before the pinning pass; blank terminal space stays
+  below, not above. The Swift mascot has its old blue back — pale blue shell,
+  white eye, deep navy pupil — after the brass experiment.
+- **Old messages are a fixed prefix.** The live `[Context]` line that used to
+  be rewritten inside the system prompt every turn is gone, and nothing on an
+  ordinary turn edits the system message or a message above the new one. The
+  system prompt changes only when the model, voice, effort or a permission
+  mode explicitly changes; compaction and rewind are the two deliberate cuts.
+  A PTY test sends two turns and compares the whole first request with the
+  beginning of the second, tools included.
+- **Ctrl+R after a failure continues from the failure.** The turn's completed
+  tool calls and partial answer stay in the history; the retry adds one note
+  saying not to repeat a call whose result is already there. A prompt that
+  simply failed mid-stream is no longer answered from scratch, and the same
+  tool is not run twice.
+- **A dropped connection reconnects on its own, and says so.** A transport cut,
+  a rate limit or an overloaded gateway gets up to `network_retries` automatic
+  reconnects with a short backoff; the status line shows
+  `reconnecting 1/3` while it waits and runs, and the transcript names the
+  attempt. A bad key, a missing model or a prompt that is too long is not
+  retried. When the retries run out, the usual error comes back and Ctrl+R
+  resumes from the failed step by hand.
+- **The permission mode is clickable.** A press on `[Accept Edits]`,
+  `[Accept All]`, `[YOLO]` (or any other mode label) on the status line cycles
+  it exactly as Shift+Tab does, and the label lights under the pointer. During
+  a goal the mode is fixed and the label is not a control.
+- **The input history remembers commands.** `↑` and Ctrl+F reach `/usage`,
+  `/memory`, `/migrate-memory` and every other command as well as prompts;
+  a path such as `/tmp/shot.png` is still a message, not a command.
+- **`user_interaction` replaces `ask_user`.** One tool, seven ways to reach
+  the person: `ask` keeps the multi-question card with 2–6 concrete options,
+  multi-select and free text, and now takes a `why` line shown above it;
+  `attach` asks for screenshots, logs or files and returns their paths;
+  `handoff` opens one text file in its default application, waits for the user
+  to edit it, and returns the diff; `open` shows a URL or a project path;
+  `form` collects labeled fields in one call; `steps` walks through an ordered
+  list with Next/Back/Stop; `notify` posts a one-way notice. Paths are
+  project-only unless the ordinary permission card allows them, and no mode
+  ever asks for a password, token or key. In an autonomous `/goal`, `attach`,
+  `handoff`, `form` and `steps` are refused because nobody is there to use
+  them; `ask` remains the one mode that waits.
+- **The system prompt has three sizes.** A small local model gets the
+  compact loop (about 650 tokens: what a turn is, how to call a tool, how to
+  edit and verify, permissions, memory, one call example); a local model with
+  room or a small cloud model gets standard (about 2,100); a large cloud model
+  gets the full method, delegation, review and mode detail (about 3,900).
+  Auto follows the backend and its window; `/prompt compact|standard|full`
+  overrides it, and `/prompt auto` returns to following the model. Reasoning
+  stage titles are only taught to a model that can think, and the
+  `<|think_off|>` template token only goes to a local server. The compact tier
+  also fixes the old prompt's stale `view_image` and its claim that there are
+  four permission modes.
+- **A subagent opens as its own chat.** Clicking a pinned child, or `/agents`,
+  opens a panel with a list of every child in the session and the selected
+  one's own transcript: thinking, tool calls, messages and the final report.
+  A finished child stays in the list with its report and review. Running
+  children can be messaged (`m`) or stopped (`x`) from the panel; the report
+  can be copied (`c`) or put back into the main transcript (`o`). The panel
+  follows live events while it is open; the transcript is bounded to the last
+  400 lines.
+- **The toolset is one thing per job.** Twenty-one built-ins became fourteen:
+  `read` (text, outline or image), `search` (list, files or content), `edit`
+  (write, replace or patch), `git` (status, diff, log, show or blame), `web`
+  (search or fetch) and `agent` (spawn, message or review) replace their older
+  families. `task` now lists, reads and stops background commands instead of
+  `run_shell` carrying a second `task_id` form; `skill` lists and runs project
+  skills without a slash command; `http_request` sends a method, headers and a
+  body, with no redirect following. The regex mode of editing is gone:
+  exact replacements and line ranges are enough, and a regex that matches the
+  wrong thing is not a memory worth keeping.
+- **Nine unslop passes are in this build.** One warm-graphite palette with
+  three text roles and one amber accent; one content measure across the
+  welcome card, tools, thoughts, goal card and report; one compact tool row
+  and one expanded card; one numbered, filled diff renderer for approvals and
+  tool cards; one-line menus with the selected item's description in a
+  reserved row; lowercase `k` and one number shape; a static tip instead of a
+  carousel; no idle breathing, shimmer or sweep (the spinner, the card unfold
+  and the press flash stay); YOLO arms with two Enters; uninstall needs `y`.
+- **`/usage` is a menu with tabs.** Session, History (saved sessions),
+  Lifetime (`~/.flashagent/usage.json`) and Limits; the old `/cost` is gone.
+  Limits are asked from the APIs that expose them — DeepSeek balance,
+  OpenRouter credits and key, new-api billing — and an unsupported provider
+  says so instead of inventing a number. Per-provider, per-model, cache-read,
+  cache-write and reasoning figures are kept, and the status line's `out`
+  counts what the window keeps; subagent output is named separately as
+  `N agents`.
+- **A session is named by the model from its first request.** The opening
+  exchange is part of the recap request, the first recap runs immediately
+  rather than after a delay, and the title is saved with the session. The
+  welcome card stays; only the session title changes.
+- **A shell argument that looks like a diff count is not a diff count.**
+  `head -30` is painted as text; only a real change size is coloured. The
+  status output is the retained answer, thinking and tool calls counted with
+  the same tokenizer, and a cut-off notice still reports the billed total.
+- **The mouse reaches the reading screens.** `/usage`'s tab strip and its
+  Limits `r refresh` answer a press, the `/agents` panel's list rows pick a
+  child and its hint words message, stop, copy and report like their keys do,
+  `/memory`'s rows select (the selected row opens in the editor) and its hint
+  words act except `forget`, which stays with the keyboard, and the command
+  popup above the composer completes the row a press lands on. The cards keep
+  to the left edge, as they always have. The one place that still asks for
+  keys is the first-run wizard, which needs typing anyway.
+- **The History tab says what it counts.** Saved sessions were counted with
+  the turns phrase (`Sessions 50 turns`); they are counted as sessions now,
+  the Recent list scrolls through every saved session instead of the newest
+  thirty, and a session title the model dressed in status glyphs (`●▶ fix the
+  parser`) is stored without them.
+
 ## b702 — The setup check leaves cloud models alone
 
 - **A cloud model is not tool-tested behind the owner's back.** The run after
