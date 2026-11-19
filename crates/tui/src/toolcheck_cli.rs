@@ -38,11 +38,32 @@ async fn load_model(source: &BackendSource) {
 /// decided alone.
 pub(crate) const TOOL_TEST_TURN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
 
+/// The wizard's own rule for "cloud": a preset that wants a key, or an
+/// address typed as https. A cloud model is a metered API the provider has
+/// already vetted for tool calling, so the setup run does not spend the
+/// owner's requests on a full check nobody asked for; `--tool-test` and
+/// Settings → Run tool test remain the explicit ways to ask.
+fn is_cloud_backend(config: &AppConfig) -> bool {
+    let url = config.endpoint().url;
+    match flashagent_core::config::BackendPreset::for_url(&url)
+        .or_else(|| flashagent_core::config::BackendPreset::same_server(&url))
+    {
+        Some(preset) => !preset.is_local(),
+        None => url.to_lowercase().starts_with("https://"),
+    }
+}
+
 pub(crate) async fn first_run_tool_check(config: &AppConfig) -> Option<String> {
+    let model = config.active_profile().model.as_str();
+    if is_cloud_backend(config) {
+        return Some(format!(
+            "Tool-calling check skipped: {model} is a cloud API. Run `flashagent --tool-test` \
+             (or Settings → Run tool test) when you want it."
+        ));
+    }
     // Without a server every probe fails, and the verdict would blame the model.
     let endpoint = config.endpoint();
     let url = endpoint.url.as_str();
-    let model = config.active_profile().model.as_str();
     let probe = flashagent_llm::Client::new(endpoint.clone(), "");
     if model.trim().is_empty() || probe.discover_server().await.is_none() {
         return Some(format!(
@@ -303,5 +324,35 @@ mod tests {
         ]);
         let (first, _) = collect_first_tool_call(&mut stream).await.expect("the test wrote the stream");
         assert_eq!(first.unwrap().0, "lead");
+    }
+
+    fn config_at(name: &str, url: &str) -> AppConfig {
+        let mut config = AppConfig::default();
+        config.providers = vec![flashagent_core::config::ProviderProfile::new(name, flashagent_llm::ApiProtocol::OpenAi, url)];
+        config.active_provider = name.to_string();
+        config.active_profile_mut().model = "model-under-test".into();
+        config
+    }
+
+    #[test]
+    fn the_setup_check_knows_which_servers_are_cloud_apis() {
+        // A typed https address is a cloud API; plain http is a server here.
+        assert!(is_cloud_backend(&config_at("Custom cloud", "https://api.example.com/v1")));
+        assert!(!is_cloud_backend(&config_at("Custom box", "http://192.168.1.5:8080/v1")));
+        assert!(!is_cloud_backend(&config_at("Custom box", "http://127.0.0.1:9999/v1")));
+        // The local presets need no key, the cloud ones do: that is the rule
+        // the wizard shows before any of this runs.
+        assert!(!is_cloud_backend(&config_at("LM Studio", "http://localhost:1234/v1")));
+        assert!(!is_cloud_backend(&config_at("Ollama", "http://localhost:11434")));
+    }
+
+    #[tokio::test]
+    async fn a_cloud_model_is_not_tool_tested_by_the_setup_run() {
+        // The address would never answer; the skip has to come before any
+        // discovery, which is the requests the setup run must not spend.
+        let config = config_at("Cloud", "https://api.example.com/v1");
+        let verdict = first_run_tool_check(&config).await.expect("the setup run says why it skipped");
+        assert!(verdict.contains("cloud API"), "{verdict}");
+        assert!(verdict.contains("--tool-test"), "the way to ask for it stays visible: {verdict}");
     }
 }
