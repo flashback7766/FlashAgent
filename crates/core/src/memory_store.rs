@@ -16,7 +16,6 @@
 //! it for `/migrate-memory`, and [`import_legacy`] copies one entry into the
 //! new store without retyping the body.
 
-use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
@@ -791,6 +790,7 @@ fn reject_symlink(path: &Path) -> MemoryResult<()> {
 
 #[cfg(unix)]
 fn read_nofollow(path: &Path) -> std::io::Result<String> {
+    use std::io::Read;
     use std::os::unix::fs::OpenOptionsExt;
     let mut options = std::fs::OpenOptions::new();
     options.read(true).custom_flags(libc::O_NOFOLLOW);
