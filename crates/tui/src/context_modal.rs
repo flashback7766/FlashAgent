@@ -14,7 +14,7 @@ impl ContextModal {
 
     pub fn render(&self, width: usize) -> Vec<RenderLine> {
         let mut lines = Vec::new();
-        let border_color = "\x1b[38;2;100;95;90m";
+        let border_color = "\x1b[38;2;95;90;85m";
         let reset = "\x1b[0m";
         let inner_w = width.saturating_sub(6).min(76);
 
@@ -41,21 +41,21 @@ impl ContextModal {
         let label = |text: &str| format!("{:<16}", crate::i18n::tr(text));
         let tokens = crate::i18n::tr("tokens");
         lines.push((LineKind::System, pad_row(&format!(
-            "\x1b[1;38;2;240;235;225m{}\x1b[0m\x1b[38;2;200;195;185m{:>7} {}\x1b[0m ({})",
+            "\x1b[1;38;2;232;227;218m{}\x1b[0m\x1b[38;2;232;227;218m{:>7} {}\x1b[0m ({})",
             label("Total window:"),
             cap,
             tokens,
             ContextUsage::format_tokens(cap)
         ))));
         lines.push((LineKind::System, pad_row(&format!(
-            "\x1b[1;38;2;240;235;225m{}\x1b[0m\x1b[38;2;225;175;95m{:>7} {}\x1b[0m ({:.1}%)",
+            "\x1b[1;38;2;232;227;218m{}\x1b[0m\x1b[38;2;225;175;95m{:>7} {}\x1b[0m ({:.1}%)",
             label("Total used:"),
             used,
             tokens,
             pct
         ))));
         lines.push((LineKind::System, pad_row(&format!(
-            "\x1b[1;38;2;240;235;225m{}\x1b[0m\x1b[38;2;145;205;140m{:>7} {}\x1b[0m ({:.1}%)",
+            "\x1b[1;38;2;232;227;218m{}\x1b[0m\x1b[38;2;145;205;140m{:>7} {}\x1b[0m ({:.1}%)",
             label("Remaining free:"),
             rem,
             tokens,
@@ -63,7 +63,7 @@ impl ContextModal {
         ))));
 
         lines.push((LineKind::System, pad_row("")));
-        lines.push((LineKind::System, pad_row(&format!("\x1b[1;38;2;180;175;165m{}\x1b[0m", crate::i18n::tr("By component")))));
+        lines.push((LineKind::System, pad_row(&format!("\x1b[1;38;2;232;227;218m{}\x1b[0m", crate::i18n::tr("By component")))));
 
         let items = [
             (crate::i18n::tr("System prompt"), self.usage.system_tokens),
@@ -82,7 +82,7 @@ impl ContextModal {
             let bar_len = ((item_pct / 100.0) * bar_w as f32).round() as usize;
             let bar = "█".repeat(bar_len.min(bar_w));
             lines.push((LineKind::System, pad_row(&format!(
-                "  \x1b[38;2;160;155;145m{:<22}\x1b[0m {:>6} {}  \x1b[38;2;135;130;125m({:>4.1}%)\x1b[0m  \x1b[38;2;175;170;225m{bar}\x1b[0m",
+                "  \x1b[38;2;160;155;145m{:<22}\x1b[0m {:>6} {}  \x1b[38;2;135;130;125m({:>4.1}%)\x1b[0m  \x1b[38;2;160;155;145m{bar}\x1b[0m",
                 label,
                 count,
                 tokens,

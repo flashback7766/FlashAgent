@@ -734,7 +734,7 @@ fn line_span(text: &str, start: usize, end: usize) -> Option<(usize, usize)> {
 fn edit_file(cwd: &Path, path: &str, edits: &[EditChunk]) -> Result<String, ToolError> {
     let planned = plan_edit(cwd, path, edits)?;
     write_planned(&planned)?;
-    Ok(format!("applied {} edit(s) to {path}", planned[0].replacements))
+    Ok(format!("applied {} to {path}", edits_phrase(planned[0].replacements)))
 }
 
 /// A batch is for a handful of related files, not the whole project.
@@ -983,7 +983,7 @@ fn write_planned_with(
     }
     let total: usize = planned.iter().map(|p| p.edits).sum();
     let list = planned.iter().map(|p| format!("{} ({})", p.path, p.edits)).collect::<Vec<_>>().join(", ");
-    Ok(format!("applied {total} edit(s) to {} file(s): {list}", planned.len()))
+    Ok(format!("applied {} to {}: {list}", edits_phrase(total), files_phrase(planned.len())))
 }
 
 /// Directories are suffixed with `/`.
@@ -1199,6 +1199,15 @@ fn grep_file(cwd: &Path, file: &Path, re: &regex::Regex) -> GrepMatches {
         }
     }
     found
+}
+
+
+fn edits_phrase(n: usize) -> String {
+    if n == 1 { "1 edit".to_string() } else { format!("{n} edits") }
+}
+
+fn files_phrase(n: usize) -> String {
+    if n == 1 { "1 file".to_string() } else { format!("{n} files") }
 }
 
 #[cfg(test)]

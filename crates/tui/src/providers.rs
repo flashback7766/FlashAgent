@@ -439,8 +439,8 @@ impl ProvidersView {
 
     pub fn render(&self, width: usize) -> Vec<RenderLine> {
         const GOLD: &str = "\x1b[1;38;2;225;175;95m";
-        const BRIGHT: &str = "\x1b[1;38;2;240;235;225m";
-        const TEXT: &str = "\x1b[38;2;200;195;185m";
+        const BRIGHT: &str = "\x1b[1;38;2;232;227;218m";
+        const TEXT: &str = "\x1b[38;2;232;227;218m";
         const DIM: &str = "\x1b[38;2;135;130;125m";
         const AMBER: &str = "\x1b[38;2;225;175;95m";
         const OFF: &str = "\x1b[0m";
@@ -668,7 +668,12 @@ mod tests {
         let shown = text(&menu.render(100));
         assert!(shown.contains("\u{25cf} Local  (in use)"), "{shown}");
         assert!(shown.contains("\u{25cb} Claude"), "{shown}");
+        // One line per provider; the selected one's detail is the one row under
+        // the list, so the two descriptions are not printed side by side.
         assert!(shown.contains("OpenAI-compatible \u{b7} http://localhost:1234/v1 \u{b7} qwen3-coder"), "{shown}");
+        let mut menu = menu;
+        menu.select_by_value(&"Claude".to_string());
+        let shown = text(&menu.render(100));
         assert!(shown.contains("Anthropic \u{b7} https://api.anthropic.com \u{b7} the loaded model"), "{shown}");
         assert!(shown.contains("(2 providers)"), "the actions are not counted as providers: {shown}");
         assert!(!shown.contains("secret"), "a key is never shown: {shown}");
@@ -745,22 +750,22 @@ mod tests {
         let mut named = model("models/gemini-3-flash", true);
         named.display_name = Some("Gemini 3 Flash".into());
         assert_eq!(model_display_name(&named), Some("Gemini 3 Flash"), "the name the server gave");
-        assert_eq!(model_detail(&named), "Gemini 3 Flash · 8k ctx · tools", "the name comes first, once");
+        assert_eq!(model_detail(&named), "Gemini 3 Flash · 8.2k ctx · tools", "the name comes first, once");
 
         // A name that says nothing new is not repeated.
         let same = DiscoveredModel { display_name: Some("models/gemini-3-flash".into()), ..named.clone() };
         assert_eq!(model_display_name(&same), None, "the id is already on the row");
-        assert_eq!(model_detail(&same), "models/gemini-3-flash · 8k ctx · tools", "the name is not said twice");
+        assert_eq!(model_detail(&same), "models/gemini-3-flash · 8.2k ctx · tools", "the name is not said twice");
 
         // No name at all: the list says what the model can do.
         let plain = model("qwen3-coder", false);
         assert_eq!(model_display_name(&plain), None);
-        assert_eq!(model_detail(&plain), "8k ctx · tools");
+        assert_eq!(model_detail(&plain), "8.2k ctx · tools");
 
         // An empty name is no name.
         let empty = DiscoveredModel { display_name: Some("   ".into()), ..plain.clone() };
         assert_eq!(model_display_name(&empty), None);
-        assert_eq!(model_detail(&empty), "8k ctx · tools");
+        assert_eq!(model_detail(&empty), "8.2k ctx · tools");
     }
 
     #[test]

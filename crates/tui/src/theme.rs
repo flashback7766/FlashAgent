@@ -206,18 +206,18 @@ impl Role {
 }
 
 const TEXT: (u8, u8, u8) = (232, 227, 218);
-const MUTED: (u8, u8, u8) = (140, 135, 130);
+const MUTED: (u8, u8, u8) = (135, 130, 125);
 const BORDER: (u8, u8, u8) = (95, 90, 85);
-const SURFACE: (u8, u8, u8) = (22, 38, 60);
+const SURFACE: (u8, u8, u8) = (38, 36, 33);
 const GOLD: (u8, u8, u8) = (225, 175, 95);
 const BLUE: (u8, u8, u8) = (138, 180, 248);
 const CHROMATIC: [(Role, (u8, u8, u8)); 6] = [
     (Role::Accent, GOLD),
     (Role::Accent, BLUE),
     (Role::Info, (110, 175, 230)),
-    (Role::Success, (135, 220, 145)),
-    (Role::Warning, (240, 210, 115)),
-    (Role::Error, (245, 120, 120)),
+    (Role::Success, (145, 205, 140)),
+    (Role::Warning, (245, 160, 80)),
+    (Role::Error, (230, 110, 95)),
 ];
 
 fn role_override(colors: ThemeColors, ground: Ground, rgb: (u8, u8, u8)) -> Option<(u8, u8, u8)> {
@@ -507,7 +507,7 @@ mod tests {
         // The read card's near-black blue and the near-white body text take the
         // terminal's own background and text colour: black and bright white made
         // a black panel of invisible text on a white screen.
-        let card = recolor_for(ColorTheme::Ansi16, "\x1b[48;2;22;38;60mx");
+        let card = recolor_for(ColorTheme::Ansi16, "\x1b[48;2;38;36;33mx");
         assert_eq!(card, "\x1b[49mx");
         let body = recolor_for(ColorTheme::Ansi16, "\x1b[38;2;232;227;218mx");
         assert_eq!(body, "\x1b[39mx");
@@ -568,15 +568,15 @@ mod tests {
     fn every_canonical_role_becomes_exactly_the_override_not_a_second_transform() {
         let anchors = [
             ((232, 227, 218), (14, 25, 36)),
-            ((140, 135, 130), (47, 58, 69)),
+            ((135, 130, 125), (47, 58, 69)),
             ((95, 90, 85), (80, 91, 102)),
-            ((22, 38, 60), (113, 124, 135)),
+            ((38, 36, 33), (113, 124, 135)),
             ((225, 175, 95), (146, 157, 168)),
             ((138, 180, 248), (146, 157, 168)),
             ((110, 175, 230), (179, 190, 201)),
-            ((135, 220, 145), (212, 223, 234)),
-            ((240, 210, 115), (135, 57, 246)),
-            ((245, 120, 120), (12, 200, 123)),
+            ((145, 205, 140), (212, 223, 234)),
+            ((245, 160, 80), (135, 57, 246)),
+            ((230, 110, 95), (12, 200, 123)),
         ];
         for base in [ColorTheme::Dark, ColorTheme::Midnight, ColorTheme::HighContrast, ColorTheme::Monochrome, ColorTheme::Light] {
             for ground in [Ground::Fore, Ground::Back] {
@@ -594,13 +594,13 @@ mod tests {
         let colors = custom(ColorTheme::Dark).colors;
         for (source, expected) in [
             ((242, 237, 228), (24, 35, 46)),
-            ((160, 155, 150), (67, 78, 89)),
+            ((160, 155, 150), (72, 83, 94)),
             ((100, 95, 90), (85, 96, 107)),
             ((215, 165, 85), (136, 147, 158)),
             ((100, 165, 220), (169, 180, 191)),
-            ((125, 210, 135), (202, 213, 224)),
-            ((230, 200, 105), (125, 47, 236)),
-            ((235, 110, 110), (2, 190, 113)),
+            ((155, 215, 150), (222, 233, 244)),
+            ((255, 170, 90), (145, 67, 255)),
+            ((220, 100, 85), (2, 190, 113)),
         ] {
             assert_eq!(role_override(colors, Ground::Fore, source), Some(expected), "{source:?}");
             let frame = rgb_sgr(Ground::Fore, source);
@@ -659,14 +659,14 @@ mod tests {
                 assert_eq!(recolor_with(theme, &frame), recolor_for(*base, &frame), "{source:?}");
             }
         }
-        assert_eq!(role_override(custom(ColorTheme::Dark).colors, Ground::Back, (32, 48, 70)), Some((123, 134, 145)));
+        assert_eq!(role_override(custom(ColorTheme::Dark).colors, Ground::Back, (38, 36, 33)), Some((113, 124, 135)));
         assert_eq!(role_override(custom(ColorTheme::Dark).colors, Ground::Fore, (30, 26, 22)), None);
     }
 
     #[test]
     fn custom_fg_bg_and_multiple_sgr_preserve_attributes_resets_and_cursor_motion() {
         let theme = custom(ColorTheme::Light);
-        let frame = "\x1b[2J\x1b[H\x1b[1;4;38;2;232;227;218;48;2;22;38;60;7m日本🦀\x1b[0m\x1b[39;49;22m\x1b[12A\x1b[38;2;225;175;95;48;5;48;2m!\x1b[m";
+        let frame = "\x1b[2J\x1b[H\x1b[1;4;38;2;232;227;218;48;2;38;36;33;7m日本🦀\x1b[0m\x1b[39;49;22m\x1b[12A\x1b[38;2;225;175;95;48;5;48;2m!\x1b[m";
         let expected = "\x1b[2J\x1b[H\x1b[1;4;38;2;14;25;36;48;2;113;124;135;7m日本🦀\x1b[0m\x1b[39;49;22m\x1b[12A\x1b[38;2;146;157;168;48;5;48;2m!\x1b[m";
         assert_eq!(recolor_with(theme, frame), expected);
         for frame in ["\x1b[38;5;38;2m", "\x1b[48;5;48;2m", "\x1b[38;5;208;48;5;234;1m"] {
@@ -685,7 +685,7 @@ mod tests {
                 ..ThemeColors::default()
             },
         };
-        let frame = "\x1b[1;38;2;232;227;218;48;2;22;38;60mtext\x1b[0m\x1b[38;2;225;175;95maccent\x1b[0m";
+        let frame = "\x1b[1;38;2;232;227;218;48;2;38;36;33mtext\x1b[0m\x1b[38;2;225;175;95maccent\x1b[0m";
         assert_eq!(recolor_with(theme, frame), "\x1b[1;97;44mtext\x1b[0m\x1b[35maccent\x1b[0m");
         let all_anchors: String = [TEXT, MUTED, BORDER, SURFACE].into_iter()
             .chain(CHROMATIC.into_iter().map(|(_, anchor)| anchor))

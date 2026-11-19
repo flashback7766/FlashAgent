@@ -435,14 +435,14 @@ impl AutocompletePopup {
     pub fn render(&self, width: usize) -> Vec<RenderLine> {
         let mut lines = Vec::new();
         let inner_w = width.saturating_sub(2);
-        let border_color = "\x1b[38;2;100;95;90m";
+        let border_color = "\x1b[38;2;95;90;85m";
         let reset = "\x1b[0m";
 
         let title = " Commands ";
         let top_dashes = inner_w.saturating_sub(title.chars().count() + 1);
         lines.push((
             LineKind::System,
-            format!("{border_color}╭─\x1b[38;2;180;175;165m{title}{border_color}{}╮{reset}", "─".repeat(top_dashes)),
+            format!("{border_color}╭─\x1b[38;2;232;227;218m{title}{border_color}{}╮{reset}", "─".repeat(top_dashes)),
         ));
 
         const MAX_VISIBLE: usize = 5;
@@ -474,9 +474,9 @@ impl AutocompletePopup {
 
             let trigger_w = item.trigger.chars().count().max(18);
             let cmd_styled = if is_sel {
-                format!("\x1b[1;38;2;240;235;225m{:<trigger_w$}\x1b[0m", item.trigger)
+                format!("\x1b[1;38;2;232;227;218m{:<trigger_w$}\x1b[0m", item.trigger)
             } else {
-                format!("\x1b[38;2;180;175;165m{:<trigger_w$}\x1b[0m", item.trigger)
+                format!("\x1b[38;2;232;227;218m{:<trigger_w$}\x1b[0m", item.trigger)
             };
 
             // Pointer, trigger, badge, the spaces between them and a right margin.
@@ -499,7 +499,7 @@ impl AutocompletePopup {
             let pad = " ".repeat(inner_w.saturating_sub(vis_len));
             lines.push((
                 LineKind::System,
-                format!("{border_color}│{reset}{row_raw}{pad}\x1b[38;2;125;121;115m{badge_text}{reset} {border_color}│{reset}"),
+                format!("{border_color}│{reset}{row_raw}{pad}\x1b[38;2;135;130;125m{badge_text}{reset} {border_color}│{reset}"),
             ));
         }
 

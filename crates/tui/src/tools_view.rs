@@ -9,11 +9,11 @@ use crate::tool_views::clip_ellipsis;
 use crate::{visible_width, LineKind, RenderLine};
 
 const RESET: &str = "\x1b[0m";
-const BORDER_GOLD: &str = "\x1b[38;2;225;175;95m";
-const TEXT_BRIGHT: &str = "\x1b[1;38;2;245;240;235m";
-const TEXT_MUTED: &str = "\x1b[38;2;145;150;160m";
-const TEXT_GREEN: &str = "\x1b[38;2;135;220;145m";
-const TEXT_OFF: &str = "\x1b[38;2;130;135;145m";
+const BORDER_GOLD: &str = "\x1b[38;2;95;90;85m";
+const TEXT_BRIGHT: &str = "\x1b[1;38;2;232;227;218m";
+const TEXT_MUTED: &str = "\x1b[38;2;160;155;145m";
+const TEXT_SECONDARY: &str = "\x1b[38;2;160;155;145m";
+const TEXT_OFF: &str = "\x1b[38;2;135;130;125m";
 const TEXT_AMBER: &str = "\x1b[38;2;225;175;95m";
 
 /// The tools a safe session does not have: the shell, the web and the
@@ -189,9 +189,7 @@ impl ToolsView {
         let title = format!(
             " \x1b[1;38;2;225;175;95m{}\x1b[0m \x1b[38;2;160;155;145m{}\x1b[0m ",
             crate::i18n::tr("Tools"),
-            crate::i18n::tr("{on} of {total} on")
-                .replace("{on}", &on.to_string())
-                .replace("{total}", &self.rows.len().to_string())
+            crate::i18n::tr_fill("· {on} on", &[("on", &on.to_string())])
         );
         let dashes = box_w.saturating_sub(visible_width(&title) + 1);
         lines.push((LineKind::System, format!("  {BORDER_GOLD}╭─{title}{BORDER_GOLD}{}╮{RESET}", "─".repeat(dashes))));
@@ -206,18 +204,18 @@ impl ToolsView {
             let is_press = flash == Some(card_line);
             // The same mark the plan steps use: a glyph both Windows console
             // fonts have, or it shows as a box on half the terminals.
-            let mark = if row.on { "√" } else { "·" };
+            let mark = if row.on { "[x]" } else { "[ ]" };
             let (mark_styled, name_styled) = if is_press {
                 (format!("{TEXT_AMBER}{mark}{RESET}"), format!("{TEXT_AMBER}{}{RESET}", row.name))
             } else if row.on {
-                (format!("{TEXT_GREEN}{mark}{RESET}"), format!("{TEXT_BRIGHT}{}{RESET}", row.name))
+                (format!("{TEXT_SECONDARY}{mark}{RESET}"), format!("{TEXT_BRIGHT}{}{RESET}", row.name))
             } else if is_hover {
                 (format!("{TEXT_OFF}{mark}{RESET}"), format!("{TEXT_MUTED}{}{RESET}", row.name))
             } else {
                 (format!("{TEXT_OFF}{mark}{RESET}"), format!("{TEXT_OFF}{}{RESET}", row.name))
             };
             let pointer = if is_sel || is_press {
-                format!("{TEXT_BRIGHT}▸{RESET}")
+                format!("{TEXT_BRIGHT}›{RESET}")
             } else if is_hover {
                 format!("{TEXT_MUTED}·{RESET}")
             } else {
@@ -297,7 +295,7 @@ mod tests {
         let v = ToolsView::new(rows());
         let screen: Vec<String> = v.render(80, None, None).into_iter().map(|(_, l)| crate::strip_ansi(&l)).collect();
         assert!(screen.iter().any(|l| l.contains("read_file")), "{screen:#?}");
-        assert!(screen.iter().any(|l| l.contains("2 of 3 on")), "{screen:#?}");
+        assert!(screen.iter().any(|l| l.contains("· 2 on")), "{screen:#?}");
         assert!(screen.iter().any(|l| l.contains("not offered here")), "{screen:#?}");
     }
 }

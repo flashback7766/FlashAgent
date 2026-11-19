@@ -28,7 +28,7 @@ fn track_style(word: &str, active_style: &mut Option<String>) {
 
 /// Text and escape sequences in order, `(true, seq)` for an escape. A CSI
 /// sequence ends at its final byte, searched for after `ESC [`: `[` is itself
-/// in the final-byte range, and stopping there printed `38;2;220;215;205m`.
+/// in the final-byte range, and stopping there printed `38;2;232;227;218m`.
 pub(crate) fn ansi_pieces(text: &str) -> Vec<(bool, &str)> {
     let mut out = Vec::new();
     let mut plain_from = 0;
@@ -678,7 +678,7 @@ mod tests {
 
     #[test]
     fn a_wrapped_styled_line_does_not_start_its_continuation_with_a_space() {        // The carried-over style made every continuation row start one column right.
-        let styled = format!("\x1b[38;2;200;195;185m{}\x1b[0m", "alpha beta gamma delta epsilon zeta eta theta");
+        let styled = format!("\x1b[38;2;232;227;218m{}\x1b[0m", "alpha beta gamma delta epsilon zeta eta theta");
         let rows = wrap_styled(&styled, 12);
         assert!(rows.len() > 1, "{rows:?}");
         for row in &rows[1..] {
@@ -705,10 +705,10 @@ mod style_span_tests {
 
     #[test]
     fn a_highlight_over_styled_text_keeps_both() {
-        let line = "\x1b[38;2;200;195;185mслово и ещё\x1b[0m";
+        let line = "\x1b[38;2;232;227;218mслово и ещё\x1b[0m";
         let out = style_span(line, 0, 5, "\x1b[7m", "\x1b[27m");
         assert_eq!(strip_ansi(&out), "слово и ещё", "the text is untouched");
-        assert!(out.contains("\x1b[38;2;200;195;185m"), "the line's own colour survives");
+        assert!(out.contains("\x1b[38;2;232;227;218m"), "the line's own colour survives");
         assert!(out.contains("\x1b[7m"), "the highlight rides on top");
     }
 
@@ -719,4 +719,26 @@ mod style_span_tests {
         let out = style_span("hi", 1, 0, "\x1b[7m", "\x1b[27m");
         assert_eq!(strip_ansi(&out), "hi", "an empty span covers nothing");
     }
+}
+
+/// Control characters, ANSI escapes included, are shown, not executed: in
+/// caret notation as `cat -v` writes them, so ESC reads `^[`.
+pub fn shown_controls(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for c in text.chars() {
+        if !c.is_control() || c == '\n' {
+            out.push(c);
+            continue;
+        }
+        let code = c as u32;
+        if code >= 0x80 {
+            out.push_str("M-");
+        }
+        out.push('^');
+        out.push(match code & 0x7f {
+            0x7f => '?',
+            low => char::from_u32(low + 0x40).unwrap_or('?'),
+        });
+    }
+    out
 }

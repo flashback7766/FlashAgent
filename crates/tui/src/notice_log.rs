@@ -10,10 +10,10 @@ use crate::tool_views::clip_ellipsis;
 use crate::{visible_width, LineKind, RenderLine};
 
 const RESET: &str = "\x1b[0m";
-const BORDER_GOLD: &str = "\x1b[38;2;225;175;95m";
-const TEXT_BRIGHT: &str = "\x1b[1;38;2;245;240;235m";
-const TEXT_MUTED: &str = "\x1b[38;2;145;150;160m";
-const TEXT_GREEN: &str = "\x1b[38;2;135;220;145m";
+const BORDER_GOLD: &str = "\x1b[38;2;95;90;85m";
+const TEXT_BRIGHT: &str = "\x1b[1;38;2;232;227;218m";
+const TEXT_MUTED: &str = "\x1b[38;2;160;155;145m";
+const TEXT_GREEN: &str = "\x1b[38;2;145;205;140m";
 const TEXT_AMBER: &str = "\x1b[38;2;235;175;90m";
 
 /// One thing the app said, and when.
@@ -155,10 +155,10 @@ impl NoticeLog {
             format!("  {BORDER_GOLD}│{RESET} {clipped}{pad} {BORDER_GOLD}│{RESET}")
         };
 
+        let counted = format!("· {}", crate::text::plural(self.entries.len(), "notice", "notices"));
         let title = format!(
-            " \x1b[1;38;2;225;175;95m{}\x1b[0m \x1b[38;2;160;155;145m{}\x1b[0m ",
+            " \x1b[1;38;2;225;175;95m{}\x1b[0m \x1b[38;2;160;155;145m{counted}\x1b[0m ",
             crate::i18n::tr("Notices"),
-            crate::i18n::tr_fill("{n} kept", &[("n", &self.entries.len().to_string())])
         );
         let dashes = box_w.saturating_sub(visible_width(&title) + 1);
         lines.push((LineKind::System, format!("  {BORDER_GOLD}╭─{title}{BORDER_GOLD}{}╮{RESET}", "─".repeat(dashes))));
@@ -172,7 +172,7 @@ impl NoticeLog {
             let is_hover = hover.map(|(l, _)| l) == Some(card_line) && !is_sel && flash != Some(card_line);
             let is_press = flash == Some(card_line);
             let pointer = if is_sel || is_press {
-                format!("{TEXT_BRIGHT}▸{RESET}")
+                format!("{TEXT_BRIGHT}›{RESET}")
             } else if is_hover {
                 format!("{TEXT_MUTED}·{RESET}")
             } else {
@@ -243,7 +243,7 @@ mod tests {
         let screen: Vec<String> = v.render(80, None, None).into_iter().map(|(_, l)| crate::strip_ansi(&l)).collect();
         assert!(screen.iter().any(|l| l.contains("Exported to")), "{screen:#?}");
         assert!(screen.iter().any(|l| l.contains("did not answer")), "{screen:#?}");
-        assert!(screen.iter().any(|l| l.contains("2 kept")), "{screen:#?}");
+        assert!(screen.iter().any(|l| l.contains("2 notices")), "{screen:#?}");
     }
 
     #[test]
@@ -258,7 +258,7 @@ mod tests {
         let v = NoticeLog::new(entries());
         let screen: Vec<String> = v.render(80, None, None).into_iter().map(|(_, l)| crate::strip_ansi(&l)).collect();
         assert!(screen[0].contains(crate::i18n::tr("Notices")), "{screen:#?}");
-        assert!(screen[0].contains(&crate::i18n::tr_fill("{n} kept", &[("n", "2")])), "{screen:#?}");
+        assert!(screen[0].contains("· 2 notices"), "{screen:#?}");
     }
 }
 

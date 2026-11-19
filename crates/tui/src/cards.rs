@@ -123,33 +123,16 @@ pub(crate) fn card_rows(value: &str, width: usize, max_rows: usize) -> Vec<Strin
     rows
 }
 
-/// Control characters, ANSI escapes included, are shown, not executed: in
-/// caret notation as `cat -v` writes them, so ESC reads `^[`.
+/// Control characters, ANSI escapes included, are shown, not executed.
 pub(crate) fn card_safe(text: &str) -> String {
-    let mut out = String::with_capacity(text.len());
-    for c in text.chars() {
-        if !c.is_control() || c == '\n' {
-            out.push(c);
-            continue;
-        }
-        let code = c as u32;
-        if code >= 0x80 {
-            out.push_str("M-");
-        }
-        out.push('^');
-        out.push(match code & 0x7f {
-            0x7f => '?',
-            low => char::from_u32(low + 0x40).unwrap_or('?'),
-        });
-    }
-    out
+    flashagent_tui::text::shown_controls(text)
 }
 
 /// From facts the loop reported, so a run stopped by a budget cannot read as
 /// finished whatever the model's summary claims.
 pub(crate) fn push_goal_report(chat: &mut ChatView, ledger: &GoalLedger, reason: DoneReason) {
     let (w, _) = crossterm::terminal::size().unwrap_or((100, 24));
-    let card_w = (w as usize).saturating_sub(4).min(110);
+    let card_w = flashagent_tui::content_width(w as usize);
     let inner_w = card_w.saturating_sub(2);
     let border = if matches!(reason, DoneReason::Completed) {
         "\x1b[38;2;145;205;140m"
@@ -165,16 +148,39 @@ pub(crate) fn push_goal_report(chat: &mut ChatView, ledger: &GoalLedger, reason:
     let dashes = inner_w.saturating_sub(flashagent_tui::visible_width(&title) + 1);
     chat.push_line(
         LineKind::System,
-        format!("{border}╭─\x1b[1;38;2;245;240;232m{title}{border}{}╮{reset}", "─".repeat(dashes)),
+        format!("{border}╭─\x1b[1;38;2;232;227;218m{title}{border}{}╮{reset}", "─".repeat(dashes)),
     );
+    // The report is read at a glance: a file list of ten and a long note made
+    // a card taller than the screen, and the answer before it went off the top.
+    const REPORT_ROWS: usize = 11;
+    const FILE_ROWS: usize = 3;
+    let mut rows: Vec<String> = Vec::new();
+    let mut files = 0usize;
+    let mut hidden_files = 0usize;
     for line in ledger.report(reason) {
-        for row in wrap_plain(&card_safe(&line), inner_w.saturating_sub(2)) {
-            let pad = inner_w.saturating_sub(flashagent_tui::visible_width(&row) + 1);
-            chat.push_line(
-                LineKind::System,
-                format!("{border}│{reset} \x1b[38;2;200;196;188m{row}\x1b[0m{}{border}│{reset}", " ".repeat(pad)),
-            );
+        if line.starts_with("  + ") || line.starts_with("  ~ ") {
+            files += 1;
+            if files > FILE_ROWS {
+                hidden_files += 1;
+                continue;
+            }
         }
+        rows.extend(wrap_plain(&card_safe(&line), inner_w.saturating_sub(2)));
+    }
+    if hidden_files > 0 {
+        rows.push(format!("  \u{2026} {hidden_files} more files"));
+    }
+    if rows.len() > REPORT_ROWS {
+        let hidden = rows.len() - REPORT_ROWS + 1;
+        rows.truncate(REPORT_ROWS - 1);
+        rows.push(format!("  \u{2026} {hidden} more rows"));
+    }
+    for row in rows {
+        let pad = inner_w.saturating_sub(flashagent_tui::visible_width(&row) + 1);
+        chat.push_line(
+            LineKind::System,
+            format!("{border}│{reset} \x1b[38;2;232;227;218m{row}\x1b[0m{}{border}│{reset}", " ".repeat(pad)),
+        );
     }
     chat.push_line(LineKind::System, format!("{border}╰{}╯{reset}", "─".repeat(inner_w)));
 }

@@ -32,9 +32,10 @@ impl App {
         }
 
         // Yes closes the app; the uninstaller then runs in the restored terminal.
+        // A destructive answer needs the letter itself: Enter keeps FlashAgent.
         if self.uninstall_confirm {
             self.uninstall_confirm = false;
-            if is_yes(code) {
+            if matches!(code, KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Char('\u{043d}') | KeyCode::Char('\u{041d}')) {
                 UNINSTALL_AFTER_EXIT.store(true, Ordering::SeqCst);
                 return Flow::Quit;
             }

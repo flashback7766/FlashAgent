@@ -828,12 +828,12 @@ impl SetupWizard {
 
     fn render_page(&self, width: usize, preset_window: usize, model_page: usize) -> Vec<String> {
         let mut lines = Vec::new();
-        let border_color = "\x1b[38;2;100;95;90m";
+        let border_color = "\x1b[38;2;95;90;85m";
         let reset = "\x1b[0m";
         let inner_w = width.saturating_sub(6).min(110);
 
         let what = if self.provider_only { crate::i18n::tr("Add a provider") } else { crate::i18n::tr("FlashAgent setup") };
-        let title = format!(" {what} \u{b7} {}", crate::i18n::tr("step {} of {}").replace("{}", &self.step_number(self.step).to_string()).replace("{}", &self.total_steps().to_string()));
+        let title = format!(" {what} \u{b7} {}", crate::i18n::tr("step {n} of {total}").replace("{n}", &self.step_number(self.step).to_string()).replace("{total}", &self.total_steps().to_string()));
         let dash_count = inner_w.saturating_sub(title.chars().count() + 1);
         lines.push(format!("  {border_color}╭─\x1b[1;38;2;225;175;95m{title}{border_color}{}╮{reset}", "─".repeat(dash_count)));
 
@@ -849,7 +849,7 @@ impl SetupWizard {
             let pad = " ".repeat(max_w.saturating_sub(clipped_vis));
             format!("  {border_color}│{reset} {clipped}{pad} {border_color}│{reset}")
         };
-        let heading = |step: usize, text: &str| format!("\x1b[1;38;2;240;235;225mStep {}: {text}\x1b[0m", self.step_number(step));
+        let heading = |step: usize, text: &str| format!("\x1b[1;38;2;232;227;218mStep {}: {text}\x1b[0m", self.step_number(step));
         // A sentence goes on to the next row rather than lose its end.
         let prose = |lines: &mut Vec<String>, indent: &str, color: &str, text: &str| {
             for row in crate::wrap_styled(text, inner_w.saturating_sub(2 + indent.len())) {
@@ -876,7 +876,7 @@ impl SetupWizard {
                 let name_w = if inner_w >= 60 { longest } else { 12 };
                 for (i, p) in presets.iter().enumerate().take(end).skip(start) {
                     let is_sel = i == self.preset_idx;
-                    let ptr = if is_sel { "\x1b[1;38;2;225;175;95m▸\x1b[0m" } else { " " };
+                    let ptr = if is_sel { "\x1b[1;38;2;225;175;95m›\x1b[0m" } else { " " };
                     let key = Self::row_key(i).map_or_else(|| "  ".to_string(), |k| format!("{k}."));
                     let is_saved = self.is_saved(&ProviderProfile::from_preset(p));
                     let saved = if is_saved { "  \x1b[38;2;135;130;125msaved\x1b[0m" } else { "" };
@@ -885,7 +885,7 @@ impl SetupWizard {
                         .max(12);
                     let url = crate::truncate_middle(p.url, url_room);
                     let row = if is_sel {
-                        format!("{ptr} \x1b[1;38;2;240;235;225m{key} {:<name_w$}\x1b[0m \x1b[38;2;225;175;95m{url}\x1b[0m{saved}", p.name)
+                        format!("{ptr} \x1b[1;38;2;232;227;218m{key} {:<name_w$}\x1b[0m \x1b[38;2;225;175;95m{url}\x1b[0m{saved}", p.name)
                     } else {
                         format!("{ptr} \x1b[38;2;160;155;145m{key} {:<name_w$}\x1b[0m \x1b[38;2;135;130;125m{url}\x1b[0m{saved}", p.name)
                     };
@@ -897,12 +897,12 @@ impl SetupWizard {
 
                 // Custom backend, with an editable field and a dim placeholder.
                 let is_custom_sel = self.is_custom();
-                let ptr = if is_custom_sel { "\x1b[1;38;2;225;175;95m▸\x1b[0m" } else { " " };
+                let ptr = if is_custom_sel { "\x1b[1;38;2;225;175;95m›\x1b[0m" } else { " " };
                 let placeholder_color = "\x1b[38;2;68;65;62m";
                 let placeholder_text = crate::i18n::tr("type its URL");
                 let custom_row = if self.custom_url.is_empty() {
                     if is_custom_sel {
-                        format!("{ptr} \x1b[1;38;2;240;235;225mc. {:<name_w$}\x1b[0m \x1b[7m \x1b[27m{placeholder_color}{placeholder_text}\x1b[0m", crate::i18n::tr("Custom"))
+                        format!("{ptr} \x1b[1;38;2;232;227;218mc. {:<name_w$}\x1b[0m \x1b[7m \x1b[27m{placeholder_color}{placeholder_text}\x1b[0m", crate::i18n::tr("Custom"))
                     } else {
                         format!("{ptr} \x1b[38;2;160;155;145mc. {:<name_w$}\x1b[0m {placeholder_color}{placeholder_text}\x1b[0m", crate::i18n::tr("Custom"))
                     }
@@ -916,7 +916,7 @@ impl SetupWizard {
                     } else {
                         (&self.custom_url[..], "\x1b[7m \x1b[27m".to_string())
                     };
-                    format!("{ptr} \x1b[1;38;2;240;235;225mc. {:<name_w$}\x1b[0m \x1b[1;38;2;225;175;95m{before}{at_and_after}\x1b[0m", crate::i18n::tr("Custom"))
+                    format!("{ptr} \x1b[1;38;2;232;227;218mc. {:<name_w$}\x1b[0m \x1b[1;38;2;225;175;95m{before}{at_and_after}\x1b[0m", crate::i18n::tr("Custom"))
                 } else {
                     format!("{ptr} \x1b[38;2;160;155;145mc. {:<name_w$}\x1b[0m \x1b[38;2;135;130;125m{}\x1b[0m", crate::i18n::tr("Custom"), self.custom_url)
                 };
@@ -951,7 +951,7 @@ impl SetupWizard {
                     lines.push(pad_row(&format!("  \x1b[38;2;160;155;145m{}\x1b[0m", crate::i18n::tr("How to get your API key:"))));
                     if self.profile.url.contains("openrouter.ai") {
                         lines.push(pad_row(&format!("    {} \x1b[1;38;2;145;205;140mhttps://openrouter.ai/keys\x1b[0m {}", crate::i18n::tr("1. Open"), crate::i18n::tr("in your browser"))));
-                        lines.push(pad_row(&format!("    {} ({}: \x1b[38;2;175;170;225msk-or-v1-...\x1b[0m)", crate::i18n::tr("2. Create a key and copy it"), crate::i18n::tr("format"))));
+                        lines.push(pad_row(&format!("    {} ({}: \x1b[38;2;160;155;145msk-or-v1-...\x1b[0m)", crate::i18n::tr("2. Create a key and copy it"), crate::i18n::tr("format"))));
                         lines.push(pad_row(crate::i18n::tr("3. Paste or type your key below:")));
                     } else {
                         lines.push(pad_row(crate::i18n::tr("1. Open your provider account / API dashboard")));
@@ -989,7 +989,7 @@ impl SetupWizard {
                     let count = crate::text::plural(self.api_key_input.chars().count(), "character", "characters");
                     format!("\x1b[1;38;2;225;175;95m{masked}\x1b[7m \x1b[27m\x1b[0m \x1b[38;2;135;130;125m({count})\x1b[0m")
                 };
-                lines.push(pad_row(&format!("  \x1b[1;38;2;240;235;225m{}\x1b[0m {key_display}", crate::i18n::tr("API Key:"))));
+                lines.push(pad_row(&format!("  \x1b[1;38;2;232;227;218m{}\x1b[0m {key_display}", crate::i18n::tr("API Key:"))));
 
                 if let Some(ref st) = self.connection_status {
                     lines.push(pad_row(""));
@@ -1003,14 +1003,14 @@ impl SetupWizard {
 
                 lines.push(pad_row(&heading(2, crate::i18n::tr("Choose the model"))));
                 let count_info = if self.is_lm_studio() && self.discovered_models.iter().any(|m| m.is_loaded) {
-                    format!("({})", crate::i18n::tr("({total_models} loaded in LM Studio)").replace("{total_models}", &total_models.to_string()))
+                    crate::i18n::tr("({total_models} loaded in LM Studio)").replace("{total_models}", &total_models.to_string())
                 } else if self.model_search.is_empty() {
-                    format!("({})", crate::i18n::tr("({total_models} on the server)").replace("{total_models}", &total_models.to_string()))
+                    crate::i18n::tr("({total_models} on the server)").replace("{total_models}", &total_models.to_string())
                 } else {
                     format!("({total_matches}/{total_models} · filter: \"{}\")", self.model_search)
                 };
                 lines.push(pad_row(&format!(
-                    "\x1b[38;2;160;155;145m{} \x1b[38;2;175;170;225m{count_info}\x1b[0m:\x1b[0m",
+                    "\x1b[38;2;160;155;145m{} \x1b[38;2;160;155;145m{count_info}\x1b[0m:\x1b[0m",
                     crate::i18n::tr("Choose model")
                 )));
                 lines.push(pad_row(""));
@@ -1039,7 +1039,7 @@ impl SetupWizard {
                     }
                     if !self.model_search.trim().is_empty() {
                         lines.push(pad_row(""));
-                        lines.push(pad_row(&format!("  \x1b[38;2;160;155;145m{}\x1b[0m \x1b[1;38;2;240;235;225m{}\x1b[0m", crate::i18n::tr("Model id:"), self.model_search.trim())));
+                        lines.push(pad_row(&format!("  \x1b[38;2;160;155;145m{}\x1b[0m \x1b[1;38;2;232;227;218m{}\x1b[0m", crate::i18n::tr("Model id:"), self.model_search.trim())));
                     }
                 } else if filtered.is_empty() {
                     lines.push(pad_row(&format!("  \x1b[38;2;135;130;125m{}\x1b[0m", crate::i18n::tr("(No models matching search filter)"))));
@@ -1059,9 +1059,9 @@ impl SetupWizard {
                         let max_m_len = inner_w.saturating_sub(6);
                         let m = crate::truncate_middle(m_raw, max_m_len);
                         let is_sel = orig_idx == self.model_idx;
-                        let ptr = if is_sel { "\x1b[1;38;2;225;175;95m▸\x1b[0m" } else { " " };
+                        let ptr = if is_sel { "\x1b[1;38;2;225;175;95m›\x1b[0m" } else { " " };
                         let styled = if is_sel {
-                            format!("{ptr} \x1b[1;38;2;240;235;225m{m}\x1b[0m")
+                            format!("{ptr} \x1b[1;38;2;232;227;218m{m}\x1b[0m")
                         } else {
                             format!("{ptr} \x1b[38;2;160;155;145m{m}\x1b[0m")
                         };
@@ -1099,9 +1099,9 @@ impl SetupWizard {
                 ];
                 for (m, label, desc) in modes {
                     let is_sel = self.config.permission_mode == m;
-                    let ptr = if is_sel { "\x1b[1;38;2;225;175;95m▸\x1b[0m" } else { " " };
+                    let ptr = if is_sel { "\x1b[1;38;2;225;175;95m›\x1b[0m" } else { " " };
                     let styled = if is_sel {
-                        format!("{ptr} \x1b[1;38;2;240;235;225m{:<16}\x1b[0m \x1b[38;2;225;175;95m{desc}\x1b[0m", label)
+                        format!("{ptr} \x1b[1;38;2;232;227;218m{:<16}\x1b[0m \x1b[38;2;225;175;95m{desc}\x1b[0m", label)
                     } else {
                         format!("{ptr} \x1b[38;2;160;155;145m{:<16}\x1b[0m \x1b[38;2;135;130;125m{desc}\x1b[0m", label)
                     };
@@ -1115,7 +1115,7 @@ impl SetupWizard {
 
                 let preset_val = format!("[ {} ]", self.sampling.preset.label());
                 lines.push(pad_row(&format!(
-                    "\x1b[1;38;2;225;175;95m\u{25b8}\x1b[0m \x1b[1;38;2;240;235;225m{:<18}\x1b[0m \x1b[1;38;2;225;175;95m{:<22}\x1b[0m",
+                    "\x1b[1;38;2;225;175;95m\u{25b8}\x1b[0m \x1b[1;38;2;232;227;218m{:<18}\x1b[0m \x1b[1;38;2;225;175;95m{:<22}\x1b[0m",
                     crate::i18n::tr("Preset"),
                     preset_val
                 )));
@@ -1352,7 +1352,7 @@ mod tests {
             let text = crate::strip_ansi(&page.join("\n"));
             assert!(text.contains("Esc quit") || text.contains("Esc"), "{w}x{h}: the hints fell off:\n{text}");
             assert!(page.last().unwrap().contains('╰'), "{w}x{h}: no bottom border:\n{text}");
-            assert!(text.lines().any(|l| l.contains('▸') && l.contains(&selected[..selected.len().min(6)])), "{w}x{h}: the selection is off screen:\n{text}");
+            assert!(text.lines().any(|l| l.contains('›') && l.contains(&selected[..selected.len().min(6)])), "{w}x{h}: the selection is off screen:\n{text}");
         }
         // With room, nothing changes.
         assert_eq!(wizard.render_in(100, 200), wizard.render(100));

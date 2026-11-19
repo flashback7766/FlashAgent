@@ -8,10 +8,10 @@ use crate::{visible_width, LineKind, RenderLine};
 
 const RESET: &str = "\x1b[0m";
 const BORDER_GOLD: &str = "\x1b[38;2;225;175;95m";
-const TEXT_BRIGHT: &str = "\x1b[1;38;2;245;240;235m";
-const TEXT_MUTED: &str = "\x1b[38;2;145;150;160m";
-const TEXT_GREEN: &str = "\x1b[38;2;135;220;145m";
-const TEXT_YELLOW: &str = "\x1b[38;2;240;210;115m";
+const TEXT_BRIGHT: &str = "\x1b[1;38;2;232;227;218m";
+const TEXT_MUTED: &str = "\x1b[38;2;160;155;145m";
+const TEXT_GREEN: &str = "\x1b[38;2;145;205;140m";
+const TEXT_YELLOW: &str = "\x1b[38;2;245;160;80m";
 const TEXT_CYAN: &str = "\x1b[38;2;110;175;230m";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -340,9 +340,9 @@ impl McpModal {
                 ];
                 for (idx, (action, desc)) in actions.iter().enumerate() {
                     let is_sel = idx == self.selected_index;
-                    let ptr = if is_sel { "\x1b[1;38;2;225;175;95m▸\x1b[0m" } else { " " };
+                    let ptr = if is_sel { "\x1b[1;38;2;225;175;95m›\x1b[0m" } else { " " };
                     let row = if is_sel {
-                        format!("{ptr} \x1b[1;38;2;240;235;225m{:<32}\x1b[0m \x1b[1;38;2;225;175;95m{desc}\x1b[0m", action)
+                        format!("{ptr} \x1b[1;38;2;232;227;218m{:<32}\x1b[0m \x1b[1;38;2;225;175;95m{desc}\x1b[0m", action)
                     } else {
                         format!("{ptr} \x1b[38;2;160;155;145m{:<32}\x1b[0m \x1b[38;2;135;130;125m{desc}\x1b[0m", action)
                     };
@@ -357,17 +357,17 @@ impl McpModal {
                 } else {
                     for (idx, s) in self.servers.iter().enumerate() {
                         let is_sel = idx == self.selected_index;
-                        let ptr = if is_sel { "\x1b[1;38;2;225;175;95m▸\x1b[0m" } else { " " };
+                        let ptr = if is_sel { "\x1b[1;38;2;225;175;95m›\x1b[0m" } else { " " };
                         let name = pad_cells(&crate::truncate_middle(&s.name, 18), 18);
                         let st_badge = match &s.state {
-                            ServerConnectionState::Active => "\x1b[38;2;135;220;145m● active\x1b[0m",
+                            ServerConnectionState::Active => "\x1b[38;2;145;205;140m● active\x1b[0m",
                             ServerConnectionState::Disabled => "\x1b[38;2;135;130;125m○ disabled\x1b[0m",
                             ServerConnectionState::Stopped => "\x1b[38;2;225;175;95m○ stopped\x1b[0m",
-                            ServerConnectionState::Error(_) => "\x1b[38;2;245;120;120m× error\x1b[0m",
+                            ServerConnectionState::Error(_) => "\x1b[38;2;230;110;95m× error\x1b[0m",
                         };
                         let tools = crate::text::plural(s.tool_count, "tool", "tools");
                         let row = if is_sel {
-                            format!("{ptr} \x1b[1;38;2;240;235;225m{name}\x1b[0m {st_badge}  \x1b[1;38;2;225;175;95m{tools}\x1b[0m")
+                            format!("{ptr} \x1b[1;38;2;232;227;218m{name}\x1b[0m {st_badge}  \x1b[1;38;2;225;175;95m{tools}\x1b[0m")
                         } else {
                             format!("{ptr} \x1b[38;2;160;155;145m{name}\x1b[0m {st_badge}  \x1b[38;2;135;130;125m{tools}\x1b[0m")
                         };
@@ -380,11 +380,11 @@ impl McpModal {
                         lines.push((LineKind::System, pad_row(&format!("{TEXT_MUTED}{}{RESET}", crate::i18n::tr("Allowed in this folder:")))));
                         for (idx, t) in self.trusted.iter().enumerate() {
                             let is_sel = self.servers.len() + idx == self.selected_index;
-                            let ptr = if is_sel { "\x1b[1;38;2;225;175;95m▸\x1b[0m" } else { " " };
+                            let ptr = if is_sel { "\x1b[1;38;2;225;175;95m›\x1b[0m" } else { " " };
                             let name = pad_cells(&crate::truncate_middle(&t.name, 18), 18);
                             let command = crate::truncate_middle(&t.command, inner_text_w.saturating_sub(22));
                             let row = if is_sel {
-                                format!("{ptr} \x1b[1;38;2;240;235;225m{name}\x1b[0m \x1b[38;2;135;130;125m{command}\x1b[0m")
+                                format!("{ptr} \x1b[1;38;2;232;227;218m{name}\x1b[0m \x1b[38;2;135;130;125m{command}\x1b[0m")
                             } else {
                                 format!("{ptr} \x1b[38;2;160;155;145m{name}\x1b[0m \x1b[38;2;135;130;125m{command}\x1b[0m")
                             };
@@ -397,13 +397,13 @@ impl McpModal {
                 let items = flashagent_tools::mcp::get_marketplace();
                 for (idx, item) in items.iter().enumerate() {
                     let is_sel = idx == self.selected_index;
-                    let ptr = if is_sel { "\x1b[1;38;2;225;175;95m▸\x1b[0m" } else { " " };
+                    let ptr = if is_sel { "\x1b[1;38;2;225;175;95m›\x1b[0m" } else { " " };
                     // The publisher is what tells two extensions with the same
                     // name apart, so it is shown with the name.
                     let title = crate::truncate_middle(&item.display_line(), inner_text_w.saturating_sub(16));
                     let desc = crate::truncate_middle(item.description, inner_text_w.saturating_sub(16));
                     let head = if is_sel {
-                        format!("{ptr} \x1b[1;38;2;240;235;225m{:<14}\x1b[0m \x1b[1;38;2;225;175;95m{title}\x1b[0m", item.id)
+                        format!("{ptr} \x1b[1;38;2;232;227;218m{:<14}\x1b[0m \x1b[1;38;2;225;175;95m{title}\x1b[0m", item.id)
                     } else {
                         format!("{ptr} \x1b[38;2;110;175;230m{:<14}\x1b[0m \x1b[38;2;160;155;145m{title}\x1b[0m", item.id)
                     };

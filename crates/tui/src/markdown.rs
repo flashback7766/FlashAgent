@@ -152,15 +152,15 @@ pub fn render_markdown_text(text: &str, width: usize) -> Vec<String> {
                 code_lang = lang.to_string();
                 carry = crate::highlight::Carry::default();
                 let title = if lang.is_empty() { "code".to_string() } else { lang.to_string() };
-                let border_color = "\x1b[38;2;75;99;130m";
+                let border_color = "\x1b[38;2;95;90;85m";
                 let reset = "\x1b[0m";
                 // A narrow window cannot fit the longest language tag: the border
                 // was wider than the terminal and its corner was cut off.
                 let title = clip_to_width(&title, width.saturating_sub(9));
                 let dash_count = width.saturating_sub(visible_width(&title) + 5).max(4);
-                out.push(format!("{border_color}╭─ {reset}\x1b[38;2;194;231;255m{title}\x1b[0m {border_color}{}╮{reset}", "─".repeat(dash_count)));
+                out.push(format!("{border_color}╭─ {reset}\x1b[38;2;160;155;145m{title}\x1b[0m {border_color}{}╮{reset}", "─".repeat(dash_count)));
             } else {
-                let border_color = "\x1b[38;2;75;99;130m";
+                let border_color = "\x1b[38;2;95;90;85m";
                 let reset = "\x1b[0m";
                 let dash_count = width.saturating_sub(2).max(4);
                 out.push(format!("{border_color}╰{}╯{reset}", "─".repeat(dash_count)));
@@ -170,7 +170,7 @@ pub fn render_markdown_text(text: &str, width: usize) -> Vec<String> {
         }
 
         if in_code_block {
-            let border_color = "\x1b[38;2;75;99;130m";
+            let border_color = "\x1b[38;2;95;90;85m";
             let reset = "\x1b[0m";
             let inner_w = width.saturating_sub(2);
             let inner_content_w = inner_w.saturating_sub(1);
@@ -262,7 +262,7 @@ pub fn render_markdown_text(text: &str, width: usize) -> Vec<String> {
                     }
                 }
 
-                let border_color = "\x1b[38;2;75;99;130m";
+                let border_color = "\x1b[38;2;95;90;85m";
                 let reset = "\x1b[0m";
 
                 if !out.is_empty() && !out.last().map(|s| s.is_empty()).unwrap_or(true) {
@@ -281,7 +281,7 @@ pub fn render_markdown_text(text: &str, width: usize) -> Vec<String> {
                 top_border.push_str(reset);
                 out.push(top_border);
 
-                out.extend(table_row_lines(&header_row, &col_widths, "\x1b[1;38;2;240;235;225m", border_color));
+                out.extend(table_row_lines(&header_row, &col_widths, "\x1b[1;38;2;232;227;218m", border_color));
 
                 let mut mid_border = format!("{border_color}├");
                 for (c, &w) in col_widths.iter().enumerate() {
@@ -323,7 +323,7 @@ pub fn render_markdown_text(text: &str, width: usize) -> Vec<String> {
                 }
                 let (colour, mark) = match hashes {
                     1 => ("\x1b[1;38;2;255;255;255m", '♦'),
-                    2 => ("\x1b[1;38;2;194;231;255m", '◊'),
+                    2 => ("\x1b[1;38;2;160;155;145m", '◊'),
                     3 => ("\x1b[1;38;2;225;230;240m", '▸'),
                     _ => ("\x1b[38;2;180;185;200m", '▪'),
                 };
@@ -437,7 +437,7 @@ pub fn render_markdown_text(text: &str, width: usize) -> Vec<String> {
     // A fence the answer never closed: a box left open runs to the bottom of
     // the transcript, so it is closed here.
     if in_code_block {
-        let border_color = "\x1b[38;2;75;99;130m";
+        let border_color = "\x1b[38;2;95;90;85m";
         let reset = "\x1b[0m";
         out.push(format!("{border_color}╰{}╯{reset}", "─".repeat(width.saturating_sub(2).max(4))));
     }

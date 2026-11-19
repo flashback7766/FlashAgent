@@ -185,11 +185,11 @@ pub struct WhatsNew {
 }
 
 const DIM: &str = "\x1b[38;2;135;130;125m";
-const TEXT: &str = "\x1b[38;2;200;195;185m";
-const BRIGHT: &str = "\x1b[1;38;2;240;235;225m";
+const TEXT: &str = "\x1b[38;2;232;227;218m";
+const BRIGHT: &str = "\x1b[1;38;2;232;227;218m";
 const ACCENT: &str = "\x1b[1;38;2;225;175;95m";
-const CODE: &str = "\x1b[38;2;175;170;225m";
-const BORDER: &str = "\x1b[38;2;100;95;90m";
+const CODE: &str = "\x1b[38;2;160;155;145m";
+const BORDER: &str = "\x1b[38;2;95;90;85m";
 const RESET: &str = "\x1b[0m";
 
 /// Colours `code` spans.

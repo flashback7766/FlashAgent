@@ -519,7 +519,7 @@ fn install_crash_hook(reports_enabled: bool) {
         );
         let _ = crossterm::terminal::disable_raw_mode();
         eprintln!(
-            "\x1b[1;38;2;245;120;120m{}\x1b[0m",
+            "\x1b[1;38;2;230;110;95m{}\x1b[0m",
             flashagent_tui::i18n::tr("FlashAgent encountered an unexpected crash.")
         );
         if reports_enabled {

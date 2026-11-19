@@ -357,6 +357,14 @@ pub struct ToolActionZone {
 /// and the cut answers a click with the whole block.
 pub const BLOCK_PREVIEW_ROWS: usize = 20;
 
+/// The one measure of a conversation block: wide enough for code, never so
+/// wide that prose runs across a 200-column terminal. The welcome card, tool
+/// cards, thoughts, the goal card and the report all use it, so their right
+/// edges agree.
+pub fn content_width(cols: usize) -> usize {
+    cols.min(108)
+}
+
 #[derive(Default)]
 pub struct ChatView {
     lines: Vec<ChatLine>,
@@ -370,6 +378,9 @@ pub struct ChatView {
     open_tool: Option<usize>,
     /// Lines in the welcome card.
     card_len: usize,
+    /// The card was taken away by the first prompt or by a goal: no refresh
+    /// of the server state may bring it back into the middle of a conversation.
+    welcome_dismissed: bool,
     /// The card's own buttons: (card row, from column, to column, what a click
     /// there does). Columns count visible cells of the row as painted.
     welcome_zones: Vec<(usize, usize, usize, crate::welcome::WelcomeButton)>,
@@ -390,8 +401,8 @@ pub struct ChatView {
 /// closes. The label is dimmer than the body so the summary stays the thing
 /// the eye lands on.
 fn compaction_rule(label: &str, width: usize) -> String {
-    const RULE: &str = "\x1b[38;2;82;80;76m";
-    const LABEL: &str = "\x1b[38;2;160;155;148m";
+    const RULE: &str = "\x1b[38;2;95;90;85m";
+    const LABEL: &str = "\x1b[38;2;160;155;145m";
     let width = width.max(20);
     let text = format!(" {label} ");
     let label_width = visible_width(&text);
@@ -408,10 +419,10 @@ fn compaction_rule(label: &str, width: usize) -> String {
 /// of the chat. Heading levels stay distinguishable by weight.
 fn restyle_compaction_heading(row: &str) -> String {
     for (mark, colour) in [
-        ("\x1b[1;38;2;255;255;255m♦ ", "\x1b[1;38;2;240;235;225m"),
-        ("\x1b[1;38;2;194;231;255m◊ ", "\x1b[1;38;2;235;230;220m"),
+        ("\x1b[1;38;2;255;255;255m♦ ", "\x1b[1;38;2;232;227;218m"),
+        ("\x1b[1;38;2;160;155;145m◊ ", "\x1b[1;38;2;232;227;218m"),
         ("\x1b[1;38;2;225;230;240m▸ ", "\x1b[1;38;2;205;200;190m"),
-        ("\x1b[38;2;180;185;200m▪ ", "\x1b[38;2;190;185;175m"),
+        ("\x1b[38;2;180;185;200m▪ ", "\x1b[38;2;232;227;218m"),
     ] {
         if let Some(rest) = row.strip_prefix(mark) {
             return format!("{colour}{rest}");
@@ -453,7 +464,7 @@ fn render_compaction_card(card: &CompactionCard, width: usize, now_ms: u64) -> V
             }
         }
         CompactionState::Failed => {
-            let body = format!("  \x1b[38;2;230;145;135m{}\x1b[0m", card.summary);
+            let body = format!("  \x1b[38;2;230;110;95m{}\x1b[0m", card.summary);
             for row in wrap(&body, width.saturating_sub(2)) {
                 out.push((LineKind::Compaction, row));
             }
@@ -626,6 +637,7 @@ impl ChatView {
         self.reasoning_start = None;
         self.open_tool = None;
         self.card_len = 0;
+        self.welcome_dismissed = false;
         self.welcome_zones.clear();
         self.needs_reprint = false;
         self.context_baseline_line = 0;
@@ -774,9 +786,30 @@ impl ChatView {
         }
     }
 
+    /// Takes the welcome card away. The first prompt does this itself; a
+    /// `/goal` run starts a conversation without a user message, so it asks.
+    pub fn dismiss_welcome(&mut self) {
+        self.welcome_dismissed = true;
+        if self.card_len == 0 {
+            return;
+        }
+        let gone = self.card_len.min(self.lines.len());
+        self.lines.drain(..gone);
+        for idx in [&mut self.streaming, &mut self.streaming_reasoning, &mut self.open_tool].into_iter().flatten() {
+            *idx = idx.saturating_sub(gone);
+            if *idx >= self.lines.len() {
+                *idx = 0;
+            }
+        }
+        self.card_len = 0;
+        self.welcome_zones.clear();
+        *self.settled_cache.lock() = SettledRenderCache::default();
+        self.needs_reprint = true;
+    }
+
     /// Keeps any notices after it.
     pub fn update_welcome_card(&mut self, new_card: crate::welcome::WelcomeRender) {
-        if self.has_user_message() {
+        if self.welcome_dismissed || self.has_user_message() {
             return;
         }
         self.replace_welcome_card(new_card);
@@ -786,6 +819,9 @@ impl ChatView {
     /// model, the provider or the level changed, and the card says what runs
     /// now instead of what ran when the session started.
     pub fn update_welcome_card_state(&mut self, new_card: crate::welcome::WelcomeRender) {
+        if self.welcome_dismissed || self.has_user_message() {
+            return;
+        }
         self.replace_welcome_card(new_card);
     }
 
@@ -1061,6 +1097,20 @@ impl ChatView {
     /// Stored unwrapped; [`Self::render`] wraps.
     pub fn push_user(&mut self, text: &str) {
         self.streaming = None;
+        self.streaming_reasoning = None;
+        self.open_tool = None;
+        // The welcome card has done its job when the first prompt arrives: it
+        // describes the state before the conversation, and left above the
+        // answer it was a half-clipped card pushing the actual work down.
+        self.welcome_dismissed = true;
+        if !self.has_user_message() && self.card_len > 0 {
+            let gone = self.card_len.min(self.lines.len());
+            self.lines.drain(..gone);
+            self.card_len = 0;
+            self.welcome_zones.clear();
+            *self.settled_cache.lock() = SettledRenderCache::default();
+            self.needs_reprint = true;
+        }
         self.lines.push(ChatLine::new(LineKind::User, text.to_string()));
     }
 
@@ -1191,7 +1241,7 @@ impl From<bool> for ReasoningExpansion {
 fn tool_line(head: &str, subject_source: &str) -> String {
     const MUTED: &str = "\x1b[38;2;160;165;180m";
     const STRONG: &str = "\x1b[38;2;225;230;240m";
-    const FAINT: &str = "\x1b[38;2;120;125;140m";
+    const FAINT: &str = "\x1b[38;2;135;130;125m";
     const OFF: &str = "\x1b[0m";
     let subject = subject_source.lines().find(|l| !l.trim().is_empty()).unwrap_or("").trim();
     let mut out = format!("  {FAINT}{}{OFF} {MUTED}{head}{OFF}", tool_cards::TOOL_MARK);
@@ -1431,23 +1481,41 @@ impl ChatView {
         let mut tool_zones: Vec<(bool, ToolActionZone)> = Vec::new();
         let mut tool_cuts: Vec<(bool, usize, usize)> = Vec::new();
 
-        let push_reasoning = |target: &mut Vec<RenderLine>, text: &str, secs: Option<u64>, is_streaming: bool, is_expanded: bool, full: bool, stage: &str| {
+        // The model's own first clause, not a label chosen for it: the stage
+        // list named work the model had not said and repeated itself.
+        fn reasoning_preview(text: &str) -> String {
+            let line = text.lines().map(str::trim).find(|line| !line.is_empty()).unwrap_or("");
+            let clause = line.split_once(['.', '!', '?', ':']).map(|(before, _)| before).unwrap_or(line);
+            let clause = clause.trim_matches(|c: char| c.is_whitespace() || matches!(c, '*' | '_' | '#' | '`'));
+            let short = crate::tool_views::clip_ellipsis(clause, 60);
+            short.trim().to_string()
+        }
+        let push_reasoning = |target: &mut Vec<RenderLine>, text: &str, secs: Option<u64>, is_streaming: bool, is_expanded: bool, full: bool, _stage: &str| {
             if !is_expanded {
-                let chevron = "\x1b[38;2;120;125;140m›\x1b[0m";
+                let chevron = "\x1b[38;2;135;130;125m›\x1b[0m";
                 let text_styled = if is_streaming {
-                    // A light sweep and a margin spinner: still working, without words.
+                    // A spinner and a still label: still working, without a sweep.
                     let t = anim::now_ms();
+                    let preview = reasoning_preview(text);
+                    let label = if preview.is_empty() {
+                        crate::i18n::tr("Thinking").to_string()
+                    } else {
+                        format!("{}: {preview}", crate::i18n::tr("Thinking"))
+                    };
                     format!(
-                        "  \x1b[38;2;138;180;248m{}\x1b[0m \x1b[1m{}\x1b[0m {chevron}",
+                        "  \x1b[38;2;138;180;248m{}\x1b[0m \x1b[1;38;2;160;155;145m{label}\x1b[0m {chevron}",
                         anim::spinner(t),
-                        anim::shimmer(&crate::i18n::tr("Thinking: {stage}").replace("{stage}", stage), t, 2200, anim::Rgb(160, 190, 225), anim::Rgb(245, 250, 255)),
                     )
                 } else if let Some(s) = secs {
-                    format!("  \x1b[38;2;120;125;140m•\x1b[0m \x1b[1;38;2;194;231;255m{}:\x1b[0m \x1b[1;38;2;240;235;225m{}\x1b[0m \x1b[38;2;140;145;160m({s}s)\x1b[0m {chevron}", crate::i18n::tr("Thought"), crate::i18n::tr(stage))
+                    let preview = reasoning_preview(text);
+                    let said = if preview.is_empty() { crate::i18n::tr("Thought").to_string() } else { preview };
+                    format!("  \x1b[38;2;135;130;125m•\x1b[0m \x1b[1;38;2;160;155;145m{}:\x1b[0m \x1b[1;38;2;232;227;218m{said}\x1b[0m \x1b[38;2;140;145;160m({s}s)\x1b[0m {chevron}", crate::i18n::tr("Thought"))
                 } else {
                     // Thinking lifted out of the answer text has no measured duration, but it
                     // is plainly over.
-                    format!("  \x1b[38;2;120;125;140m•\x1b[0m \x1b[1;38;2;194;231;255m{}:\x1b[0m \x1b[1;38;2;240;235;225m{}\x1b[0m {chevron}", crate::i18n::tr("Thought"), crate::i18n::tr(stage))
+                    let preview = reasoning_preview(text);
+                    let said = if preview.is_empty() { crate::i18n::tr("Thought").to_string() } else { preview };
+                    format!("  \x1b[38;2;135;130;125m•\x1b[0m \x1b[1;38;2;160;155;145m{}:\x1b[0m \x1b[1;38;2;232;227;218m{said}\x1b[0m {chevron}", crate::i18n::tr("Thought"))
                 };
                 let budget = width.saturating_sub(4);
                 let clipped_styled = clip_ansi(&text_styled, budget);
@@ -1460,21 +1528,17 @@ impl ChatView {
                     (false, Some(s)) => format!(" ({s}s)"),
                     _ => String::new(),
                 };
-                let title_vis = format!("{}: {}{}", crate::i18n::tr(verb), crate::i18n::tr(stage), elapsed);
-                let title_styled = if is_streaming {
-                    format!(
-                        "\x1b[1m{}\x1b[0m",
-                        anim::shimmer(&format!("{}: {}", crate::i18n::tr(verb), crate::i18n::tr(stage)), anim::now_ms(), 2200, anim::Rgb(160, 190, 225), anim::Rgb(245, 250, 255))
-                    )
+                let preview = reasoning_preview(text);
+                let title_vis = if is_streaming {
+                    if preview.is_empty() { format!("{}…", crate::i18n::tr(verb)) } else { format!("{} · {preview}", crate::i18n::tr(verb)) }
+                } else if elapsed.is_empty() {
+                    crate::i18n::tr(verb).to_string()
                 } else {
-                    format!(
-                        "\x1b[1;38;2;194;231;255m{}:\x1b[0m \x1b[1;38;2;240;235;225m{}\x1b[0m\x1b[38;2;140;145;160m{elapsed}\x1b[0m",
-                        crate::i18n::tr(verb),
-                        crate::i18n::tr(stage)
-                    )
+                    format!("{}{elapsed}", crate::i18n::tr(verb))
                 };
-                let box_w = width.saturating_sub(4).min(84);
-                let border_color = "\x1b[38;2;75;99;130m";
+                let title_styled = format!("\x1b[1;38;2;160;155;145m{title_vis}\x1b[0m");
+                let box_w = crate::content_width(width);
+                let border_color = "\x1b[38;2;95;90;85m";
                 let reset = "\x1b[0m";
 
                 let header_prefix = "╭─ ";
@@ -1766,7 +1830,7 @@ impl ChatView {
                         // Two columns for the bar, on every row: three on the
                         // continuation rows would push the last one past the
                         // window and wrap it into a row of its own.
-                        format!("\x1b[38;2;225;175;95m{USER_BAR}\x1b[0m\x1b[1;38;2;245;240;232m {chunk}\x1b[0m")
+                        format!("\x1b[38;2;225;175;95m{USER_BAR}\x1b[0m\x1b[1;38;2;232;227;218m {chunk}\x1b[0m")
                     }
                     LineKind::System => chunk,
                     _ => md(&chunk),
@@ -2202,7 +2266,7 @@ mod tests {
         assert!(w120 > w80);
         assert_eq!(w80, 80);
         assert_eq!(w100, 100);
-        assert_eq!(w120, 104);
+        assert_eq!(w120, 108);
 
         let raw = "\x1b[1;38;2;255;0;0mHello World\x1b[0m";
         assert_eq!(visible_width(raw), 11);
@@ -2590,6 +2654,22 @@ mod tests {
         assert!(all.contains("unreadable") && all.contains("session_1.json"), "{rows:#?}");
     }
 
+
+    #[test]
+    fn a_collapsed_thought_row_is_clickable_by_its_label() {
+        let mut v = ChatView::default();
+        v.push_user("hi");
+        v.on_event(&LoopEvent::ReasoningDelta("Weighing the options carefully. Hidden detail.".into()));
+        v.on_event(&LoopEvent::Done(flashagent_core::DoneReason::Completed));
+        let (settled, live) = v.render_split(120, ReasoningExpansion::none());
+        let rows: Vec<String> = settled.iter().chain(live.iter()).map(|(_, t)| strip_ansi(t)).collect();
+        let at = rows.iter().position(|row| row.contains("Thought:")).expect("a thought row");
+        assert!(v.owner_at(at).is_some(), "the thought row is not a fold target: {rows:?}");
+        assert!(v.toggle_line(0, ReasoningExpansion::none()));
+        let opened: String = v.render(120).iter().map(|(_, t)| strip_ansi(t)).collect::<Vec<_>>().join("\n");
+        assert!(opened.contains("Hidden detail"), "the expanded body lost the rest: {opened}");
+    }
+
     #[test]
     fn a_finished_thought_is_not_still_called_thinking() {
         // Seen: the answer was on screen and the block above still read "Thinking".
@@ -2599,8 +2679,8 @@ mod tests {
         v.on_event(&LoopEvent::TurnDelta("Hello!".into()));
         v.on_event(&LoopEvent::Done(DoneReason::Completed));
         let dump: String = v.render(100).iter().map(|(_, t)| strip_ansi(t)).collect::<Vec<_>>().join("\n");
-        assert!(dump.contains("Thought:"), "{dump}");
-        assert!(!dump.contains("Thinking:"), "{dump}");
+        assert!(dump.contains("Thought"), "{dump}");
+        assert!(!dump.contains("Thinking"), "{dump}");
     }
 
     #[test]
@@ -2611,8 +2691,8 @@ mod tests {
         v.on_event(&LoopEvent::TurnDelta("<think>weighing it up</think>Hello!".into()));
         v.on_event(&LoopEvent::Done(DoneReason::Completed));
         let dump: String = v.render(100).iter().map(|(_, t)| strip_ansi(t)).collect::<Vec<_>>().join("\n");
-        assert!(dump.contains("Thought:"), "{dump}");
-        assert!(!dump.contains("Thinking:"), "{dump}");
+        assert!(dump.contains("Thought"), "{dump}");
+        assert!(!dump.contains("Thinking"), "{dump}");
     }
 
     #[test]
@@ -2647,7 +2727,7 @@ mod tests {
         v.push_user("hi");
         v.on_event(&LoopEvent::ReasoningDelta("still going".into()));
         let dump: String = v.render(100).iter().map(|(_, t)| strip_ansi(t)).collect::<Vec<_>>().join("\n");
-        assert!(dump.contains("Thinking:"), "{dump}");
+        assert!(dump.contains("Thinking"), "{dump}");
     }
 
     #[test]
@@ -2778,7 +2858,7 @@ mod tests {
         chat.on_event(&LoopEvent::Done(DoneReason::Completed));
         let (settled, live) = chat.render_split(100, ReasoningExpansion::default());
         let dump: String = settled.iter().chain(live.iter()).map(|(_, t)| strip_ansi(t)).collect::<Vec<_>>().join("\n");
-        assert!(dump.contains("Analyzing Request"), "{dump}");
+        assert!(dump.contains("Сначала посмотрю структуру проекта"), "the model's reasoning is shown as it wrote it: {dump}");
         assert!(dump.contains("Готово."), "the model's own answer is shown as it wrote it: {dump}");
     }
 
@@ -2816,18 +2896,19 @@ mod tests {
     }
 
     #[test]
-    fn collapsed_preview_shows_current_stage() {
+    fn collapsed_preview_shows_the_models_own_clause() {
         let mut v = ChatView::default();
         v.on_event(&LoopEvent::ReasoningDelta(
-            "Thinking Process:\n1. Analyze the Request: user said hi\n2. Determine the Goal: ack".into(),
+            "The file is three lines long. I will read it before changing anything.".into(),
         ));
         let (_, live) = v.render_split(200, false);
-        assert!(live.iter().any(|(_, t)| t.contains("Determine the Goal") && (t.contains('›') || t.contains('>'))), "live: {live:?}");
-        assert!(!live.iter().any(|(_, t)| t.contains("Analyze the Request")));
+        let plain = |t: &String| strip_ansi(t);
+        assert!(live.iter().any(|(_, t)| plain(t).contains("The file is three lines long") && (t.contains('›') || t.contains('>'))), "live: {live:?}");
+        assert!(!live.iter().any(|(_, t)| plain(t).contains("I will read it before")));
 
         v.on_event(&LoopEvent::Done(flashagent_core::DoneReason::Completed));
         let (settled, _) = v.render_split(200, false);
-        assert!(settled.iter().any(|(_, t)| t.contains("Determine the Goal") && (t.contains('›') || t.contains('>'))));
+        assert!(settled.iter().any(|(_, t)| plain(t).contains("The file is three lines long") && (t.contains('›') || t.contains('>'))));
 
         // Free-form reasoning shows a clean status, not dumped sentences.
         let mut v2 = ChatView::default();
@@ -3113,7 +3194,7 @@ hm".into()));
         v.on_event(&LoopEvent::Done(flashagent_core::DoneReason::Completed));
 
         let (settled, _) = v.render_split(200, ReasoningExpansion::none());
-        assert!(settled.iter().any(|(k, t)| *k == LineKind::Reasoning && t.contains("Analyze the Request") && (t.contains('›') || t.contains('>'))));
+        assert!(settled.iter().any(|(k, t)| *k == LineKind::Reasoning && strip_ansi(t).contains("Thinking") && (t.contains('›') || t.contains('>'))), "{settled:?}");
         assert!(settled.iter().any(|(k, t)| *k == LineKind::Assistant && t.contains("Final direct answer")));
     }
 
@@ -3172,21 +3253,21 @@ hm".into()));
     }
 
     #[test]
-    fn the_welcome_card_says_what_runs_now_after_the_conversation_started() {
+    fn the_welcome_card_is_gone_once_the_conversation_starts() {
         let mut v = ChatView::default();
         v.update_welcome_card(crate::welcome::WelcomeRender {
             lines: vec![(LineKind::System, "model-a".to_string())],
             zones: Vec::new(),
         });
         v.push_user("hello");
-        // The model changed: the card at the top says so, and the
-        // conversation stays where it was.
+        // The first prompt takes the card away, and a later state change must
+        // not bring it back into the middle of the conversation; the status
+        // row is what says which model runs now.
         v.update_welcome_card_state(crate::welcome::WelcomeRender {
             lines: vec![(LineKind::System, "model-b".to_string())],
             zones: Vec::new(),
         });
-        assert!(v.lines.iter().any(|l| l.text.contains("model-b")), "the card must show what runs now");
-        assert!(!v.lines.iter().any(|l| l.text.contains("model-a")), "the old model is gone from the card");
+        assert!(!v.lines.iter().any(|l| l.text.contains("model-a") || l.text.contains("model-b")), "the card came back");
         assert!(v.lines.iter().any(|l| l.text.contains("hello")), "the conversation is still there");
     }
 
@@ -3440,18 +3521,19 @@ hm".into()));
     }
 
     #[test]
-    fn mascot_blinks_and_breathes() {
+    fn mascot_blinks() {
         let open = mascot_swift_lines_mood(0, MascotMood::Happy);
         let blink = mascot_swift_lines_mood(46, MascotMood::Happy);
         // Row 2 carries the eyes (pixel rows 4-5).
         assert!(open[2].contains("255;255;255"), "open eyes are white: {}", open[2]);
         assert!(!blink[2].contains("255;255;255"), "shut eyes show no white: {}", blink[2]);
 
-        // Breathing changes the top-row highlight, not the shape.
-        let dim = mascot_swift_lines_mood(0, MascotMood::Happy);
-        let bright = mascot_swift_lines_mood(18, MascotMood::Happy);
-        assert_ne!(dim[0], bright[0], "the highlight must change over the breath cycle");
-        assert_eq!(visible_width(&dim[0]), visible_width(&bright[0]));
+        // The body is still: only the blink moves. An idle screen that
+        // breathes forever never looks finished.
+        let still = mascot_swift_lines_mood(0, MascotMood::Happy);
+        let later = mascot_swift_lines_mood(18, MascotMood::Happy);
+        assert_eq!(still[0], later[0], "the body must not breathe");
+        assert_eq!(visible_width(&still[0]), visible_width(&later[0]));
     }
 
     #[test]
@@ -3461,16 +3543,16 @@ hm".into()));
         let checking = mascot_swift_lines_mood(0, MascotMood::Checking);
         assert!(happy != offline && happy != checking && checking != offline);
         // Offline must not use the healthy body colour.
-        assert!(!offline.concat().contains("138;180;248"), "offline must not use the healthy blue");
-        assert!(happy.concat().contains("138;180;248"));
+        assert!(!offline.concat().contains("160;155;145"), "offline must not use the healthy body");
+        assert!(happy.concat().contains("160;155;145"));
     }
 
     #[test]
     fn mascot_repaints_only_when_it_changed() {
         // At 12.5 ticks a second, rebuilding every tick would repaint for nothing.
         let repaints = (0..100).filter(|t| mascot_needs_repaint(*t)).count();
-        assert!(repaints > 4, "the mascot must actually animate: {repaints}");
-        assert!(repaints < 40, "too many card rebuilds: {repaints}");
+        assert!(repaints >= 2, "the mascot must blink: {repaints}");
+        assert!(repaints <= 8, "too many card rebuilds for a still body: {repaints}");
         assert!(mascot_needs_repaint(46), "the blink must trigger a repaint");
     }
     #[test]
@@ -3775,7 +3857,7 @@ hm".into()));
         assert!(plain_expanded.contains("Finished dev profile"));
 
         assert!(plain_expanded.contains("Read") && plain_expanded.contains("src/main.rs"));
-        assert!(expanded_text.contains("\x1b[48;2;22;38;60m"), "Read view must have soft blue background");
+        assert!(expanded_text.contains("\x1b[48;2;38;36;33m"), "Read view must have soft blue background");
 
         assert!(plain_expanded.contains("list_dir · .audit"));
         assert!(plain_expanded.contains("2026-09-07-a0-skeleton.md"));

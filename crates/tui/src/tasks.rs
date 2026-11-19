@@ -18,7 +18,7 @@ pub(crate) fn task_line(notice: &TaskNotice) -> String {
     };
     let command = flashagent_tui::truncate_middle(&notice.command.replace(['\n', '\r'], " "), 60);
     format!(
-        "  \x1b[38;2;{colour}m\u{25cf}\x1b[0m \x1b[38;2;200;195;185mBackground task {} {} after {}\x1b[0m \x1b[38;2;135;130;125m\u{b7} {}\x1b[0m",
+        "  \x1b[38;2;{colour}m\u{25cf}\x1b[0m \x1b[38;2;232;227;218mBackground task {} {} after {}\x1b[0m \x1b[38;2;135;130;125m\u{b7} {}\x1b[0m",
         notice.id,
         notice.state.describe(),
         flashagent_tools::shell::format_elapsed(notice.elapsed),
@@ -32,7 +32,7 @@ pub(crate) fn notice_lines(content: &str) -> Vec<String> {
         .lines()
         .filter_map(|line| line.strip_prefix(flashagent_core::TASK_NOTICE_OPENING))
         .filter_map(|rest| rest.split_once(". This is").map(|(said, _)| said.to_string()))
-        .map(|said| format!("  \x1b[38;2;135;130;125m\u{25cf}\x1b[0m \x1b[38;2;200;195;185mBackground task {}\x1b[0m", flashagent_tui::terminal_safe(&said)))
+        .map(|said| format!("  \x1b[38;2;135;130;125m\u{25cf}\x1b[0m \x1b[38;2;232;227;218mBackground task {}\x1b[0m", flashagent_tui::terminal_safe(&said)))
         .collect()
 }
 

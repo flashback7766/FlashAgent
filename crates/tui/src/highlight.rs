@@ -3,16 +3,16 @@
 //! is what makes code readable at a glance. An unknown language gets the same
 //! treatment minus the keywords.
 
-const TEXT: &str = "\x1b[38;2;220;215;205m";
+const TEXT: &str = "\x1b[38;2;232;227;218m";
 const KEYWORD: &str = "\x1b[38;2;198;160;246m";
 const STRING: &str = "\x1b[38;2;166;218;149m";
-const COMMENT: &str = "\x1b[38;2;125;130;140m";
+const COMMENT: &str = "\x1b[38;2;135;130;125m";
 const NUMBER: &str = "\x1b[38;2;245;169;127m";
 const TYPE: &str = "\x1b[38;2;238;212;159m";
 const CALL: &str = "\x1b[38;2;138;180;248m";
 const MACRO: &str = "\x1b[38;2;125;196;228m";
 const ADDED: &str = "\x1b[38;2;145;205;140m";
-const REMOVED: &str = "\x1b[38;2;225;115;105m";
+const REMOVED: &str = "\x1b[38;2;230;110;95m";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Lang {

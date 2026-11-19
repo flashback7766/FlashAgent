@@ -52,8 +52,8 @@ const HELP_KEYS: &[(&str, &str)] = &[
 /// under themselves.
 fn help_text(width: usize) -> String {
     const HEAD: &str = "\x1b[1;38;2;225;175;95m";
-    const KEY: &str = "\x1b[38;2;194;231;255m";
-    const WHAT: &str = "\x1b[38;2;165;160;150m";
+    const KEY: &str = "\x1b[38;2;160;155;145m";
+    const WHAT: &str = "\x1b[38;2;160;155;145m";
     const OFF: &str = "\x1b[0m";
     let width = width.max(30);
     let key_w = (width / 3).clamp(12, 26).min(width);
@@ -594,6 +594,9 @@ impl App {
             }
         };
         let goal_budgets = GoalBudgets::from_config(&self.config);
+        // A goal is a conversation of its own; the state card from before it is
+        // no longer what runs.
+        self.chat.dismiss_welcome();
 
         // Restored when the goal ends.
         self.goal_state = Some(SavedGoalState {
@@ -619,7 +622,7 @@ impl App {
         self.flush_switch_notice();
 
         let (w, _) = crossterm::terminal::size().unwrap_or((100, 24));
-        let card_w = (w as usize).saturating_sub(4).min(110);
+        let card_w = flashagent_tui::content_width(w as usize);
         let inner_w = card_w.saturating_sub(2);
         let border_color = "\x1b[38;2;225;175;95m";
         let reset = "\x1b[0m";
@@ -628,7 +631,7 @@ impl App {
         let dash_count = inner_w.saturating_sub(visible_width(&title) + 1);
         self.chat.push_line(
             LineKind::System,
-            format!("{border_color}╭─\x1b[1;38;2;245;240;232m{title}{border_color}{}╮{reset}", "─".repeat(dash_count)),
+            format!("{border_color}╭─\x1b[1;38;2;232;227;218m{title}{border_color}{}╮{reset}", "─".repeat(dash_count)),
         );
         let meta = flashagent_tui::i18n::tr("Accept All \u{b7} thinking high \u{b7} Esc stops the run");
         let budget = format!("Budget: {}", goal_budgets.summary());
@@ -901,7 +904,7 @@ impl App {
                         self.custom_placeholder = None;
                     }
                     Err(e) => {
-                        self.chat.push_system(&format!("\x1b[38;2;245;120;120mMCP server '{rest}' test failed:\x1b[0m\n{e}"));
+                        self.chat.push_system(&format!("\x1b[38;2;230;110;95mMCP server '{rest}' test failed:\x1b[0m\n{e}"));
                         self.custom_placeholder = None;
                     }
                 }
@@ -1098,9 +1101,9 @@ impl App {
             let clean: String = line.chars().map(|c| if c.is_control() && c != '\t' { ' ' } else { c }).collect();
             let color = match clean.as_bytes().first() {
                 Some(b'+') => "\x1b[38;2;145;205;140m",
-                Some(b'-') => "\x1b[38;2;225;115;105m",
+                Some(b'-') => "\x1b[38;2;230;110;95m",
                 Some(b'@') => "\x1b[38;2;135;130;125m",
-                _ => "\x1b[38;2;165;160;150m",
+                _ => "\x1b[38;2;160;155;145m",
             };
             out.push_str(&format!("\n{color}{}\x1b[0m", clean.replace('\t', "    ")));
         }

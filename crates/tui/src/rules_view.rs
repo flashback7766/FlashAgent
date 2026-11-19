@@ -182,7 +182,7 @@ impl RulesView {
         let mut lines = Vec::new();
         let box_w = width.saturating_sub(6).min(100);
         let inner_w = box_w.saturating_sub(2);
-        let border_color = "\x1b[38;2;100;95;90m";
+        let border_color = "\x1b[38;2;95;90;85m";
         let reset = "\x1b[0m";
 
         let pad_row = |content: &str| -> String {
@@ -218,14 +218,14 @@ impl RulesView {
             let is_hover = hover.map(|(l, _)| l) == Some(card_line) && !is_sel && flash != Some(card_line);
             let is_press = flash == Some(card_line);
             let pointer = if is_sel || is_press {
-                "\x1b[1;38;2;225;175;95m▸\x1b[0m"
+                "\x1b[1;38;2;225;175;95m›\x1b[0m"
             } else if is_hover {
                 "\x1b[38;2;135;130;125m·\x1b[0m"
             } else {
                 " "
             };
             let kind = crate::i18n::tr(Self::kind_label(row.kind));
-            let text_color = if is_press { "\x1b[38;2;225;175;95m" } else { "\x1b[38;2;235;230;220m" };
+            let text_color = if is_press { "\x1b[38;2;225;175;95m" } else { "\x1b[38;2;232;227;218m" };
             let body = format!("{pointer} \x1b[38;2;160;155;145m{:<10}\x1b[0m {text_color}{}\x1b[0m", kind, row.text);
             lines.push((LineKind::System, pad_row(&body)));
         }
