@@ -2191,7 +2191,7 @@ mod tests {
         let d = tools
             .preview_for(&ToolCall {
                 id: "t".into(),
-                name: "write_file".into(),
+                name: "edit".into(),
                 args_json: r#"{"path":"a.txt","content":"one\nTWO\n"}"#.into(),
             })
             .unwrap();
@@ -2200,7 +2200,7 @@ mod tests {
         let d = tools
             .preview_for(&ToolCall {
                 id: "t".into(),
-                name: "edit_file".into(),
+                name: "edit".into(),
                 args_json: r#"{"path":"a.txt","edits":[{"old_string":"one","new_string":"ONE"}]}"#.into(),
             })
             .unwrap();
@@ -2209,20 +2209,20 @@ mod tests {
         let d = tools
             .preview_for(&ToolCall {
                 id: "t".into(),
-                name: "write_file".into(),
+                name: "edit".into(),
                 args_json: r#"{"path":"new.txt","content":"x"}"#.into(),
             })
             .unwrap();
         assert!(d.contains("/dev/null"));
 
         assert!(tools
-            .preview_for(&ToolCall { id: "t".into(), name: "grep".into(), args_json: "{}".into() })
+            .preview_for(&ToolCall { id: "t".into(), name: "search".into(), args_json: "{}".into() })
             .is_none());
         // Broken args: approval falls back to no preview.
         assert!(tools
             .preview_for(&ToolCall {
                 id: "t".into(),
-                name: "write_file".into(),
+                name: "edit".into(),
                 args_json: "garbage".into(),
             })
             .is_none());

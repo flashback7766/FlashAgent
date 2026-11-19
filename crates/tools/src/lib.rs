@@ -12,6 +12,7 @@ pub mod outline;
 pub mod patch;
 pub mod plan_tool;
 pub mod shell;
+pub mod skill_tools;
 pub mod subagents;
 pub mod web;
 
@@ -95,6 +96,9 @@ pub struct BuiltinToolsConfig {
     /// Tools the owner has switched off. They are not offered, and a call to
     /// one is refused.
     pub disabled_tools: Option<Vec<String>>,
+    /// Where `~` and the memory stores point. `None` reads HOME; a test sets
+    /// it so no memory is written into the owner's home directory.
+    pub home: Option<PathBuf>,
 }
 
 /// What a tool answered: text for the model, or a picture.
@@ -170,6 +174,8 @@ struct SpecsCache {
 /// One per session.
 pub struct BuiltinTools {
     cwd: PathBuf,
+    /// `None` means HOME, read when a memory call needs it.
+    home: Option<PathBuf>,
     shells: ShellRegistry,
     http: reqwest::Client,
     brave_key: Option<String>,
@@ -209,6 +215,7 @@ impl BuiltinTools {
             .unwrap_or_else(|| mcp::McpManager::new(config.cwd.clone()));
         Ok(Self {
             cwd: config.cwd.clone(),
+            home: config.home,
             shells: ShellRegistry::with_cwd(config.cwd),
             http,
             brave_key: config.brave_api_key,
@@ -332,7 +339,10 @@ impl BuiltinTools {
             // in `subagents.rs`: offering them here too would put two tools with
             // one name in front of the model.
             .filter(|def| {
-                !matches!(def.handler, Handler::SpawnAgent | Handler::SendMessage | Handler::ReviewAgent)
+                !matches!(
+                    def.handler,
+                    Handler::Agent | Handler::SpawnAgent | Handler::SendMessage | Handler::ReviewAgent
+                )
             })
             // `BuiltinTools` is what a subagent is given, so the parent-only
             // tools are not offered from here.
@@ -380,12 +390,12 @@ impl BuiltinTools {
     }
 
     fn prepare_edit(&self, call: &ToolCall) -> PreparedEdit {
-        let args = parse_args::<EditArgs>(&call.args_json, &call.name);
+        let args = parse_args::<EditToolArgs>(&call.args_json, &call.name);
         let single = args.as_ref().is_ok_and(|a| a.files.is_empty());
         let files = args.and_then(|args| {
             if args.files.is_empty() {
                 if args.path.trim().is_empty() || args.edits.is_empty() {
-                    return Err(ToolError::Other("edit_file needs a path and edits, or files to edit several".into()));
+                    return Err(ToolError::Other("edit mode replace needs a path and edits, or files to edit several".into()));
                 }
                 fs_tools::plan_edit(&self.cwd, &args.path, &args.edits)
             } else {
@@ -419,6 +429,24 @@ impl BuiltinTools {
                 let patch_text = v.get("patch")?.as_str()?;
                 patch::preview_patch(&self.cwd, path, patch_text)
             }
+            Preview::File => {
+                let mode = v.get("mode")?.as_str()?.trim().to_ascii_lowercase();
+                match mode.as_str() {
+                    "write" => {
+                        let path = v.get("path")?.as_str()?;
+                        let new = v.get("content")?.as_str()?;
+                        let old = fs_tools::read_raw(&self.cwd, path);
+                        Some(flashagent_core::unified(old.as_deref(), new, &self.shown_path(path), 3))
+                    }
+                    "replace" => self.prepare_edit(call).diff,
+                    "patch" => {
+                        let path = v.get("path")?.as_str()?;
+                        let patch_text = v.get("patch")?.as_str()?;
+                        patch::preview_patch(&self.cwd, path, patch_text)
+                    }
+                    _ => None,
+                }
+            }
             Preview::None => None,
         }
     }
@@ -450,103 +478,137 @@ impl BuiltinTools {
             return Err(ToolError::Other(format!("unknown tool: {}", call.name)));
         };
         match def.handler {
-            Handler::ReadFile => {
+            Handler::Read => {
                 let a: ReadArgs = parse_args(&call.args_json, &call.name)?;
-                Ok(Answer::Text(self.off_runtime(move |cwd| a.read(cwd)).await?))
+                let mode = a.mode.as_deref().unwrap_or("auto").trim().to_ascii_lowercase();
+                let looks_like_image = std::path::Path::new(&a.path)
+                    .extension()
+                    .and_then(|e| e.to_str())
+                    .is_some_and(|e| matches!(e.to_ascii_lowercase().as_str(), "png" | "jpg" | "jpeg" | "gif" | "webp" | "bmp"));
+                if mode == "image" || (mode == "auto" && looks_like_image && a.files.is_empty()) {
+                    if a.path.trim().is_empty() {
+                        return Err(ToolError::Other("read: mode image needs one path".into()));
+                    }
+                    let args = serde_json::json!({ "path": a.path }).to_string();
+                    let vision = self.vision_supported();
+                    let opened = self.off_runtime(move |cwd| Ok(image_tool::view_image(cwd, &args, vision))).await;
+                    Ok(Answer::Picture(opened.unwrap_or_else(|e| ToolOutput {
+                        content: format!("error: {e}"),
+                        is_error: true,
+                        images: Vec::new(),
+                    })))
+                } else {
+                    Ok(Answer::Text(self.off_runtime(move |cwd| a.read(cwd)).await?))
+                }
             }
-            Handler::WriteFile => {
-                let a: WriteArgs = parse_args(&call.args_json, &call.name)?;
-                fs_tools::write_file(&self.cwd, &a.path, &a.content).map(Answer::Text)
+            Handler::Search => {
+                let a: SearchToolArgs = parse_args(&call.args_json, &call.name)?;
+                a.run(self).await.map(Answer::Text)
             }
-            Handler::EditFile => self.prepare_edit(call).commit().map(Answer::Text),
-            Handler::PatchFile => {
-                let a: PatchArgs = parse_args(&call.args_json, &call.name)?;
-                patch::patch_file(&self.cwd, &a.path, &a.patch).map(Answer::Text)
+            Handler::Edit => {
+                let a: EditToolArgs = parse_args(&call.args_json, &call.name)?;
+                match a.mode.trim().to_ascii_lowercase().as_str() {
+                    "write" => {
+                        let content = a.content.ok_or_else(|| ToolError::Other("edit mode write needs content".into()))?;
+                        if a.path.trim().is_empty() {
+                            return Err(ToolError::Other("edit mode write needs a path".into()));
+                        }
+                        fs_tools::write_file(&self.cwd, &a.path, &content).map(Answer::Text)
+                    }
+                    "replace" => self.prepare_edit(call).commit().map(Answer::Text),
+                    "patch" => {
+                        let patch_text = a.patch.ok_or_else(|| ToolError::Other("edit mode patch needs a patch".into()))?;
+                        if a.path.trim().is_empty() {
+                            return Err(ToolError::Other("edit mode patch needs a path".into()));
+                        }
+                        patch::patch_file(&self.cwd, &a.path, &patch_text).map(Answer::Text)
+                    }
+                    other => Err(ToolError::Other(format!(
+                        "edit: unknown mode '{other}'; use write, replace or patch"
+                    ))),
+                }
             }
-            Handler::ListDir => {
-                let a: ListArgs = parse_args(&call.args_json, &call.name)?;
-                Ok(Answer::Text(self.off_runtime(move |cwd| fs_tools::list_dir(cwd, a.path.as_deref().unwrap_or("."))).await?))
-            }
-            Handler::Glob => {
-                let a: GlobArgs = parse_args(&call.args_json, &call.name)?;
-                Ok(Answer::Text(self.off_runtime(move |cwd| fs_tools::glob_files(cwd, &a.pattern)).await?))
-            }
-            Handler::Grep => {
-                let a: GrepArgs = parse_args(&call.args_json, &call.name)?;
-                Ok(Answer::Text(self.off_runtime(move |cwd| fs_tools::grep(cwd, &a.pattern, a.glob.as_deref(), a.case_insensitive)).await?))
-            }
-            Handler::OutlineFile => {
-                let a: OutlineArgs = parse_args(&call.args_json, &call.name)?;
-                Ok(Answer::Text(self.off_runtime(move |cwd| outline::outline_file(cwd, &a.path)).await?))
-            }
-            Handler::GitStatus => {
-                let a: GitStatusArgs = parse_args(&call.args_json, &call.name)?;
-                git::git_status(&self.cwd, a.path.as_deref()).await.map(Answer::Text)
-            }
-            Handler::GitDiff => {
-                let a: GitDiffArgs = parse_args(&call.args_json, &call.name)?;
-                git::git_diff(&self.cwd, a.staged.unwrap_or(false), a.path.as_deref()).await.map(Answer::Text)
+            Handler::Git => {
+                let a: GitArgs = parse_args(&call.args_json, &call.name)?;
+                let action = a.action.trim().to_ascii_lowercase();
+                match action.as_str() {
+                    "status" => git::git_status(&self.cwd, a.path.as_deref()).await.map(Answer::Text),
+                    "diff" => git::git_diff(&self.cwd, a.staged.unwrap_or(false), a.path.as_deref()).await.map(Answer::Text),
+                    "log" => git::git_log(&self.cwd, a.path.as_deref(), a.limit).await.map(Answer::Text),
+                    "show" => git::git_show(&self.cwd, a.rev.as_deref(), a.path.as_deref()).await.map(Answer::Text),
+                    "blame" => git::git_blame(&self.cwd, a.rev.as_deref(), a.path.as_deref()).await.map(Answer::Text),
+                    other => Err(ToolError::Other(format!(
+                        "git: unknown action '{other}'; use status, diff, log, show or blame"
+                    ))),
+                }
             }
             Handler::RunShell => {
                 let a: ShellArgs = parse_args(&call.args_json, &call.name)?;
                 self.run_shell(a).await.map(Answer::Text)
             }
             Handler::EnvInfo => env_tools::env_info(&self.cwd).await.map(Answer::Text),
-            Handler::AskUser => {
-                let a: ask_user::AskUserArgs = parse_args(&call.args_json, &call.name)?;
-                ask_user::run_ask_user(self.question_gate.as_ref(), &self.is_goal_mode, a).await.map(Answer::Text)
+            Handler::UserInteraction => {
+                let a: ask_user::UserInteractionArgs = parse_args(&call.args_json, &call.name)?;
+                ask_user::run_user_interaction(
+                    &self.cwd,
+                    self.question_gate.as_ref(),
+                    &self.is_goal_mode,
+                    a,
+                    ask_user::GOAL_QUESTION_TIMEOUT,
+                )
+                .await
+                .map(Answer::Text)
             }
             Handler::UpdatePlan => plan_tool::run_update_plan(&call.args_json).map(Answer::Text),
-            Handler::MemoryRead => {
-                let a: memory_tools::MemoryReadArgs = parse_args(&call.args_json, &call.name)?;
-                Ok(Answer::Text(self.off_runtime(move |cwd| memory_tools::memory_read(cwd, a)).await?))
+            Handler::Memory => {
+                let a: memory_tools::MemoryArgs = parse_args(&call.args_json, &call.name)?;
+                memory_tools::memory(&self.cwd, self.home.as_deref(), &self.is_goal_mode, a).map(Answer::Text)
             }
-            Handler::MemoryCreate => {
-                let a: memory_tools::MemoryWriteArgs = parse_args(&call.args_json, &call.name)?;
-                memory_tools::memory_create(&self.cwd, &self.is_goal_mode, a).map(Answer::Text)
-            }
-            Handler::MemoryUpdate => {
-                let a: memory_tools::MemoryWriteArgs = parse_args(&call.args_json, &call.name)?;
-                memory_tools::memory_update(&self.cwd, &self.is_goal_mode, a).map(Answer::Text)
-            }
-            Handler::MemoryRemove => {
-                let a: memory_tools::MemoryRemoveArgs = parse_args(&call.args_json, &call.name)?;
-                memory_tools::memory_remove(&self.cwd, &self.is_goal_mode, a).map(Answer::Text)
-            }
-            Handler::WebFetch => {
+            Handler::Web => {
                 if !self.web_enabled.load(Ordering::Relaxed) {
-                    return Err(ToolError::Other("web_fetch is turned off in Settings (LLM & Reasoning → Web Tools).".into()));
+                    return Err(ToolError::Other("web is turned off in Settings (LLM & Reasoning → Web Tools).".into()));
                 }
-                let a: FetchArgs = parse_args(&call.args_json, &call.name)?;
-                web::fetch_text(&a.url).await.map(Answer::Text)
+                let a: WebArgs = parse_args(&call.args_json, &call.name)?;
+                match a.action.trim().to_ascii_lowercase().as_str() {
+                    "search" => {
+                        let query = a.query.ok_or_else(|| ToolError::Other("web search needs a query".into()))?;
+                        let count = a.count.unwrap_or(5);
+                        let key = self.brave_key.as_deref().map(str::trim).filter(|k| !k.is_empty());
+                        match key {
+                            Some(key) => match web::search(&self.http, key, &query, count).await {
+                                Ok(found) => Ok(Answer::Text(found)),
+                                Err(_) => web::search_free(&self.http, &query, count).await.map(Answer::Text),
+                            },
+                            None => web::search_free(&self.http, &query, count).await.map(Answer::Text),
+                        }
+                    }
+                    "fetch" => {
+                        let url = a.url.ok_or_else(|| ToolError::Other("web fetch needs a url".into()))?;
+                        web::fetch_text(&url).await.map(Answer::Text)
+                    }
+                    other => Err(ToolError::Other(format!("web: unknown action '{other}'; use search or fetch"))),
+                }
             }
-            Handler::WebSearch => {
+            Handler::HttpRequest => {
                 if !self.web_enabled.load(Ordering::Relaxed) {
-                    return Err(ToolError::Other("web_search is turned off in Settings (LLM & Reasoning → Web Tools).".into()));
+                    return Err(ToolError::Other("http_request is turned off in Settings (LLM & Reasoning → Web Tools).".into()));
                 }
-                let a: SearchArgs = parse_args(&call.args_json, &call.name)?;
-                let count = a.count.unwrap_or(5);
-                let key = self.brave_key.as_deref().map(str::trim).filter(|k| !k.is_empty());
-                match key {
-                    // A rejected, expired or exhausted key falls back to the free search.
-                    Some(key) => match web::search(&self.http, key, &a.query, count).await {
-                        Ok(found) => Ok(Answer::Text(found)),
-                        Err(_) => web::search_free(&self.http, &a.query, count).await.map(Answer::Text),
-                    },
-                    None => web::search_free(&self.http, &a.query, count).await.map(Answer::Text),
-                }
+                let a: HttpRequestArgs = parse_args(&call.args_json, &call.name)?;
+                let method = a.method.unwrap_or_else(|| "GET".to_string());
+                let headers: Vec<(String, String)> = a.headers.into_iter().map(|h| (h.name, h.value)).collect();
+                web::request_text(&method, &a.url, &headers, a.body.as_deref()).await.map(Answer::Text)
             }
-            // The only tool whose result is a picture, not text. It is a branch
-            // here rather than a handler because what comes back is not a
-            // string, and the one that reads images is the app above us.
-            Handler::ViewImage => {
-                let args = call.args_json.clone();
-                let vision = self.vision_supported();
-                let opened = self.off_runtime(move |cwd| Ok(image_tool::view_image(cwd, &args, vision))).await;
-                Ok(Answer::Picture(opened.unwrap_or_else(|e| {
-                    ToolOutput { content: format!("error: {e}"), is_error: true, images: Vec::new() }
-                })))
+            Handler::Skill => {
+                let a: SkillArgs = parse_args(&call.args_json, &call.name)?;
+                skill_tools::skill(&self.cwd, self.home.as_deref(), a.action.trim(), a.name.as_deref()).map(Answer::Text)
             }
+            Handler::Task => {
+                let a: TaskArgs = parse_args(&call.args_json, &call.name)?;
+                self.run_task(a).await.map(Answer::Text)
+            }
+            Handler::Agent => Err(ToolError::Other(
+                "agent is not available in this set: it is added by the app, one level up.".into(),
+            )),
             // `spawn_agent`, `send_message` and `review_agent` have handlers here
             // so the registry covers every tool the model is ever offered, but
             // their code lives in the core crate: they need the mailbox and the
@@ -561,13 +623,46 @@ impl BuiltinTools {
         }
     }
 
-    async fn run_shell(&self, a: ShellArgs) -> Result<String, ToolError> {
-        if let Some(id) = a.task_id {
-            return if a.kill { self.shells.kill(id).await } else { self.shells.status(id) };
+    async fn run_task(&self, a: TaskArgs) -> Result<String, ToolError> {
+        let action = a.action.trim().to_ascii_lowercase();
+        match action.as_str() {
+            "list" => {
+                let tasks = self.shells.tasks();
+                if tasks.is_empty() {
+                    return Ok("No background tasks.".to_string());
+                }
+                Ok(tasks
+                    .into_iter()
+                    .map(|task| {
+                        let output = if task.last_line.is_empty() { String::new() } else { format!(" — {}", task.last_line) };
+                        format!(
+                            "{}: {} for {}{}{}",
+                            task.id,
+                            task.state.describe(),
+                            shell::format_elapsed(task.elapsed),
+                            if task.detached { " (moved to background by the user)" } else { "" },
+                            output
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n"))
+            }
+            "output" => {
+                let id = a.task_id.ok_or_else(|| ToolError::Other("task output needs task_id".into()))?;
+                self.shells.status(id)
+            }
+            "stop" => {
+                let id = a.task_id.ok_or_else(|| ToolError::Other("task stop needs task_id".into()))?;
+                self.shells.kill(id).await
+            }
+            other => Err(ToolError::Other(format!("task: unknown action '{other}'; use list, output or stop"))),
         }
+    }
+
+    async fn run_shell(&self, a: ShellArgs) -> Result<String, ToolError> {
         let cmd = a
             .command
-            .ok_or_else(|| ToolError::Other("run_shell: `command` or `task_id` is required".into()))?;
+            .ok_or_else(|| ToolError::Other("run_shell: `command` is required; background:true starts a task, and `task` reads or stops one".into()))?;
         if a.background.unwrap_or(false) {
             self.shells.spawn_background(&cmd)
         } else {
@@ -597,10 +692,13 @@ impl WritePreview for BuiltinTools {
     }
 
     fn prepare(&self, call: &ToolCall) -> Option<Box<dyn flashagent_core::loop_::PreparedWrite>> {
-        if call.name != "edit_file" {
+        if call.name != "edit" {
             return None;
         }
-        let args: EditArgs = parse_args(&call.args_json, &call.name).ok()?;
+        let args: EditToolArgs = parse_args(&call.args_json, &call.name).ok()?;
+        if !args.mode.trim().eq_ignore_ascii_case("replace") {
+            return None;
+        }
         if args.targets().iter().any(|(path, _)| !flashagent_core::path_is_inside(&self.cwd, path)) {
             return None;
         }
@@ -609,10 +707,13 @@ impl WritePreview for BuiltinTools {
 
     /// A quoted near match outside the project would itself be an unapproved read.
     fn doomed(&self, call: &ToolCall) -> Option<String> {
-        if call.name != "edit_file" {
+        if call.name != "edit" {
             return None;
         }
-        let args: EditArgs = parse_args(&call.args_json, &call.name).ok()?;
+        let args: EditToolArgs = parse_args(&call.args_json, &call.name).ok()?;
+        if !args.mode.trim().eq_ignore_ascii_case("replace") {
+            return None;
+        }
         if args.targets().iter().any(|(path, _)| !flashagent_core::path_is_inside(&self.cwd, path)) {
             return None;
         }
@@ -668,6 +769,8 @@ impl ToolExec for BuiltinTools {
 #[derive(Deserialize)]
 struct ReadArgs {
     #[serde(default)]
+    mode: Option<String>,
+    #[serde(default)]
     path: String,
     offset: Option<usize>,
     limit: Option<usize>,
@@ -684,9 +787,16 @@ struct ReadItem {
 
 impl ReadArgs {
     fn read(self, cwd: &std::path::Path) -> Result<String, ToolError> {
+        let mode = self.mode.as_deref().unwrap_or("auto").trim().to_ascii_lowercase();
+        if mode == "outline" {
+            if self.path.trim().is_empty() {
+                return Err(ToolError::Other("read: mode outline needs one path".into()));
+            }
+            return outline::outline_file(cwd, &self.path);
+        }
         if self.files.is_empty() {
             if self.path.trim().is_empty() {
-                return Err(ToolError::Other("read_file needs a path, or files to read several".into()));
+                return Err(ToolError::Other("read needs a path, or files to read several".into()));
             }
             return fs_tools::read_file(cwd, &self.path, self.offset.unwrap_or(0), self.limit.unwrap_or(2000));
         }
@@ -695,10 +805,6 @@ impl ReadArgs {
             items.push((self.path, self.offset, self.limit));
         }
         items.extend(self.files.into_iter().map(|f| (f.path, f.offset, f.limit)));
-        // The usual 2000 lines are shared out, so the output limit does not cut the
-        // last file away. The share is the division itself: a floor of 200
-        // lines undid it, and twenty files were read at 200 lines each: four
-        // thousand lines, of which the end was cut off.
         let share = (2000 / items.len().max(1)).max(1);
         let items: Vec<(String, usize, usize)> = items.into_iter().map(|(p, o, l)| (p, o.unwrap_or(0), l.unwrap_or(share))).collect();
         fs_tools::read_files(cwd, &items)
@@ -706,20 +812,65 @@ impl ReadArgs {
 }
 
 #[derive(Deserialize)]
-struct WriteArgs {
-    path: String,
-    content: String,
+struct SearchToolArgs {
+    mode: String,
+    path: Option<String>,
+    pattern: Option<String>,
+    glob: Option<String>,
+    #[serde(default)]
+    case_insensitive: bool,
+    limit: Option<usize>,
+}
+
+impl SearchToolArgs {
+    async fn run(self, tools: &BuiltinTools) -> Result<String, ToolError> {
+        let mode = self.mode.trim().to_ascii_lowercase();
+        let cap = self.limit.unwrap_or(200).clamp(1, 1000);
+        let text = match mode.as_str() {
+            "list" => {
+                let path = self.path.unwrap_or_else(|| ".".to_string());
+                tools.off_runtime(move |cwd| fs_tools::list_dir(cwd, &path)).await?
+            }
+            "files" => {
+                let pattern = self.pattern.ok_or_else(|| ToolError::Other("search mode files needs a pattern".into()))?;
+                tools.off_runtime(move |cwd| fs_tools::glob_files(cwd, &pattern)).await?
+            }
+            "content" => {
+                let pattern = self.pattern.ok_or_else(|| ToolError::Other("search mode content needs a pattern".into()))?;
+                let glob = self.glob;
+                let case = self.case_insensitive;
+                tools
+                    .off_runtime(move |cwd| fs_tools::grep(cwd, &pattern, glob.as_deref(), case))
+                    .await?
+            }
+            other => return Err(ToolError::Other(format!("search: unknown mode '{other}'; use list, files or content"))),
+        };
+        Ok(cap_lines(text, cap))
+    }
+}
+
+fn cap_lines(text: String, limit: usize) -> String {
+    let mut lines = text.lines();
+    let kept: Vec<&str> = lines.by_ref().take(limit).collect();
+    if lines.next().is_none() {
+        return text;
+    }
+    let total = text.lines().count();
+    format!("{}\n...[showing {limit} of {total} lines; narrow the search or raise limit]", kept.join("\n"))
 }
 
 #[derive(Deserialize)]
-struct EditArgs {
+struct EditToolArgs {
+    mode: String,
     #[serde(default)]
     path: String,
+    content: Option<String>,
     #[serde(default)]
     edits: Vec<fs_tools::EditChunk>,
     /// Applied as one change.
     #[serde(default)]
     files: Vec<EditItem>,
+    patch: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -729,7 +880,7 @@ struct EditItem {
     edits: Vec<fs_tools::EditChunk>,
 }
 
-impl EditArgs {
+impl EditToolArgs {
     /// `path` first, then `files`.
     fn targets(self) -> Vec<(String, Vec<fs_tools::EditChunk>)> {
         let mut targets = Vec::new();
@@ -742,44 +893,47 @@ impl EditArgs {
 }
 
 #[derive(Deserialize)]
-struct PatchArgs {
-    path: String,
-    patch: String,
-}
-
-#[derive(Deserialize)]
-struct ListArgs {
+struct GitArgs {
+    action: String,
     path: Option<String>,
-}
-
-#[derive(Deserialize)]
-struct GlobArgs {
-    pattern: String,
-}
-
-#[derive(Deserialize)]
-struct GrepArgs {
-    pattern: String,
-    glob: Option<String>,
-    #[serde(default)]
-    case_insensitive: bool,
-}
-
-#[derive(Deserialize)]
-struct OutlineArgs {
-    path: String,
-}
-
-#[derive(Deserialize)]
-struct GitStatusArgs {
-    path: Option<String>,
-}
-
-#[derive(Deserialize)]
-struct GitDiffArgs {
-    #[serde(default)]
     staged: Option<bool>,
-    path: Option<String>,
+    rev: Option<String>,
+    limit: Option<usize>,
+}
+
+#[derive(Deserialize)]
+struct WebArgs {
+    action: String,
+    query: Option<String>,
+    count: Option<u32>,
+    url: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct HttpRequestArgs {
+    method: Option<String>,
+    url: String,
+    #[serde(default)]
+    headers: Vec<HttpHeader>,
+    body: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct HttpHeader {
+    name: String,
+    value: String,
+}
+
+#[derive(Deserialize)]
+struct SkillArgs {
+    action: String,
+    name: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct TaskArgs {
+    action: String,
+    task_id: Option<u32>,
 }
 
 #[derive(Deserialize)]
@@ -787,20 +941,6 @@ struct ShellArgs {
     command: Option<String>,
     background: Option<bool>,
     timeout_ms: Option<u64>,
-    task_id: Option<u32>,
-    #[serde(default)]
-    kill: bool,
-}
-
-#[derive(Deserialize)]
-struct FetchArgs {
-    url: String,
-}
-
-#[derive(Deserialize)]
-struct SearchArgs {
-    query: String,
-    count: Option<u32>,
 }
 
 #[cfg(test)]
@@ -834,7 +974,7 @@ mod tests {
         let abs = dir.join("main.rs").to_string_lossy().to_string();
         let call = ToolCall {
             id: "c".into(),
-            name: "write_file".into(),
+            name: "edit".into(),
             args_json: serde_json::json!({"path": abs, "content": "fn main() { println!(); }\n"}).to_string(),
         };
         let diff = tools.preview_for(&call).expect("a preview");
@@ -855,7 +995,7 @@ mod tests {
         .unwrap();
         let call = ToolCall {
             id: "1".into(),
-            name: "edit_file".into(),
+            name: "edit".into(),
             args_json: r#"{"path":"src/parser.rs","edits":[{"old_string":"pub fn parse_duration() {}","new_string":"/// A bare number means minutes.\npub fn parse_duration() {}"}]}"#.into(),
         };
         let diff = tools.write_preview(&call);
@@ -880,6 +1020,12 @@ mod tests {
     }
 
     fn batch_call(name: &str, args: serde_json::Value) -> ToolCall {
+        let mut args = args;
+        if name == "edit" {
+            if let Some(obj) = args.as_object_mut() {
+                obj.entry("mode").or_insert(serde_json::json!("replace"));
+            }
+        }
         ToolCall { id: "t".into(), name: name.into(), args_json: args.to_string() }
     }
 
@@ -887,11 +1033,11 @@ mod tests {
     fn an_edit_that_cannot_apply_is_known_before_anyone_approves_it() {
         use flashagent_core::WritePreview;
         let (dir, tools) = batch_tools("doomed", &[("a.rs", "fn one() {}\n")]);
-        let missing = batch_call("edit_file", serde_json::json!({ "path": "a.rs", "edits": [ { "old_string": "fn two() {}", "new_string": "x" } ] }));
-        let fine = batch_call("edit_file", serde_json::json!({ "path": "a.rs", "edits": [ { "old_string": "fn one() {}", "new_string": "x" } ] }));
-        let outside = batch_call("edit_file", serde_json::json!({ "path": "../a.rs", "edits": [ { "old_string": "nope", "new_string": "x" } ] }));
-        let home = batch_call("edit_file", serde_json::json!({ "path": "~/.gitconfig", "edits": [ { "old_string": "nope", "new_string": "x" } ] }));
-        let twice = batch_call("edit_file", serde_json::json!({ "files": [
+        let missing = batch_call("edit", serde_json::json!({ "path": "a.rs", "edits": [ { "old_string": "fn two() {}", "new_string": "x" } ] }));
+        let fine = batch_call("edit", serde_json::json!({ "path": "a.rs", "edits": [ { "old_string": "fn one() {}", "new_string": "x" } ] }));
+        let outside = batch_call("edit", serde_json::json!({ "path": "../a.rs", "edits": [ { "old_string": "nope", "new_string": "x" } ] }));
+        let home = batch_call("edit", serde_json::json!({ "path": "~/.gitconfig", "edits": [ { "old_string": "nope", "new_string": "x" } ] }));
+        let twice = batch_call("edit", serde_json::json!({ "files": [
             { "path": "a.rs", "edits": [ { "old_string": "fn one() {}", "new_string": "fn two() {}" } ] },
             { "path": "a.rs", "edits": [ { "old_string": "fn two() {}", "new_string": "fn three() {}" } ] }
         ] }));
@@ -908,7 +1054,7 @@ mod tests {
     #[test]
     fn a_file_named_twice_in_a_batch_is_previewed_and_checked_as_written() {
         let (dir, tools) = batch_tools("twice", &[("a.txt", "one\n")]);
-        let hidden = batch_call("edit_file", serde_json::json!({ "files": [
+        let hidden = batch_call("edit", serde_json::json!({ "files": [
             { "path": "a.txt", "edits": [ { "old_string": "one", "new_string": "two" } ] },
             { "path": "./a.txt", "edits": [ { "old_string": "two", "new_string": "rm -rf" } ] }
         ] }));
@@ -924,7 +1070,7 @@ mod tests {
     async fn a_batch_edit_changes_every_file_it_names() {
         let (dir, tools) = batch_tools("ok", &[("a.txt", "one\n"), ("b.txt", "two\n")]);
         let out = tools
-            .execute(&batch_call("edit_file", serde_json::json!({ "files": [
+            .execute(&batch_call("edit", serde_json::json!({ "files": [
                 { "path": "a.txt", "edits": [ { "old_string": "one", "new_string": "ONE" } ] },
                 { "path": "b.txt", "edits": [ { "old_string": "two", "new_string": "TWO" } ] }
             ] })))
@@ -940,7 +1086,7 @@ mod tests {
     async fn a_batch_edit_with_one_edit_that_does_not_fit_changes_no_file() {
         let (dir, tools) = batch_tools("atomic", &[("a.txt", "one\n"), ("b.txt", "two\n")]);
         let out = tools
-            .execute(&batch_call("edit_file", serde_json::json!({ "files": [
+            .execute(&batch_call("edit", serde_json::json!({ "files": [
                 { "path": "a.txt", "edits": [ { "old_string": "one", "new_string": "ONE" } ] },
                 { "path": "b.txt", "edits": [ { "old_string": "not in the file", "new_string": "x" } ] }
             ] })))
@@ -955,7 +1101,7 @@ mod tests {
     #[tokio::test]
     async fn a_batch_edit_is_previewed_whole() {
         let (dir, tools) = batch_tools("preview", &[("a.txt", "one\n"), ("b.txt", "two\n")]);
-        let diff = tools.write_preview(&batch_call("edit_file", serde_json::json!({ "files": [
+        let diff = tools.write_preview(&batch_call("edit", serde_json::json!({ "files": [
             { "path": "a.txt", "edits": [ { "old_string": "one", "new_string": "ONE" } ] },
             { "path": "b.txt", "edits": [ { "old_string": "two", "new_string": "TWO" } ] }
         ] })));
@@ -967,7 +1113,7 @@ mod tests {
     #[tokio::test]
     async fn a_prepared_batch_rejects_changes_made_after_the_approval_diff() {
         let (dir, tools) = batch_tools("stale-prepared", &[("a.txt", "one\n"), ("b.txt", "two\n")]);
-        let call = batch_call("edit_file", serde_json::json!({ "files": [
+        let call = batch_call("edit", serde_json::json!({ "files": [
             { "path": "a.txt", "edits": [ { "old_string": "one", "new_string": "ONE" } ] },
             { "path": "b.txt", "edits": [ { "old_string": "two", "new_string": "TWO" } ] }
         ] }));
@@ -984,7 +1130,7 @@ mod tests {
     #[test]
     fn failed_or_oversized_batches_never_preview_only_the_valid_files() {
         let (dir, tools) = batch_tools("invalid-preview", &[("a.txt", "one\n"), ("b.txt", "two\n")]);
-        let bad = batch_call("edit_file", serde_json::json!({ "files": [
+        let bad = batch_call("edit", serde_json::json!({ "files": [
             { "path": "a.txt", "edits": [ { "old_string": "one", "new_string": "ONE" } ] },
             { "path": "b.txt", "edits": [ { "old_string": "missing", "new_string": "TWO" } ] }
         ] }));
@@ -993,7 +1139,7 @@ mod tests {
         let files: Vec<_> = (0..21).map(|_| serde_json::json!({
             "path": "a.txt", "edits": [{"old_string": "one", "new_string": "one"}]
         })).collect();
-        let large = batch_call("edit_file", serde_json::json!({"files": files}));
+        let large = batch_call("edit", serde_json::json!({"files": files}));
         assert!(tools.write_preview(&large).is_none());
         assert!(tools.doomed(&large).unwrap().contains("at most 20"));
         let _ = std::fs::remove_dir_all(&dir);
@@ -1003,10 +1149,10 @@ mod tests {
     async fn several_files_are_read_in_one_call_and_a_missing_one_does_not_stop_the_rest() {
         let (dir, tools) = batch_tools("read", &[("a.txt", "one\n"), ("b.txt", "two\n")]);
         let out = tools
-            .execute(&batch_call("read_file", serde_json::json!({ "files": [ { "path": "a.txt" }, { "path": "nope.txt" }, { "path": "b.txt" } ] })))
+            .execute(&batch_call("read", serde_json::json!({ "files": [ { "path": "a.txt" }, { "path": "nope.txt" }, { "path": "b.txt" } ] })))
             .await;
         let none = tools
-            .execute(&batch_call("read_file", serde_json::json!({ "paths": [ "nope.txt", "gone.txt" ] })))
+            .execute(&batch_call("read", serde_json::json!({ "paths": [ "nope.txt", "gone.txt" ] })))
             .await;
         let _ = std::fs::remove_dir_all(&dir);
         assert!(!out.is_error, "{}", out.content);
@@ -1021,7 +1167,7 @@ mod tests {
     #[tokio::test]
     async fn long_error_results_are_truncated_too() {
         let tools = BuiltinTools::new(BuiltinToolsConfig { cwd: testing::tempdir(), ..Default::default() }).unwrap();
-        let call = ToolCall { id: "t".into(), name: "read_file".into(), args_json: "x".repeat(MAX_OUTPUT_BYTES) };
+        let call = ToolCall { id: "t".into(), name: "read".into(), args_json: "x".repeat(MAX_OUTPUT_BYTES) };
         let out = tools.execute(&call).await;
         assert!(out.is_error);
         assert!(out.content.contains("truncated"));
@@ -1037,7 +1183,7 @@ mod tests {
         .unwrap();
         for args in ["{ not json", "", r#"{"path": 42}"#] {
             let out = tools
-                .execute(&ToolCall { id: "t".into(), name: "read_file".into(), args_json: args.into() })
+                .execute(&ToolCall { id: "t".into(), name: "read".into(), args_json: args.into() })
                 .await;
             assert!(out.is_error, "args {args:?} must error, got {out:?}");
         }
@@ -1066,7 +1212,7 @@ mod tests {
             })
         };
         let tools = BuiltinTools::new(BuiltinToolsConfig { cwd: dir, ..Default::default() }).unwrap();
-        let call = ToolCall { id: "t".into(), name: "read_file".into(), args_json: r#"{"path":"pipe"}"#.into() };
+        let call = ToolCall { id: "t".into(), name: "read".into(), args_json: r#"{"path":"pipe"}"#.into() };
         let read = tools.execute(&call);
         tokio::pin!(read);
         // A single-threaded runtime: a read done inline would hold it until the
@@ -1091,7 +1237,7 @@ mod tests {
         let out = tools
             .execute(&ToolCall {
                 id: "t".into(),
-                name: "read_file".into(),
+                name: "read".into(),
                 args_json: r#"{"path":"nope.txt"}"#.into(),
             })
             .await;
@@ -1109,18 +1255,16 @@ mod tests {
         })
         .unwrap();
         let specs = tools.specs();
-        assert_eq!(specs.len(), 20); // 10 core (update_plan included) + 8 extended + 2 web, on by default
+        assert_eq!(specs.len(), 13); // the unified set, web on, agent added one level up
         let names: Vec<&str> = specs.iter().map(|s| s.name.as_str()).collect();
-        assert!(names.contains(&"ask_user"));
-        assert!(names.contains(&"outline_file"));
-        assert!(names.contains(&"git_status"));
-        assert!(names.contains(&"git_diff"));
-        assert!(names.contains(&"patch_file"));
+        assert!(names.contains(&"user_interaction"));
+        assert!(names.contains(&"search"));
+        assert!(names.contains(&"git"));
+        assert!(names.contains(&"edit"));
         assert!(names.contains(&"env_info"));
-        assert!(names.contains(&"memory_read"));
-        assert!(names.contains(&"memory_create"));
-        assert!(names.contains(&"web_search"));
-        assert!(names.contains(&"web_fetch"));
+        assert!(names.contains(&"memory"));
+        assert!(names.contains(&"web"));
+        assert!(names.contains(&"http_request"));
     }
 
     #[tokio::test]
@@ -1159,18 +1303,18 @@ mod tests {
         .unwrap();
         let out = tools.execute(&ToolCall {
             id: "1".into(),
-            name: "web_search".into(),
-            args_json: r#"{"query":"rust"}"#.into(),
+            name: "web".into(),
+            args_json: r#"{"action":"search","query":"rust"}"#.into(),
         }).await;
         assert!(out.is_error);
         assert!(out.content.contains("turned off in Settings"), "{}", out.content);
-        assert!(!tools.specs().iter().any(|s| s.name == "web_fetch"), "a tool that is off must not be offered");
+        assert!(!tools.specs().iter().any(|s| s.name == "http_request"), "a tool that is off must not be offered");
 
         tools.set_web_enabled(true);
         let specs = tools.specs();
         let names: Vec<&str> = specs.iter().map(|s| s.name.as_str()).collect();
-        assert!(names.contains(&"web_search"));
-        assert!(names.contains(&"web_fetch"));
+        assert!(names.contains(&"web"));
+        assert!(names.contains(&"http_request"));
     }
 
     #[test]
@@ -1183,16 +1327,16 @@ mod tests {
         })
         .unwrap();
         let specs = tools.specs();
-        assert_eq!(specs.len(), 18); // Auto keeps the full toolset even at 32k (no window-based downgrade)
-        assert!(specs.iter().any(|s| s.name == "patch_file"));
+        assert_eq!(specs.len(), 11); // Auto keeps the full toolset even at 32k (no window-based downgrade)
+        assert!(specs.iter().any(|s| s.name == "edit"));
 
         tools.set_context_window(Some(65_536));
         // What the app has measured: the schemas are given what a tier has left
         // after the prompt, not after its ceiling.
         tools.set_prompt_tokens(3_900);
         let specs_large = tools.specs();
-        assert_eq!(specs_large.len(), 18);
-        assert!(specs_large.iter().any(|s| s.name == "patch_file"));
+        assert_eq!(specs_large.len(), 11);
+        assert!(specs_large.iter().any(|s| s.name == "edit"));
     }
 
     #[test]
@@ -1209,11 +1353,11 @@ mod tests {
         .unwrap();
         tools.set_prompt_tokens(flashagent_core::budget::PROMPT_CEILING);
         let specs = tools.specs();
-        for needed in ["read_file", "write_file", "edit_file", "glob", "grep", "run_shell", "ask_user"] {
+        for needed in ["read", "edit", "search", "run_shell", "user_interaction"] {
             assert!(specs.iter().any(|s| s.name == needed), "{needed} is gone at {specs:?}");
         }
         // And what did not fit is reported rather than silently dropped.
-        assert!(!specs.iter().any(|s| s.name == "web_search"), "the optional end still goes first");
+        assert!(!specs.iter().any(|s| s.name == "http_request"), "the optional end still goes first");
     }
 
     #[tokio::test]
@@ -1236,7 +1380,7 @@ mod tests {
         let out = tools
             .execute(&ToolCall {
                 id: "t".into(),
-                name: "read_file".into(),
+                name: "read".into(),
                 args_json: serde_json::json!({ "files": listed }).to_string(),
             })
             .await;
@@ -1279,10 +1423,10 @@ mod tests {
             ..Default::default()
         })
         .unwrap();
-        assert!(tools.specs().iter().any(|s| s.name == "web_search"));
-        tools.set_disabled_tools(vec!["web_search".into()]);
+        assert!(tools.specs().iter().any(|s| s.name == "web"));
+        tools.set_disabled_tools(vec!["web".into()]);
         let specs = tools.specs();
-        assert!(!specs.iter().any(|s| s.name == "web_search"), "a tool that is off is still offered");
+        assert!(!specs.iter().any(|s| s.name == "web"), "a tool that is off is still offered");
         assert_eq!(tools.specs_measured(), 2, "the list must be measured again after the change");
     }
 
@@ -1316,15 +1460,16 @@ mod tests {
 
     #[test]
     fn a_call_in_another_agents_argument_names_is_read_as_this_tools_own() {
-        let edit: EditArgs = parse_args(r#"{"filePath":"a.rs","oldString":"x","newString":"y"}"#, "edit_file").unwrap();
+        let edit: EditToolArgs = parse_args(r#"{"filePath":"a.rs","oldString":"x","newString":"y"}"#, "edit").unwrap();
         assert_eq!(edit.path, "a.rs");
+        assert_eq!(edit.mode, "replace");
         assert_eq!(edit.edits.len(), 1);
         assert_eq!((edit.edits[0].old_string.as_str(), edit.edits[0].new_string.as_str()), ("x", "y"));
 
         let shell: ShellArgs = parse_args(r#"{"cmd":"ls"}"#, "run_shell").unwrap();
         assert_eq!(shell.command.as_deref(), Some("ls"));
 
-        let write: WriteArgs = parse_args(r#"{"file_path":"b.txt","contents":"hi"}"#, "write_file").unwrap();
-        assert_eq!((write.path.as_str(), write.content.as_str()), ("b.txt", "hi"));
+        let write: EditToolArgs = parse_args(r#"{"mode":"write","file_path":"b.txt","contents":"hi"}"#, "edit").unwrap();
+        assert_eq!((write.path.as_str(), write.content.as_deref()), ("b.txt", Some("hi")));
     }
 }

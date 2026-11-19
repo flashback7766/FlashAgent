@@ -36,12 +36,16 @@ impl Project {
         .unwrap();
         std::fs::write(dir.join("notes.txt"), "first\nsecond\nthird\n").unwrap();
         std::fs::write(dir.join("README.md"), "# Project\n\nA test project.\n").unwrap();
+        // Memory resolves through this home, never the owner's.
+        let home = dir.join("home");
+        std::fs::create_dir_all(&home).unwrap();
 
         let tools = Arc::new(
             BuiltinTools::new(BuiltinToolsConfig {
                 cwd: dir.clone(),
                 web_enabled: Some(true),
                 context_window: Some(200_000),
+                home: Some(home),
                 ..Default::default()
             })
             .unwrap(),
@@ -96,6 +100,15 @@ impl Drop for Project {
 fn checked_here() -> BTreeSet<String> {
     flashagent_core::registry::TOOLS
         .iter()
+        // The three old agent verbs are internal now; the model gets `agent`.
+        .filter(|def| {
+            !matches!(
+                def.handler,
+                flashagent_core::registry::Handler::SpawnAgent
+                    | flashagent_core::registry::Handler::SendMessage
+                    | flashagent_core::registry::Handler::ReviewAgent
+            )
+        })
         .map(|def| def.name.to_string())
         .collect()
 }
@@ -107,30 +120,20 @@ fn checked_here() -> BTreeSet<String> {
 /// asks whether it is true.
 fn really_invoked() -> BTreeSet<String> {
     [
-        "read_file",
-        "write_file",
-        "edit_file",
-        "patch_file",
-        "list_dir",
-        "glob",
-        "grep",
-        "outline_file",
+        "read",
+        "search",
+        "edit",
         "run_shell",
         "env_info",
-        "git_status",
-        "git_diff",
-        "view_image",
-        "memory_create",
-        "memory_read",
-        "memory_update",
-        "memory_remove",
-        "web_fetch",
-        "web_search",
-        "spawn_agent",
-        "send_message",
-        "ask_user",
+        "git",
+        "web",
+        "http_request",
+        "skill",
+        "task",
+        "memory",
+        "user_interaction",
         "update_plan",
-        "review_agent",
+        "agent",
     ]
     .iter()
     .map(|s| s.to_string())
@@ -178,7 +181,8 @@ fn what_the_model_is_offered(
     }
 
     let state = Arc::new(PermissionState::new(PermissionMode::Bypass, Arc::new(Allow)));
-    flashagent_tools::agent_tools(project.tools.clone(), Arc::new(OneWord), state, None)
+    let (composite, finished, _control) = flashagent_tools::agent_tools(project.tools.clone(), Arc::new(OneWord), state, None);
+    (composite, finished)
 }
 
 #[tokio::test]
@@ -249,8 +253,8 @@ async fn a_subagent_is_started_for_real_and_answers_on_its_own() {
     let out = composite
         .execute(&ToolCall {
             id: "t".into(),
-            name: "spawn_agent".into(),
-            args_json: r#"{"role":"researcher","task":"read notes.txt and say what is in it"}"#.into(),
+            name: "agent".into(),
+            args_json: r#"{"action":"spawn","role":"researcher","task":"read notes.txt and say what is in it"}"#.into(),
         })
         .await;
     assert!(!out.is_error, "{}", out.content);
@@ -272,27 +276,28 @@ async fn a_subagent_is_started_for_real_and_answers_on_its_own() {
 async fn a_file_is_read_written_and_edited() {
     let project = Project::new();
 
-    let read = project.call("read_file", serde_json::json!({ "path": "notes.txt" })).await;
+    let read = project.call("read", serde_json::json!({ "path": "notes.txt" })).await;
     assert!(read.contains("     1\tfirst"), "{read}");
     assert!(read.contains("     3\tthird"), "{read}");
 
     let window = project
-        .call("read_file", serde_json::json!({ "path": "notes.txt", "offset": 1, "limit": 1 }))
+        .call("read", serde_json::json!({ "path": "notes.txt", "offset": 1, "limit": 1 }))
         .await;
     assert_eq!(window.trim_end(), "     2\tsecond");
 
     project
-        .call("write_file", serde_json::json!({ "path": "new/deep.txt", "content": "written\n" }))
+        .call("edit", serde_json::json!({ "mode": "write", "path": "new/deep.txt", "content": "written\n" }))
         .await;
     // Through the tool, as the model sees it, and from disk.
-    let back = project.call("read_file", serde_json::json!({ "path": "new/deep.txt" })).await;
+    let back = project.call("read", serde_json::json!({ "path": "new/deep.txt" })).await;
     assert!(back.contains("written"), "written and read back through the tools: {back}");
     assert_eq!(project.read("new/deep.txt"), "written\n", "write_file must create the folders too");
 
     project
         .call(
-            "edit_file",
+            "edit",
             serde_json::json!({
+                "mode": "replace",
                 "path": "notes.txt",
                 "edits": [{ "old_string": "second", "new_string": "SECOND" }]
             }),
@@ -303,8 +308,9 @@ async fn a_file_is_read_written_and_edited() {
     // An edit that does not fit must not touch the file.
     let missed = project
         .raw(
-            "edit_file",
+            "edit",
             serde_json::json!({
+                "mode": "replace",
                 "path": "notes.txt",
                 "edits": [{ "old_string": "nowhere to be found", "new_string": "x" }]
             }),
@@ -320,7 +326,7 @@ async fn several_files_are_read_and_edited_in_one_call() {
 
     let both = project
         .call(
-            "read_file",
+            "read",
             serde_json::json!({ "files": [{ "path": "notes.txt" }, { "path": "README.md" }] }),
         )
         .await;
@@ -329,8 +335,9 @@ async fn several_files_are_read_and_edited_in_one_call() {
 
     project
         .call(
-            "edit_file",
+            "edit",
             serde_json::json!({
+                "mode": "replace",
                 "files": [
                     { "path": "notes.txt", "edits": [{ "old_string": "first", "new_string": "1st" }] },
                     { "path": "README.md", "edits": [{ "old_string": "A test", "new_string": "One test" }] }
@@ -346,7 +353,7 @@ async fn several_files_are_read_and_edited_in_one_call() {
 async fn a_patch_is_applied_as_a_diff() {
     let project = Project::new();
     let patch = "@@ -1,3 +1,3 @@\n first\n-second\n+patched\n third\n";
-    project.call("patch_file", serde_json::json!({ "path": "notes.txt", "patch": patch })).await;
+    project.call("edit", serde_json::json!({ "mode": "patch", "path": "notes.txt", "patch": patch })).await;
     assert_eq!(project.read("notes.txt"), "first\npatched\nthird\n");
 }
 
@@ -359,8 +366,9 @@ async fn edits_listed_bottom_up_are_applied_in_the_order_of_the_file() {
     // notes.txt holds "first\nsecond\nthird\n".
     project
         .call(
-            "edit_file",
+            "edit",
             serde_json::json!({
+                "mode": "replace",
                 "path": "notes.txt",
                 "edits": [
                     { "old_string": "third", "new_string": "3" },
@@ -376,20 +384,20 @@ async fn edits_listed_bottom_up_are_applied_in_the_order_of_the_file() {
 async fn the_project_is_listed_searched_and_outlined() {
     let project = Project::new();
 
-    let listing = project.call("list_dir", serde_json::json!({ "path": "." })).await;
+    let listing = project.call("search", serde_json::json!({ "mode": "list", "path": "." })).await;
     assert!(listing.contains("notes.txt") && listing.contains("src/"), "{listing}");
 
-    let globbed = project.call("glob", serde_json::json!({ "pattern": "**/*.rs" })).await;
+    let globbed = project.call("search", serde_json::json!({ "mode": "files", "pattern": "**/*.rs" })).await;
     assert!(globbed.contains("main.rs"), "{globbed}");
 
-    let grepped = project.call("grep", serde_json::json!({ "pattern": "fn (main|helper)" })).await;
+    let grepped = project.call("search", serde_json::json!({ "mode": "content", "pattern": "fn (main|helper)" })).await;
     assert!(grepped.contains("main.rs") && grepped.contains("fn main"), "{grepped}");
 
-    let outline = project.call("outline_file", serde_json::json!({ "path": "src/main.rs" })).await;
+    let outline = project.call("read", serde_json::json!({ "mode": "outline", "path": "src/main.rs" })).await;
     assert!(outline.contains("main") && outline.contains("helper"), "{outline}");
 
     // No match is an answer, not a failure.
-    let nothing = project.raw("grep", serde_json::json!({ "pattern": "zzzz-not-here" })).await;
+    let nothing = project.raw("search", serde_json::json!({ "mode": "content", "pattern": "zzzz-not-here" })).await;
     assert!(!nothing.is_error, "{}", nothing.content);
 }
 
@@ -423,8 +431,8 @@ async fn the_environment_and_the_repository_are_reported() {
     assert!(!env.trim().is_empty(), "env_info said nothing");
 
     // Outside a repository both git tools must answer, not panic or hang.
-    let status = project.raw("git_status", serde_json::json!({})).await;
-    let diff = project.raw("git_diff", serde_json::json!({})).await;
+    let status = project.raw("git", serde_json::json!({ "action": "status" })).await;
+    let diff = project.raw("git", serde_json::json!({ "action": "diff" })).await;
     for out in [&status, &diff] {
         assert!(!out.content.trim().is_empty(), "a git tool said nothing outside a repository");
     }
@@ -438,7 +446,7 @@ async fn the_environment_and_the_repository_are_reported() {
     if git("init").map(|o| o.status.success()).unwrap_or(false) {
         let _ = git("config user.email t@example.com");
         let _ = git("config user.name Test");
-        let status = project.call("git_status", serde_json::json!({})).await;
+        let status = project.call("git", serde_json::json!({ "action": "status" })).await;
         assert!(status.contains("notes.txt"), "{status}");
     }
 }
@@ -456,11 +464,11 @@ async fn a_picture_is_opened_and_a_text_file_is_not_mistaken_for_one() {
     png.extend_from_slice(&[0; 16]);
     std::fs::write(project.dir.join("shot.png"), &png).unwrap();
 
-    let out = project.raw("view_image", serde_json::json!({ "path": "shot.png" })).await;
+    let out = project.raw("read", serde_json::json!({ "mode": "image", "path": "shot.png" })).await;
     assert!(!out.is_error, "{}", out.content);
 
     // Reading a picture as text must say what it is, not talk about UTF-8.
-    let as_text = project.raw("read_file", serde_json::json!({ "path": "shot.png" })).await;
+    let as_text = project.raw("read", serde_json::json!({ "mode": "text", "path": "shot.png" })).await;
     assert!(as_text.is_error);
     assert!(as_text.content.contains("not a text file"), "{}", as_text.content);
 }
@@ -471,38 +479,46 @@ async fn a_memory_is_written_read_back_and_removed() {
 
     let created = project
         .raw(
-            "memory_create",
+            "memory",
             serde_json::json!({
+                "command": "create",
                 "scope": "project",
-                "title": "Build command",
-                "content": "Run cargo test --workspace before pushing."
+                "path": "build-command",
+                "file_text": "Run cargo test --workspace before pushing.",
+                "description": "the build command"
             }),
         )
         .await;
     assert!(!created.is_error, "{}", created.content);
 
-    let read = project.call("memory_read", serde_json::json!({ "scope": "project" })).await;
+    let read = project
+        .call("memory", serde_json::json!({ "command": "view", "scope": "project", "path": "build-command" }))
+        .await;
     assert!(read.contains("cargo test --workspace"), "what was written must read back: {read}");
 
     let updated = project
         .raw(
-            "memory_update",
+            "memory",
             serde_json::json!({
+                "command": "str_replace",
                 "scope": "project",
-                "title": "Build command",
-                "content": "Run cargo clippy too."
+                "path": "build-command",
+                "old_str": "cargo test --workspace",
+                "new_str": "cargo clippy too"
             }),
         )
         .await;
     assert!(!updated.is_error, "{}", updated.content);
-    let read = project.call("memory_read", serde_json::json!({ "scope": "project" })).await;
+    let read = project
+        .call("memory", serde_json::json!({ "command": "view", "scope": "project", "path": "build-command" }))
+        .await;
     assert!(read.contains("clippy"), "{read}");
 
     let removed = project
-        .raw("memory_remove", serde_json::json!({ "scope": "project", "title": "Build command" }))
+        .raw("memory", serde_json::json!({ "command": "delete", "scope": "project", "path": "build-command" }))
         .await;
     assert!(!removed.is_error, "{}", removed.content);
-    let read = project.call("memory_read", serde_json::json!({ "scope": "project" })).await;
+    let read = project.call("memory", serde_json::json!({ "command": "view", "scope": "project" })).await;
     assert!(!read.contains("clippy"), "a removed memory must be gone: {read}");
 }
 
@@ -511,13 +527,18 @@ async fn an_autonomous_run_may_read_memory_but_not_rewrite_it() {
     // A long unattended run must not rewrite what the agent knows.
     let project = Project::new();
     project.tools.set_goal_mode(true);
-    for name in ["memory_create", "memory_update", "memory_remove"] {
+    for command in ["create", "str_replace", "delete"] {
         let out = project
-            .raw(name, serde_json::json!({ "title": "x", "content": "y", "scope": "project" }))
+            .raw(
+                "memory",
+                serde_json::json!({ "command": command, "path": "x", "file_text": "y", "old_str": "y", "scope": "project" }),
+            )
             .await;
-        assert!(out.is_error, "{name} rewrote memory during a /goal run");
+        assert!(out.is_error, "memory {command} rewrote memory during a /goal run");
     }
-    let read = project.raw("memory_read", serde_json::json!({ "scope": "project" })).await;
+    let read = project
+        .raw("memory", serde_json::json!({ "command": "view", "scope": "project" }))
+        .await;
     assert!(!read.is_error, "reading memory must still work: {}", read.content);
 }
 
@@ -531,7 +552,7 @@ async fn a_path_the_model_writes_with_a_tilde_reaches_the_home_folder() {
     std::fs::write(&marker, "reached\n").unwrap();
 
     let name = marker.file_name().unwrap().to_string_lossy().to_string();
-    let out = project.raw("read_file", serde_json::json!({ "path": format!("~/{name}") })).await;
+    let out = project.raw("read", serde_json::json!({ "path": format!("~/{name}") })).await;
     let _ = std::fs::remove_file(&marker);
     assert!(!out.is_error, "a tilde path was not resolved: {}", out.content);
     assert!(out.content.contains("reached"), "{}", out.content);
@@ -541,15 +562,15 @@ async fn a_path_the_model_writes_with_a_tilde_reaches_the_home_folder() {
 async fn a_tool_that_is_sent_nonsense_answers_with_an_error_not_a_panic() {
     let project = Project::new();
     let nonsense = [
-        ("read_file", serde_json::json!({})),
-        ("read_file", serde_json::json!({ "path": "" })),
-        ("write_file", serde_json::json!({ "path": "x.txt" })),
-        ("edit_file", serde_json::json!({ "path": "notes.txt", "edits": [] })),
-        ("patch_file", serde_json::json!({ "path": "notes.txt", "patch": "not a diff" })),
-        ("glob", serde_json::json!({ "pattern": "[" })),
-        ("grep", serde_json::json!({ "pattern": "(unclosed" })),
-        ("list_dir", serde_json::json!({ "path": "no/such/folder" })),
-        ("outline_file", serde_json::json!({ "path": "no/such/file.rs" })),
+        ("read", serde_json::json!({})),
+        ("read", serde_json::json!({ "path": "" })),
+        ("edit", serde_json::json!({ "mode": "write", "path": "x.txt" })),
+        ("edit", serde_json::json!({ "mode": "replace", "path": "notes.txt", "edits": [] })),
+        ("edit", serde_json::json!({ "mode": "patch", "path": "notes.txt", "patch": "not a diff" })),
+        ("search", serde_json::json!({ "mode": "files", "pattern": "[" })),
+        ("search", serde_json::json!({ "mode": "content", "pattern": "(unclosed" })),
+        ("search", serde_json::json!({ "mode": "list", "path": "no/such/folder" })),
+        ("read", serde_json::json!({ "mode": "outline", "path": "no/such/file.rs" })),
         ("run_shell", serde_json::json!({})),
         ("no_such_tool", serde_json::json!({})),
     ];
@@ -571,12 +592,12 @@ async fn a_tool_turned_off_in_settings_says_so_rather_than_running() {
     })
     .unwrap();
 
-    for name in ["web_fetch", "web_search"] {
+    for (name, args) in [("web", serde_json::json!({ "action": "fetch", "url": "https://example.com" })), ("http_request", serde_json::json!({ "url": "https://example.com" }))] {
         let out = tools
             .execute(&ToolCall {
                 id: "t".into(),
                 name: name.into(),
-                args_json: serde_json::json!({ "url": "https://example.com", "query": "x" }).to_string(),
+                args_json: args.to_string(),
             })
             .await;
         assert!(out.is_error, "{name} ran while switched off");
@@ -594,8 +615,9 @@ async fn a_question_is_asked_through_the_composite_the_model_really_calls() {
     let out = composite
         .execute(&ToolCall {
             id: "t".into(),
-            name: "ask_user".into(),
+            name: "user_interaction".into(),
             args_json: serde_json::json!({
+                "mode": "ask",
                 "question": "Which one?",
                 "options": ["left", "right"],
                 "multi_select": false
@@ -643,8 +665,8 @@ async fn sending_a_message_and_reviewing_a_child_run_through_the_real_composite(
     let spawn = composite
         .execute(&ToolCall {
             id: "t".into(),
-            name: "spawn_agent".into(),
-            args_json: serde_json::json!({ "role": "researcher", "task": "say something and finish" }).to_string(),
+            name: "agent".into(),
+            args_json: serde_json::json!({ "action": "spawn", "role": "researcher", "task": "say something and finish" }).to_string(),
         })
         .await;
     assert!(!spawn.is_error, "{}", spawn.content);
@@ -660,8 +682,9 @@ async fn sending_a_message_and_reviewing_a_child_run_through_the_real_composite(
     let review = composite
         .execute(&ToolCall {
             id: "t".into(),
-            name: "review_agent".into(),
+            name: "agent".into(),
             args_json: serde_json::json!({
+                "action": "review",
                 "agent": id,
                 "verdict": "verified",
                 "note": "checked the answer against the file"
@@ -682,8 +705,8 @@ async fn sending_a_message_and_reviewing_a_child_run_through_the_real_composite(
     let to_finished = composite
         .execute(&ToolCall {
             id: "t".into(),
-            name: "send_message".into(),
-            args_json: serde_json::json!({ "to": id, "message": "wrap it up" }).to_string(),
+            name: "agent".into(),
+            args_json: serde_json::json!({ "action": "message", "to": id, "message": "wrap it up" }).to_string(),
         })
         .await;
     assert!(to_finished.is_error, "a message to nobody was accepted: {}", to_finished.content);
@@ -693,9 +716,85 @@ async fn sending_a_message_and_reviewing_a_child_run_through_the_real_composite(
     let to_parent = composite
         .execute(&ToolCall {
             id: "t".into(),
-            name: "send_message".into(),
-            args_json: serde_json::json!({ "to": "parent", "message": "the file is notes.txt:2" }).to_string(),
+            name: "agent".into(),
+            args_json: serde_json::json!({ "action": "message", "to": "parent", "message": "the file is notes.txt:2" }).to_string(),
         })
         .await;
     assert!(!to_parent.is_error, "send_message failed outright: {}", to_parent.content);
+}
+
+#[tokio::test]
+async fn a_skill_is_listed_and_read_as_instructions() {
+    let project = Project::new();
+    let dir = project.dir.join(".agents").join("skills");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("greet.md"), "description: Say hello\n\nSay hello to the user in one line.\n").unwrap();
+
+    let listed = project.call("skill", serde_json::json!({ "action": "list" })).await;
+    assert!(listed.contains("greet") && listed.contains("Say hello"), "{listed}");
+    let read = project.call("skill", serde_json::json!({ "action": "run", "name": "greet" })).await;
+    assert!(read.contains("Say hello to the user in one line."), "{read}");
+    let unknown = project.raw("skill", serde_json::json!({ "action": "run", "name": "../secret" })).await;
+    assert!(unknown.is_error, "a name that leaves the skills folder was accepted: {}", unknown.content);
+}
+
+#[tokio::test]
+async fn a_background_task_is_listed_read_and_stopped_through_the_task_tool() {
+    let project = Project::new();
+    let started = project
+        .call("run_shell", serde_json::json!({ "command": "echo task-output", "background": true }))
+        .await;
+    let id = started
+        .split_whitespace()
+        .find_map(|word| word.trim_matches('.').parse::<u32>().ok())
+        .unwrap_or_else(|| panic!("no task id in {started:?}"));
+
+    let listed = project.call("task", serde_json::json!({ "action": "list" })).await;
+    assert!(listed.contains(&id.to_string()), "{listed}");
+
+    tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+    let output = project.call("task", serde_json::json!({ "action": "output", "task_id": id })).await;
+    assert!(output.contains("task-output") || output.contains("exited"), "{output}");
+
+    let stopped = project.raw("task", serde_json::json!({ "action": "stop", "task_id": id })).await;
+    assert!(!stopped.is_error, "{}", stopped.content);
+}
+
+#[tokio::test]
+async fn an_http_request_reaches_a_named_local_address_with_headers_and_a_body() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let (seen_tx, seen_rx) = tokio::sync::oneshot::channel();
+    tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.unwrap();
+        let mut request = vec![0u8; 8192];
+        let read = socket.read(&mut request).await.unwrap_or(0);
+        let _ = seen_tx.send(String::from_utf8_lossy(&request[..read]).to_string());
+        let body = "request-body";
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        );
+        let _ = socket.write_all(response.as_bytes()).await;
+    });
+
+    let project = Project::new();
+    let out = project
+        .call(
+            "http_request",
+            serde_json::json!({
+                "method": "POST",
+                "url": format!("http://{addr}/api"),
+                "headers": [{ "name": "X-FlashAgent-Test", "value": "yes" }],
+                "body": "sent-body"
+            }),
+        )
+        .await;
+    assert!(out.contains("request-body"), "{out}");
+    let seen = seen_rx.await.unwrap_or_default();
+    assert!(seen.contains("POST /api"), "{seen}");
+    assert!(seen.to_lowercase().contains("x-flashagent-test: yes"), "{seen}");
+    assert!(seen.contains("sent-body"), "{seen}");
 }

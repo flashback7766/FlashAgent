@@ -24,6 +24,17 @@ pub trait QuestionGate: Send + Sync {
         multi_select: bool,
         deadline: Option<std::time::Instant>,
     ) -> Result<(String, bool), String>;
+
+    /// Open a URL or a path in the user's default application. A gate that
+    /// cannot do it says so rather than pretending.
+    async fn open(&self, _target: &str) -> Result<(), String> {
+        Err("opening a file or URL is not available in this environment".into())
+    }
+
+    /// A one-way notice on the user's screen, with no answer to wait for.
+    async fn notify(&self, _level: &str, _text: &str) -> Result<(), String> {
+        Err("notices are not available in this environment".into())
+    }
 }
 
 /// What a model wrote where a string belongs: `{"label": "A", "description": "…"}`
@@ -114,7 +125,7 @@ pub enum QuestionItemOrString {
     Simple(String),
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize)]
 pub struct AskUserArgs {
     /// Single-question mode.
     #[serde(default, alias = "prompt", alias = "title", alias = "text")]
@@ -249,6 +260,359 @@ fn no_answer(answered: &[String], waited: Duration) -> String {
     out
 }
 
+
+// ---------------------------------------------------------------------------
+// user_interaction: one tool, several ways to reach the person.
+// ---------------------------------------------------------------------------
+
+/// A field of a small form. Values are plain text; secrets are never asked for
+/// here, and the prompt says so.
+#[derive(Debug, Clone, Deserialize)]
+pub struct FormField {
+    pub name: String,
+    #[serde(default)]
+    pub label: Option<String>,
+    /// text, number, choice or path. Text when omitted.
+    #[serde(default, rename = "type")]
+    pub kind: Option<String>,
+    #[serde(default)]
+    pub options: Option<Vec<String>>,
+    #[serde(default)]
+    pub placeholder: Option<String>,
+    #[serde(default)]
+    pub required: Option<bool>,
+    #[serde(default)]
+    pub default: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct StepItem {
+    pub title: String,
+    #[serde(default)]
+    pub body: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct UserInteractionArgs {
+    /// ask | attach | handoff | open | form | steps | notify
+    pub mode: String,
+    /// Why the person is being asked; shown above the card.
+    #[serde(default)]
+    pub why: Option<String>,
+    #[serde(flatten)]
+    pub ask: AskUserArgs,
+    /// attach: what to attach.
+    #[serde(default)]
+    pub prompt: Option<String>,
+    /// attach: any, image, text or file.
+    #[serde(default)]
+    pub accept: Option<String>,
+    #[serde(default)]
+    pub multiple: Option<bool>,
+    /// handoff/open/form/steps may give a deadline in an ordinary turn too.
+    #[serde(default)]
+    pub timeout_secs: Option<u64>,
+    /// handoff: the file the person edits.
+    #[serde(default)]
+    pub path: Option<String>,
+    /// handoff: what they are asked to change.
+    #[serde(default)]
+    pub instructions: Option<String>,
+    /// open: a URL or a path.
+    #[serde(default)]
+    pub target: Option<String>,
+    /// form/steps: a title for the card.
+    #[serde(default)]
+    pub title: Option<String>,
+    #[serde(default)]
+    pub fields: Vec<FormField>,
+    #[serde(default)]
+    pub steps: Vec<StepItem>,
+    #[serde(default)]
+    pub allow_back: Option<bool>,
+    /// notify: info, success, warning or error.
+    #[serde(default)]
+    pub level: Option<String>,
+    #[serde(default)]
+    pub text: Option<String>,
+}
+
+async fn ask_once(
+    gate: &Arc<dyn QuestionGate>,
+    question: &str,
+    options: Option<&[String]>,
+    multi_select: bool,
+    deadline: Option<std::time::Instant>,
+) -> Result<(String, bool), ToolError> {
+    let asked = gate.ask(question, options, multi_select, deadline);
+    match deadline {
+        Some(d) => tokio::time::timeout_at(tokio::time::Instant::from_std(d), asked)
+            .await
+            .map_err(|_| ToolError::Other("no answer before the deadline".into()))?
+            .map_err(ToolError::Other),
+        None => asked.await.map_err(ToolError::Other),
+    }
+}
+
+/// The user typed paths, one per line or comma-separated; a path outside the
+/// project is refused rather than followed.
+fn attached_paths(cwd: &std::path::Path, answer: &str) -> Vec<std::path::PathBuf> {
+    answer
+        .split(['\n', ','])
+        .map(str::trim)
+        .map(|p| p.trim_matches(['"', '\'', '`']).trim())
+        .filter(|p| !p.is_empty())
+        .map(|p| flashagent_core::resolve_path(cwd, p))
+        .filter(|p| p.is_file())
+        .filter(|p| flashagent_core::path_is_inside(cwd, &p.to_string_lossy()))
+        .collect()
+}
+
+fn kind_of(path: &std::path::Path) -> &'static str {
+    match path.extension().and_then(|e| e.to_str()).map(|e| e.to_ascii_lowercase()).as_deref() {
+        Some("png" | "jpg" | "jpeg" | "gif" | "webp" | "bmp") => "image",
+        Some("log" | "txt" | "md" | "json" | "toml" | "yaml" | "yml") => "text",
+        _ => "file",
+    }
+}
+
+/// One entry point for the person at the keyboard.
+pub async fn run_user_interaction(
+    cwd: &std::path::Path,
+    gate: Option<&Arc<dyn QuestionGate>>,
+    is_goal_mode: &Arc<AtomicBool>,
+    args: UserInteractionArgs,
+    goal_timeout: Duration,
+) -> Result<String, ToolError> {
+    let gate = gate.ok_or_else(|| {
+        ToolError::Other("interactive question gate is not available in this environment".into())
+    })?;
+    let mode = args.mode.trim().to_ascii_lowercase();
+    let goal = is_goal_mode.load(Ordering::Relaxed);
+    let why = args.why.as_deref().map(str::trim).filter(|w| !w.is_empty());
+    let title = args.title.as_deref().map(str::trim).filter(|t| !t.is_empty());
+    let with_why = |question: String| -> String {
+        match why {
+            Some(why) => format!("{why}\n\n{question}"),
+            None => question,
+        }
+    };
+
+    match mode.as_str() {
+        "ask" => {
+            let mut ask = args.ask;
+            if let Some(why) = why {
+                if let Some(question) = ask.question.as_mut() {
+                    *question = format!("{why}\n\n{question}");
+                }
+                if let Some(items) = ask.questions.as_mut() {
+                    for item in items {
+                        match item {
+                            QuestionItemOrString::Item(q) => q.question = format!("{why}\n\n{}", q.question),
+                            QuestionItemOrString::Simple(q) => *q = format!("{why}\n\n{q}"),
+                        }
+                    }
+                }
+            }
+            run_ask_user_within(Some(gate), is_goal_mode, ask, goal_timeout).await
+        }
+        "notify" => {
+            let text = args
+                .text
+                .as_deref()
+                .map(str::trim)
+                .filter(|t| !t.is_empty())
+                .ok_or_else(|| ToolError::Other("user_interaction notify needs text".into()))?;
+            let level = args.level.as_deref().unwrap_or("info").trim().to_ascii_lowercase();
+            let level = match level.as_str() {
+                "info" | "success" | "warning" | "error" => level,
+                _ => return Err(ToolError::Other("user_interaction notify: level is info, success, warning or error".into())),
+            };
+            gate.notify(&level, text).await.map_err(ToolError::Other)?;
+            Ok(format!("Notified the user ({level})."))
+        }
+        "open" => {
+            let target = args
+                .target
+                .as_deref()
+                .map(str::trim)
+                .filter(|t| !t.is_empty())
+                .ok_or_else(|| ToolError::Other("user_interaction open needs a target".into()))?;
+            let is_url = target.starts_with("http://") || target.starts_with("https://");
+            if !is_url {
+                let path = flashagent_core::resolve_path(cwd, target);
+                let path = path.canonicalize().map_err(|_| ToolError::Other(format!("no such file or folder: {target}")))?;
+                if !flashagent_core::path_is_inside(cwd, &path.to_string_lossy()) {
+                    return Err(ToolError::Other(format!(
+                        "{target} is outside the project; open it yourself, or hand the file off inside the project"
+                    )));
+                }
+                gate.open(&path.to_string_lossy()).await.map_err(ToolError::Other)?;
+                return Ok(format!("Opened {}.", path.display()));
+            }
+            gate.open(target).await.map_err(ToolError::Other)?;
+            Ok(format!("Opened {target}."))
+        }
+        "attach" => {
+            if goal {
+                return Err(ToolError::Other(
+                    "user_interaction attach is not available in an autonomous /goal: nobody can attach a file there".into(),
+                ));
+            }
+            let prompt = args
+                .prompt
+                .as_deref()
+                .map(str::trim)
+                .filter(|p| !p.is_empty())
+                .unwrap_or("Attach a file: type its path, or drop it here; one path per line.");
+            let accept = args.accept.as_deref().unwrap_or("any");
+            let deadline = args.timeout_secs.map(|s| std::time::Instant::now() + Duration::from_secs(s.min(3600)));
+            let question = with_why(format!("{prompt}\n\n(accepts: {accept})"));
+            let (answer, _) = ask_once(gate, &question, None, false, deadline).await?;
+            let paths = attached_paths(cwd, &answer);
+            if paths.is_empty() {
+                return Ok("No files were attached.".to_string());
+            }
+            let listed: Vec<String> = paths
+                .iter()
+                .map(|p| format!("- {} ({})", p.display(), kind_of(p)))
+                .collect();
+            Ok(format!(
+                "Attached {} file(s):\n{}\n\nRead one with read; an image opens with mode image.",
+                paths.len(),
+                listed.join("\n")
+            ))
+        }
+        "handoff" => {
+            if goal {
+                return Err(ToolError::Other(
+                    "user_interaction handoff is not available in an autonomous /goal: nobody can edit a file there".into(),
+                ));
+            }
+            let raw = args
+                .path
+                .as_deref()
+                .map(str::trim)
+                .filter(|p| !p.is_empty())
+                .ok_or_else(|| ToolError::Other("user_interaction handoff needs path".into()))?;
+            let path = flashagent_core::resolve_path(cwd, raw);
+            let path = path.canonicalize().map_err(|_| ToolError::Other(format!("no such file: {raw}")))?;
+            let before = std::fs::read_to_string(&path)
+                .map_err(|e| ToolError::Other(format!("handoff reads text files only: {raw}: {e}")))?;
+            gate.open(&path.to_string_lossy())
+                .await
+                .map_err(|e| ToolError::Other(format!("could not open {raw}: {e}")))?;
+            let instructions = args.instructions.as_deref().map(str::trim).filter(|i| !i.is_empty()).unwrap_or("");
+            let question = with_why(format!(
+                "Edit {} in the application that just opened.{}\nThen press Done.",
+                path.display(),
+                if instructions.is_empty() { String::new() } else { format!("\n\n{instructions}") }
+            ));
+            let (answer, _) = ask_once(gate, &question, Some(&["Done".into(), "Cancel".into()]), false, None).await?;
+            if !answer.eq_ignore_ascii_case("done") {
+                return Ok("No handoff: the user cancelled.".to_string());
+            }
+            let after = std::fs::read_to_string(&path)
+                .map_err(|e| ToolError::Other(format!("could not read {} after the handoff: {e}", path.display())))?;
+            if after == before {
+                return Ok(format!("Handoff done: {} did not change.", path.display()));
+            }
+            let diff = flashagent_core::unified(Some(&before), &after, &path.to_string_lossy(), 3);
+            Ok(format!("Handoff changed {}:\n{diff}", path.display()))
+        }
+        "form" => {
+            if goal {
+                return Err(ToolError::Other(
+                    "user_interaction form is not available in an autonomous /goal: nobody can fill it there".into(),
+                ));
+            }
+            if args.fields.is_empty() {
+                return Err(ToolError::Other("user_interaction form needs fields".into()));
+            }
+            let deadline = args.timeout_secs.map(|s| std::time::Instant::now() + Duration::from_secs(s.min(3600)));
+            let mut values: Vec<(String, String)> = Vec::new();
+            for field in &args.fields {
+                let label = field.label.as_deref().filter(|l| !l.is_empty()).unwrap_or(&field.name);
+                let mut question = match title {
+                    Some(title) => format!("{title}\n\n{label}"),
+                    None => label.to_string(),
+                };
+                if let Some(hint) = field.placeholder.as_deref().filter(|p| !p.is_empty()) {
+                    question.push_str(&format!("\n{hint}"));
+                }
+                if let Some(default) = field.default.as_deref().filter(|d| !d.is_empty()) {
+                    question.push_str(&format!("\n(leave empty for {default})"));
+                }
+                let question = with_why(question);
+                let (answer, _) = ask_once(gate, &question, field.options.as_deref(), false, deadline).await?;
+                let answer = answer.trim().to_string();
+                let answer = if answer.is_empty() { field.default.clone().unwrap_or_default() } else { answer };
+                if field.required.unwrap_or(true) && answer.is_empty() {
+                    return Err(ToolError::Other(format!("form field '{}' is required", field.name)));
+                }
+                let kind = field.kind.as_deref().unwrap_or("text");
+                if kind == "number" && !answer.is_empty() && answer.parse::<f64>().is_err() {
+                    return Err(ToolError::Other(format!("form field '{}' must be a number", field.name)));
+                }
+                values.push((field.name.clone(), answer));
+            }
+            Ok(format!(
+                "Form answers:\n{}",
+                values.iter().map(|(k, v)| format!("{k}: {v}")).collect::<Vec<_>>().join("\n")
+            ))
+        }
+        "steps" => {
+            if goal {
+                return Err(ToolError::Other(
+                    "user_interaction steps is not available in an autonomous /goal: nobody can follow them there".into(),
+                ));
+            }
+            if args.steps.is_empty() {
+                return Err(ToolError::Other("user_interaction steps needs steps".into()));
+            }
+            let total = args.steps.len();
+            let mut at = 0usize;
+            let mut stopped = false;
+            while at < total {
+                let step = &args.steps[at];
+                let body = step.body.as_deref().unwrap_or("").trim();
+                let heading = title.map(|t| format!("{t}\n\n")).unwrap_or_default();
+                let question = with_why(format!(
+                    "{heading}Step {}/{}: {}{}",
+                    at + 1,
+                    total,
+                    step.title,
+                    if body.is_empty() { String::new() } else { format!("\n\n{body}") }
+                ));
+                let mut options: Vec<String> = vec!["Next".into()];
+                if at > 0 && args.allow_back.unwrap_or(true) {
+                    options.push("Back".into());
+                }
+                options.push("Stop".into());
+                let (answer, _) = ask_once(gate, &question, Some(&options), false, None).await?;
+                match answer.trim().to_ascii_lowercase().as_str() {
+                    "next" => at += 1,
+                    "back" if at > 0 => at -= 1,
+                    "stop" | "cancel" => {
+                        stopped = true;
+                        break;
+                    }
+                    other => return Err(ToolError::Other(format!("steps: unexpected answer '{other}'"))),
+                }
+            }
+            if stopped {
+                Ok(format!("Steps stopped at {}/{}: the user stopped the walkthrough.", at, total))
+            } else {
+                Ok(format!("Steps completed: {total}/{total}."))
+            }
+        }
+        other => Err(ToolError::Other(format!(
+            "user_interaction: unknown mode '{other}'; use ask, attach, handoff, open, form, steps or notify"
+        ))),
+    }
+}
+
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -325,6 +689,161 @@ mod tests {
             options: Some(vec!["SQLite".into(), "Postgres".into()]),
             multi_select: None,
             questions: None,
+        }
+    }
+
+    fn interaction(mode: &str) -> UserInteractionArgs {
+        UserInteractionArgs { mode: mode.to_string(), ..Default::default() }
+    }
+
+    fn temp_dir() -> tempfile::TempDir {
+        tempfile::tempdir().unwrap()
+    }
+
+    struct NoticeGate {
+        notices: parking_lot::Mutex<Vec<(String, String)>>,
+        opened: parking_lot::Mutex<Vec<String>>,
+    }
+
+    #[async_trait]
+    impl QuestionGate for NoticeGate {
+        async fn ask(&self, _q: &str, _o: Option<&[String]>, _m: bool, _d: Option<std::time::Instant>) -> Result<(String, bool), String> {
+            Ok(("answer".into(), false))
+        }
+        async fn open(&self, target: &str) -> Result<(), String> {
+            self.opened.lock().push(target.to_string());
+            Ok(())
+        }
+        async fn notify(&self, level: &str, text: &str) -> Result<(), String> {
+            self.notices.lock().push((level.to_string(), text.to_string()));
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn a_form_collects_several_fields_in_one_call() {
+        let gate: Arc<dyn QuestionGate> = Arc::new(MockGate::multiple(vec![
+            ("8080".into(), false),
+            ("SQLite".into(), false),
+        ]));
+        let cwd = temp_dir();
+        let mut args = interaction("form");
+        args.title = Some("Server".into());
+        args.fields = vec![
+            FormField { name: "port".into(), label: Some("Port".into()), kind: Some("number".into()), options: None, placeholder: None, required: Some(true), default: None },
+            FormField { name: "database".into(), label: Some("Database".into()), kind: Some("choice".into()), options: Some(vec!["SQLite".into(), "Postgres".into()]), placeholder: None, required: Some(true), default: None },
+        ];
+        let out = run_user_interaction(cwd.path(), Some(&gate), &Arc::new(AtomicBool::new(false)), args, Duration::from_secs(1)).await.unwrap();
+        assert!(out.contains("port: 8080"), "{out}");
+        assert!(out.contains("database: SQLite"), "{out}");
+    }
+
+    #[tokio::test]
+    async fn steps_walk_forward_back_and_stop() {
+        let gate: Arc<dyn QuestionGate> = Arc::new(MockGate::multiple(vec![
+            ("Next".into(), false),
+            ("Back".into(), false),
+            ("Next".into(), false),
+            ("Stop".into(), false),
+        ]));
+        let cwd = temp_dir();
+        let mut args = interaction("steps");
+        args.steps = vec![
+            StepItem { title: "First".into(), body: None },
+            StepItem { title: "Second".into(), body: None },
+        ];
+        let out = run_user_interaction(cwd.path(), Some(&gate), &Arc::new(AtomicBool::new(false)), args, Duration::from_secs(1)).await.unwrap();
+        assert!(out.contains("stopped at 1/2"), "{out}");
+    }
+
+    #[tokio::test]
+    async fn attach_returns_only_files_inside_the_project() {
+        let cwd = temp_dir();
+        let inside = cwd.path().join("shot.png");
+        std::fs::write(&inside, b"png").unwrap();
+        let outside = tempfile::NamedTempFile::new().unwrap();
+        let gate: Arc<dyn QuestionGate> = Arc::new(MockGate::single((format!("{}\n{}", inside.display(), outside.path().display()), false)));
+        let mut args = interaction("attach");
+        args.prompt = Some("Attach a screenshot".into());
+        let out = run_user_interaction(cwd.path(), Some(&gate), &Arc::new(AtomicBool::new(false)), args, Duration::from_secs(1)).await.unwrap();
+        assert!(out.contains("shot.png"), "{out}");
+        assert!(!out.contains(&outside.path().display().to_string()), "a path outside the project was attached: {out}");
+    }
+
+    struct HandoffGate {
+        path: std::path::PathBuf,
+        edited: String,
+    }
+
+    #[async_trait]
+    impl QuestionGate for HandoffGate {
+        async fn ask(&self, _q: &str, _o: Option<&[String]>, _m: bool, _d: Option<std::time::Instant>) -> Result<(String, bool), String> {
+            std::fs::write(&self.path, &self.edited).unwrap();
+            Ok(("Done".into(), false))
+        }
+        async fn open(&self, _target: &str) -> Result<(), String> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn handoff_returns_the_diff_the_user_made() {
+        let cwd = temp_dir();
+        let path = cwd.path().join("style.css");
+        std::fs::write(&path, "body { color: red; }\n").unwrap();
+        let gate: Arc<dyn QuestionGate> = Arc::new(HandoffGate {
+            path: path.clone(),
+            edited: "body { color: blue; }\n".into(),
+        });
+        let mut args = interaction("handoff");
+        args.path = Some("style.css".into());
+        args.instructions = Some("Make it blue".into());
+        let out = run_user_interaction(cwd.path(), Some(&gate), &Arc::new(AtomicBool::new(false)), args, Duration::from_secs(1)).await.unwrap();
+        assert!(out.contains("Handoff changed"), "{out}");
+        assert!(out.contains("-body { color: red; }"), "{out}");
+        assert!(out.contains("+body { color: blue; }"), "{out}");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "body { color: blue; }\n");
+    }
+
+    #[tokio::test]
+    async fn notify_and_open_reach_the_gate() {
+        let concrete = Arc::new(NoticeGate { notices: parking_lot::Mutex::new(Vec::new()), opened: parking_lot::Mutex::new(Vec::new()) });
+        let gate: Arc<dyn QuestionGate> = concrete.clone();
+        let goal = Arc::new(AtomicBool::new(false));
+        let cwd = temp_dir();
+
+        let mut notice = interaction("notify");
+        notice.level = Some("warning".into());
+        notice.text = Some("Migration is running".into());
+        run_user_interaction(cwd.path(), Some(&gate), &goal, notice, Duration::from_secs(1)).await.unwrap();
+        assert_eq!(concrete.notices.lock().as_slice(), [("warning".to_string(), "Migration is running".to_string())]);
+
+        let mut open = interaction("open");
+        open.target = Some("https://docs.rs/serde".into());
+        run_user_interaction(cwd.path(), Some(&gate), &goal, open, Duration::from_secs(1)).await.unwrap();
+        assert_eq!(concrete.opened.lock().as_slice(), ["https://docs.rs/serde"]);
+    }
+
+    #[tokio::test]
+    async fn attach_handoff_form_and_steps_do_not_wait_in_a_goal() {
+        let gate: Arc<dyn QuestionGate> = Arc::new(MockGate::single(("Done".into(), false)));
+        let goal = Arc::new(AtomicBool::new(true));
+        let cwd = temp_dir();
+        for mode in ["attach", "handoff", "form", "steps"] {
+            let mut args = interaction(mode);
+            if mode == "handoff" {
+                let path = cwd.path().join("a.txt");
+                std::fs::write(&path, "x").unwrap();
+                args.path = Some(path.display().to_string());
+            }
+            if mode == "form" {
+                args.fields = vec![FormField { name: "a".into(), label: None, kind: None, options: None, placeholder: None, required: None, default: None }];
+            }
+            if mode == "steps" {
+                args.steps = vec![StepItem { title: "a".into(), body: None }];
+            }
+            let err = run_user_interaction(cwd.path(), Some(&gate), &goal, args, Duration::from_secs(1)).await.unwrap_err().to_string();
+            assert!(err.contains("/goal"), "{mode}: {err}");
         }
     }
 

@@ -12,7 +12,8 @@ use flashagent_llm::{ToolCall, ToolSpec};
 
 use crate::BuiltinTools;
 
-/// The built-in toolset plus `spawn_agent`. `execute` dispatches by name.
+/// The built-in toolset plus the unified `agent` tool. `execute` dispatches
+/// by name.
 pub struct CompositeTools {
     executors: Vec<Arc<dyn ToolExec>>,
     /// Name to executor, built on first use instead of calling every
@@ -80,7 +81,8 @@ impl ToolExec for CompositeTools {
     }
 }
 
-/// The built-in toolset plus `spawn_agent`. `execute` dispatches by name.
+/// The built-in toolset plus the unified `agent` tool. `execute` dispatches
+/// by name.
 ///
 /// `events` is where a running child's steps are sent for the app to show;
 /// `finished` is where a child that has answered says so, so the answer can
@@ -93,6 +95,7 @@ pub fn agent_tools(
 ) -> (
     CompositeTools,
     tokio::sync::mpsc::UnboundedReceiver<flashagent_core::SubagentOutbound>,
+    flashagent_core::SubagentControl,
 ) {
     // The factory and the host must be given the same mailbox: a message the
     // parent writes and a message a child writes have to arrive in one place.
@@ -100,13 +103,78 @@ pub fn agent_tools(
     let mailbox = Arc::new(flashagent_core::Mailbox::new(outbound.clone()));
     let factory = Arc::new(BuiltinSubagentFactory::with_mailbox(builtin.clone(), state.clone(), mailbox.clone()));
     let host = flashagent_core::SubagentHost::with_shared(llm, factory, events, outbound, mailbox.clone());
-    // The parent gets the two tools that only make sense at the top: recording
-    // what it made of a report, and writing to whoever is running.
+    // The parent gets one tool with three actions: spawning, writing to a
+    // running agent, and recording a review. The three implementations still
+    // live in core; the adapter is what the model sees.
     let review = host.review_tool();
     let talk = Arc::new(flashagent_core::MessageTool::new(mailbox, "parent", "the agent you are talking to"));
-    let spawn = Arc::new(flashagent_core::SubagentTool::new(Arc::new(host)));
-    let executors: Vec<Arc<dyn ToolExec>> = vec![builtin, spawn, review, talk];
-    (CompositeTools::new(executors), done)
+    let host = Arc::new(host);
+    let control = flashagent_core::SubagentControl::new(host.clone());
+    let spawn = Arc::new(flashagent_core::SubagentTool::new(host));
+    let agent = Arc::new(UnifiedAgentTool {
+        spawn: spawn as Arc<dyn ToolExec>,
+        talk: talk as Arc<dyn ToolExec>,
+        review: review as Arc<dyn ToolExec>,
+    });
+    let executors: Vec<Arc<dyn ToolExec>> = vec![builtin, agent];
+    (CompositeTools::new(executors), done, control)
+}
+
+/// One model-facing tool for the three subagent verbs. The schema is in the
+/// registry; the execution goes to the core tool that owns the mailbox or the
+/// host, with the action mapped back to its old name.
+struct UnifiedAgentTool {
+    spawn: Arc<dyn ToolExec>,
+    talk: Arc<dyn ToolExec>,
+    review: Arc<dyn ToolExec>,
+}
+
+#[async_trait]
+impl ToolExec for UnifiedAgentTool {
+    fn specs(&self) -> Vec<ToolSpec> {
+        let Some(def) = flashagent_core::registry::find("agent") else { return Vec::new() };
+        vec![ToolSpec {
+            name: def.name.into(),
+            description: def.description.into(),
+            parameters_json: def.schema_json(),
+        }]
+    }
+
+    async fn execute(&self, call: &ToolCall) -> ToolOutput {
+        let value: serde_json::Value = match serde_json::from_str(call.args_json.trim()) {
+            Ok(value) => value,
+            Err(e) => {
+                return ToolOutput {
+                    content: format!("agent: bad arguments: {e}"),
+                    is_error: true,
+                    images: Vec::new(),
+                }
+            }
+        };
+        let action = value.get("action").and_then(|a| a.as_str()).unwrap_or("").trim().to_ascii_lowercase();
+        let (target, name) = match action.as_str() {
+            "spawn" => (&self.spawn, "spawn_agent"),
+            "message" => (&self.talk, "send_message"),
+            "review" => (&self.review, "review_agent"),
+            _ => {
+                return ToolOutput {
+                    content: "agent: action is required and is spawn, message or review".into(),
+                    is_error: true,
+                    images: Vec::new(),
+                }
+            }
+        };
+        let forwarded = ToolCall {
+            id: call.id.clone(),
+            name: name.to_string(),
+            args_json: call.args_json.clone(),
+        };
+        target.execute(&forwarded).await
+    }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
 }
 
 /// Other names are hidden from specs and refused before reaching `inner`.
@@ -190,9 +258,9 @@ impl SubagentToolFactory for BuiltinSubagentFactory {
         // other end of its question, and an empty list used to hand it the
         // parent's own tool.
         let allowed: Vec<String> = if tools.is_empty() {
-            self.tools.specs().into_iter().map(|s| s.name).filter(|n| n != "ask_user").collect()
+            self.tools.specs().into_iter().map(|s| s.name).filter(|n| n != "user_interaction").collect()
         } else {
-            tools.iter().filter(|n| n.as_str() != "ask_user").cloned().collect()
+            tools.iter().filter(|n| n.as_str() != "user_interaction").cloned().collect()
         };
         let subset = ToolSubset::new(self.tools.clone(), &allowed);
         // A child can only be given the tool to write to the others when it was
@@ -227,8 +295,8 @@ mod tests {
         }
         fn specs(&self) -> Vec<ToolSpec> {
             vec![
-                ToolSpec { name: "read_file".into(), description: "r".into(), parameters_json: "{}".into() },
-                ToolSpec { name: "write_file".into(), description: "w".into(), parameters_json: "{}".into() },
+                ToolSpec { name: "read".into(), description: "r".into(), parameters_json: "{}".into() },
+                ToolSpec { name: "edit".into(), description: "w".into(), parameters_json: "{}".into() },
             ]
         }
         fn as_any(&self) -> &dyn std::any::Any {
@@ -247,7 +315,7 @@ mod tests {
         }
         fn specs(&self) -> Vec<ToolSpec> {
             self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            vec![ToolSpec { name: "read_file".into(), description: "r".into(), parameters_json: "{}".into() }]
+            vec![ToolSpec { name: "read".into(), description: "r".into(), parameters_json: "{}".into() }]
         }
         fn as_any(&self) -> &dyn std::any::Any {
             self
@@ -260,7 +328,7 @@ mod tests {
         let composite = CompositeTools::new(vec![Arc::new(CountingSpecs { calls: calls.clone() })]);
         for _ in 0..3 {
             let out = composite
-                .execute(&ToolCall { id: "t".into(), name: "read_file".into(), args_json: "{}".into() })
+                .execute(&ToolCall { id: "t".into(), name: "read".into(), args_json: "{}".into() })
                 .await;
             assert!(!out.is_error, "{}", out.content);
         }
@@ -270,21 +338,21 @@ mod tests {
     #[tokio::test]
     async fn subset_hides_and_blocks_disallowed_tools() {
         let inner: Arc<dyn ToolExec> = Arc::new(Recorder);
-        let subset = ToolSubset::new(inner, &["read_file".to_string()]);
+        let subset = ToolSubset::new(inner, &["read".to_string()]);
 
         let specs = subset.specs();
         let names: Vec<&str> = specs.iter().map(|s| s.name.as_str()).collect();
-        assert_eq!(names, vec!["read_file"]);
+        assert_eq!(names, vec!["read"]);
 
         let out = subset
-            .execute(&ToolCall { id: "t".into(), name: "read_file".into(), args_json: "{}".into() })
+            .execute(&ToolCall { id: "t".into(), name: "read".into(), args_json: "{}".into() })
             .await;
         assert!(!out.is_error);
-        assert_eq!(out.content, "ran read_file");
+        assert_eq!(out.content, "ran read");
 
         // Refused without reaching the inner executor.
         let out = subset
-            .execute(&ToolCall { id: "t".into(), name: "write_file".into(), args_json: "{}".into() })
+            .execute(&ToolCall { id: "t".into(), name: "edit".into(), args_json: "{}".into() })
             .await;
         assert!(out.is_error);
         assert!(out.content.contains("not available"));
@@ -296,7 +364,7 @@ mod tests {
         let subset = ToolSubset::new(inner, &[]);
         assert_eq!(subset.specs().len(), 2);
         let out = subset
-            .execute(&ToolCall { id: "t".into(), name: "write_file".into(), args_json: "{}".into() })
+            .execute(&ToolCall { id: "t".into(), name: "edit".into(), args_json: "{}".into() })
             .await;
         assert!(!out.is_error);
     }
@@ -315,8 +383,8 @@ mod tests {
         let role = flashagent_core::AgentRole { name: "coder".into(), system_prompt: String::new(), tools: Vec::new() };
         let child = factory.build("sub1", &role, &[]);
         let names: Vec<String> = child.specs().into_iter().map(|s| s.name).collect();
-        assert!(!names.iter().any(|n| n == "ask_user"), "a child was given ask_user: {names:?}");
-        assert!(names.iter().any(|n| n == "read_file"), "the rest of the parent's tools are missing: {names:?}");
+        assert!(!names.iter().any(|n| n == "user_interaction"), "a child was given ask_user: {names:?}");
+        assert!(names.iter().any(|n| n == "read"), "the rest of the parent's tools are missing: {names:?}");
     }
 
     #[tokio::test]
@@ -332,10 +400,10 @@ mod tests {
         .role("researcher");
         let subset = ToolSubset::new(inner, &role.tools);
 
-        assert!(subset.specs().iter().any(|s| s.name == "read_file"), "a researcher may read");
-        assert!(!subset.specs().iter().any(|s| s.name == "write_file"), "and may not even see the tool");
+        assert!(subset.specs().iter().any(|s| s.name == "read"), "a researcher may read");
+        assert!(!subset.specs().iter().any(|s| s.name == "edit"), "and may not even see the tool");
 
-        for forbidden in ["write_file", "edit_file", "run_shell", "patch_file"] {
+        for forbidden in ["edit", "run_shell"] {
             let out = subset
                 .execute(&ToolCall { id: "t".into(), name: forbidden.into(), args_json: "{}".into() })
                 .await;

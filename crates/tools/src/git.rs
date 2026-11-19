@@ -1,5 +1,5 @@
-//! `git_status` and `git_diff`, run without a shell so they need no approval
-//! in AcceptEdits mode.
+//! Read-only git actions, run without a shell so they need no approval in
+//! AcceptEdits mode.
 //!
 //! Both are waited for, but not for ever: a repository with a lock file or a
 //! huge index can keep `git` busy for a long time, and a turn that waits is a
@@ -217,6 +217,54 @@ pub async fn git_diff(cwd: &Path, staged: bool, path_filter: Option<&str>) -> Re
     }
 
     Ok(trimmed.to_string())
+}
+
+/// A revision is one argument, not a set of options.
+fn checked_rev(rev: Option<&str>) -> Result<&str, ToolError> {
+    let rev = rev.map(str::trim).filter(|r| !r.is_empty()).unwrap_or("HEAD");
+    if rev.starts_with('-') || rev.chars().any(char::is_control) {
+        return Err(ToolError::Other(format!("git: invalid revision '{rev}'")));
+    }
+    Ok(rev)
+}
+
+pub async fn git_log(cwd: &Path, path_filter: Option<&str>, limit: Option<usize>) -> Result<String, ToolError> {
+    let limit = limit.unwrap_or(20).clamp(1, 100).to_string();
+    let mut args: Vec<&str> = vec!["log", "--oneline", "--decorate", "-n", &limit];
+    if let Some(path) = path_filter {
+        args.push("--");
+        args.push(path);
+    }
+    let out = run_with_timeout("git", &args, cwd, GIT_TIMEOUT).await?;
+    if !out.status.success() {
+        return Ok(format!("git error: {}", String::from_utf8_lossy(&out.stderr).trim()));
+    }
+    let text = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    Ok(if text.is_empty() { "No commits.".to_string() } else { text })
+}
+
+pub async fn git_show(cwd: &Path, rev: Option<&str>, path_filter: Option<&str>) -> Result<String, ToolError> {
+    let rev = checked_rev(rev)?;
+    let mut args: Vec<&str> = vec!["show", "--stat", "--patch", "--no-color", rev];
+    if let Some(path) = path_filter {
+        args.push("--");
+        args.push(path);
+    }
+    let out = run_with_timeout("git", &args, cwd, GIT_TIMEOUT).await?;
+    if !out.status.success() {
+        return Ok(format!("git error: {}", String::from_utf8_lossy(&out.stderr).trim()));
+    }
+    Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
+}
+
+pub async fn git_blame(cwd: &Path, rev: Option<&str>, path_filter: Option<&str>) -> Result<String, ToolError> {
+    let path = path_filter.ok_or_else(|| ToolError::Other("git blame needs a path".into()))?;
+    let rev = checked_rev(rev)?;
+    let out = run_with_timeout("git", &["blame", "--date=short", "--no-color", rev, "--", path], cwd, GIT_TIMEOUT).await?;
+    if !out.status.success() {
+        return Ok(format!("git error: {}", String::from_utf8_lossy(&out.stderr).trim()));
+    }
+    Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
 }
 
 #[cfg(test)]

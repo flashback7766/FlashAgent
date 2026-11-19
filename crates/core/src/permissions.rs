@@ -124,7 +124,20 @@ impl Category {
     /// next to the schema and the diff it shows: the permission layer used to
     /// keep its own list of every name, which is a list to forget to update.
     pub fn from_tool(tool: &str) -> Self {
-        crate::registry::find(tool).map_or(Category::Mcp, |def| def.category)
+        if let Some(def) = crate::registry::find(tool) {
+            return def.category;
+        }
+        // Old names still appear in saved sessions and replayed calls. Their
+        // category is the one the family has now, so a replayed write is still
+        // judged as a write.
+        match tool {
+            "read_file" | "outline_file" | "view_image" | "list_dir" | "glob" | "grep" | "git_status" | "git_diff" => {
+                Category::Read
+            }
+            "write_file" | "edit_file" | "patch_file" => Category::Write,
+            "web_fetch" | "web_search" => Category::Net,
+            _ => Category::Mcp,
+        }
     }
 }
 
@@ -594,7 +607,26 @@ fn named_paths(tool: &str, args_json: &str) -> Vec<String> {
         return Vec::new();
     };
     let Some(def) = crate::registry::find(tool) else {
-        return Vec::new();
+        // Old names, same arguments as the tool that replaced them.
+        let mut out = Vec::new();
+        match tool {
+            "read_file" | "edit_file" | "write_file" | "patch_file" | "outline_file" | "view_image" => {
+                push(&mut out, args.get("path"));
+                for file in args.get("files").and_then(|f| f.as_array()).into_iter().flatten() {
+                    push(&mut out, if file.is_string() { Some(file) } else { file.get("path") });
+                }
+            }
+            "list_dir" | "git_status" | "git_diff" => push(&mut out, args.get("path")),
+            "glob" | "grep" => {
+                let pattern = args.get("pattern").and_then(|p| p.as_str()).unwrap_or("");
+                let fixed = pattern.split(['*', '?', '[', '{']).next().unwrap_or("");
+                if !fixed.is_empty() {
+                    out.push(fixed.to_string());
+                }
+            }
+            _ => {}
+        }
+        return out;
     };
     let mut out = Vec::new();
     match def.touches {
@@ -610,6 +642,18 @@ fn named_paths(tool: &str, args_json: &str) -> Vec<String> {
             let fixed = pattern.split(['*', '?', '[', '{']).next().unwrap_or("");
             if !fixed.is_empty() {
                 out.push(fixed.to_string());
+            }
+        }
+        // `search` has three modes; only a path and a file glob name a place
+        // to look. A content regex is not a path and is not judged as one.
+        crate::registry::Touches::Search => {
+            push(&mut out, args.get("path"));
+            if args.get("mode").and_then(|m| m.as_str()) == Some("files") {
+                let pattern = args.get("pattern").and_then(|p| p.as_str()).unwrap_or("");
+                let fixed = pattern.split(['*', '?', '[', '{']).next().unwrap_or("");
+                if !fixed.is_empty() {
+                    out.push(fixed.to_string());
+                }
             }
         }
         crate::registry::Touches::Nothing => {}
@@ -818,6 +862,21 @@ fn read_only_git(args: &[String]) -> bool {
     }
 }
 
+/// `memory view` reads; every other command can write. A malformed call is
+/// treated as a write (fail closed), and the handler will refuse it anyway.
+fn json_field(args_json: &str, key: &str) -> Option<String> {
+    let value: serde_json::Value = serde_json::from_str(args_json).ok()?;
+    value.get(key)?.as_str().map(str::to_string)
+}
+
+fn memory_view(args_json: &str) -> bool {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(args_json) else { return false };
+    value
+        .get("command")
+        .and_then(|c| c.as_str())
+        .is_some_and(|c| matches!(c.trim().to_ascii_lowercase().as_str(), "view" | "list" | "read"))
+}
+
 fn blacklisted_segment(segment: &str) -> Option<&'static str> {
     // As the shell will run it: `r''m` and `\rm` are rm.
     let words: Vec<String> = segment.split_whitespace().map(shell_word).collect();
@@ -1002,11 +1061,28 @@ impl PermissionState {
     /// treated like a file outside the project. Addresses hidden behind DNS or
     /// redirects are refused by the tool itself.
     fn local_network_verdict(&self, call: &ToolCall) -> Option<Verdict> {
-        if call.name != "web_fetch" {
+        let args = flashagent_llm::effective_args(&call.args_json, &call.name)?;
+        let network_call = call.name == "http_request"
+            || call.name == "web_fetch"
+            || (call.name == "web"
+                && matches!(
+                    args.get("action").and_then(|a| a.as_str()).unwrap_or("").trim(),
+                    "fetch" | "request"
+                ));
+        let interaction_open = call.name == "user_interaction"
+            && args.get("mode").and_then(|m| m.as_str()) == Some("open");
+        if !network_call && !interaction_open {
             return None;
         }
-        let args = flashagent_llm::effective_args(&call.args_json, &call.name)?;
-        let host = url_host(args.get("url")?.as_str()?)?;
+        let raw_url = if interaction_open {
+            args.get("target").and_then(|t| t.as_str())?
+        } else {
+            args.get("url")?.as_str()?
+        };
+        if interaction_open && !(raw_url.starts_with("http://") || raw_url.starts_with("https://")) {
+            return None;
+        }
+        let host = url_host(raw_url)?;
         if !is_local_host(&host) {
             return None;
         }
@@ -1164,7 +1240,30 @@ impl PermissionState {
         // the blacklist still asks, and /goal still refuses. It used to return
         // Allow here, before the mode and the blacklist were even looked at, so
         // one hand-written `run_shell` rule switched all three off.
-        match self.category(&call.name) {
+        // One memory tool both reads and writes. A view is a read; anything
+        // that can change a file is a write, even though the registry names
+        // the tool Read so a view is not put behind an approval card.
+        let category = if call.name == "memory" && !memory_view(&call.args_json) {
+            Category::Write
+        } else if call.name == "task" && json_field(&call.args_json, "action").as_deref() == Some("stop") {
+            // Stopping a process changes the world; listing or reading one
+            // does not.
+            Category::Write
+        } else if call.name == "user_interaction"
+            && json_field(&call.args_json, "mode").as_deref() == Some("handoff")
+        {
+            // The person edits the file, but the file still changes.
+            Category::Write
+        } else if call.name == "http_request"
+            && !matches!(json_field(&call.args_json, "method").as_deref().unwrap_or("GET"), "GET" | "HEAD")
+        {
+            // A body sent to someone else's server is not a read, even though
+            // it leaves no file here.
+            Category::Write
+        } else {
+            self.category(&call.name)
+        };
+        match category {
             Category::Read | Category::Net => Verdict::Allow,
             Category::Write => match mode {
                 PermissionMode::Yolo | PermissionMode::Bypass | PermissionMode::AcceptEdits => Verdict::Allow,
@@ -2529,19 +2628,16 @@ mod tests {
 
     #[test]
     fn test_new_tools_categories_and_ask_user() {
-        assert_eq!(Category::from_tool("ask_user"), Category::Read);
+        assert_eq!(Category::from_tool("user_interaction"), Category::Read);
         assert_eq!(Category::from_tool("outline_file"), Category::Read);
         assert_eq!(Category::from_tool("git_status"), Category::Read);
         assert_eq!(Category::from_tool("git_diff"), Category::Read);
         assert_eq!(Category::from_tool("env_info"), Category::Read);
-        assert_eq!(Category::from_tool("memory_read"), Category::Read);
+        assert_eq!(Category::from_tool("memory"), Category::Read, "a view is a read");
         assert_eq!(Category::from_tool("patch_file"), Category::Write);
-        assert_eq!(Category::from_tool("memory_create"), Category::Write);
-        assert_eq!(Category::from_tool("memory_update"), Category::Write);
-        assert_eq!(Category::from_tool("memory_remove"), Category::Write);
 
         let state_planning = PermissionState::new(PermissionMode::Planning, Arc::new(DenyAllGate));
-        assert_eq!(state_planning.decide(&call("ask_user", "{}"), || None), Verdict::Allow);
+        assert_eq!(state_planning.decide(&call("user_interaction", r#"{"mode":"ask","question":"x"}"#), || None), Verdict::Allow);
         assert_eq!(state_planning.decide(&call("outline_file", "{}"), || None), Verdict::Allow);
         assert_eq!(
             state_planning.decide(&call("patch_file", "{}"), || None),
@@ -2550,7 +2646,23 @@ mod tests {
 
         let state_accept_edits = PermissionState::new(PermissionMode::AcceptEdits, Arc::new(DenyAllGate));
         assert_eq!(state_accept_edits.decide(&call("patch_file", "{}"), || None), Verdict::Allow);
-        assert_eq!(state_accept_edits.decide(&call("memory_create", "{}"), || None), Verdict::Allow);
+        assert_eq!(
+            state_accept_edits.decide(&call("memory", r#"{"command":"view","path":"x"}"#), || None),
+            Verdict::Allow
+        );
+        let state_manual = PermissionState::new(PermissionMode::Manual, Arc::new(DenyAllGate));
+        assert_eq!(
+            state_manual.decide(&call("memory", r#"{"command":"view","path":"x"}"#), || None),
+            Verdict::Allow,
+            "reading memory does not need a card"
+        );
+        assert!(
+            matches!(
+                state_manual.decide(&call("memory", r#"{"command":"create","path":"x"}"#), || None),
+                Verdict::NeedApproval { .. }
+            ),
+            "creating memory asks in manual mode"
+        );
     }
 
     #[test]
