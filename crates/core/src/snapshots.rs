@@ -426,7 +426,11 @@ fn open_directory(path: &Path, create: bool) -> std::io::Result<std::fs::File> {
         };
         let flags = libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC;
         // Every component is opened relative to the directory already held;
-        // replacing a parent with a symlink cannot redirect the next open.
+        // replacing a parent with a symlink cannot redirect the next open. The
+        // paths come from `resolved_path`, which is where the owner's own
+        // links (`/var` on macOS, a linked home) are resolved once, so this
+        // refusing a symlink here refuses a swap, not how the machine is
+        // spelled.
         let mut fd = unsafe { libc::openat(dir.as_raw_fd(), name.as_ptr(), flags) };
         if fd < 0 && create && std::io::Error::last_os_error().kind() == std::io::ErrorKind::NotFound {
             if unsafe { libc::mkdirat(dir.as_raw_fd(), name.as_ptr(), 0o755) } != 0 {
@@ -1274,7 +1278,9 @@ mod tests {
         let file = parent_path.join("a.txt");
         std::fs::write(&file, "original").unwrap();
         std::fs::write(outside.path().join("a.txt"), "untouched").unwrap();
-        let held = SafeParent::open(&file, false).unwrap();
+        // As the store does: paths are resolved before they are kept, so
+        // the machine's own links are not what this refuses.
+        let held = SafeParent::open(&resolved_path(&file), false).unwrap();
         std::fs::rename(&parent_path, project.path().join("moved")).unwrap();
         std::os::unix::fs::symlink(outside.path(), &parent_path).unwrap();
         assert!(held.restore(b"restored", Some(0o600)).is_err());
@@ -1295,7 +1301,7 @@ mod tests {
         store.before_write("write_file", &args("run.sh"));
         std::fs::write(&file, "changed").unwrap();
         std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o600)).unwrap();
-        let parent = SafeParent::open(&file, false).unwrap();
+        let parent = SafeParent::open(&resolved_path(&file), false).unwrap();
         let blocker = project.path().join(".restore-blocker");
         std::fs::create_dir(&blocker).unwrap();
         assert!(parent.replace(b"original", Some(0o751), ".restore-blocker").is_err());
@@ -1405,7 +1411,10 @@ mod tests {
 
         let report = store.rewind(0);
         assert_eq!(report.failed.len(), 1, "the manifest save failure must keep history rewindable: {report:?}");
-        assert_eq!(report.failed[0].0, snaps.path().join("manifest.json"));
+        // The store keeps paths in the machine's own spelling (`/private/var`
+        // on macOS, the long form on Windows), so the expectation is resolved
+        // the same way rather than compared with the tempdir's short name.
+        assert_eq!(report.failed[0].0, resolved_path(&snaps.path().join("manifest.json")));
         assert_eq!(store.rewindable(&["p"])[0].files, 1, "the in-memory retry was lost");
         assert_eq!(std::fs::read_to_string(&a).unwrap(), "original");
         // The record on disk still names the copy. Deleting the blob before the
