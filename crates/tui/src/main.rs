@@ -584,6 +584,11 @@ async fn main() -> Result<()> {
         mcp_bg.start_enabled_servers().await;
     });
 
+    // A config that still names YOLO after the switch was turned off is not
+    // trusted with it: the mode needs its own permission, every launch.
+    if config.permission_mode.is_yolo() && !config.yolo_mode {
+        config.permission_mode = flashagent_core::PermissionMode::AcceptEdits;
+    }
     let state = Arc::new(PermissionState::new(config.permission_mode, gate.clone()));
     // Files outside this folder are never read or written on a mode's say alone.
     state.set_project_root(cwd.clone());
@@ -3388,20 +3393,20 @@ mod tests {
 
     #[test]
     fn the_status_line_names_the_mode_and_what_the_turn_waits_on() {
-        let running = format_status_left(true, false, false, None, "Normal", "");
+        let running = format_status_left(true, false, false, None, "Normal", false, "");
         assert!(running.contains("[Normal]"), "{running}");
         // The phase is in the composer; saying it again here was noise.
         assert!(!running.contains("Generating"), "{running}");
         assert!(!running.contains("Ready"), "{running}");
 
-        let idle = format_status_left(false, false, false, None, "Normal", "");
+        let idle = format_status_left(false, false, false, None, "Normal", false, "");
         assert!(idle.contains("[Normal]") && idle.contains("Ready"), "{idle}");
 
-        let goal = format_status_left(true, true, false, Some("step 12/250 · 4.2k tok · 3m05s/1h0m"), "Autonomous", "");
+        let goal = format_status_left(true, true, false, Some("step 12/250 · 4.2k tok · 3m05s/1h0m"), "Autonomous", false, "");
         assert!(goal.contains("[Goal: Autonomous]"), "{goal}");
         assert!(goal.contains("step 12/250") && goal.contains("3m05s/1h0m"), "{goal}");
 
-        let waiting = format_status_left(true, false, true, None, "Manual", "");
+        let waiting = format_status_left(true, false, true, None, "Manual", false, "");
         assert!(waiting.contains("Waiting for your answer"), "{waiting}");
     }
 

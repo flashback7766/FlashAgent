@@ -5,7 +5,7 @@ impl App {
     /// The next launch starts in the current mode. A `/goal` run's Accept All is
     /// never remembered.
     pub(crate) fn remember_mode(&mut self, mode: PermissionMode) {
-        if self.goal_state.is_some() || self.config.permission_mode == mode {
+        if self.goal_state.is_some() || self.config.permission_mode == mode || (mode.is_yolo() && !self.config.yolo_mode) {
             return;
         }
         self.config.permission_mode = mode;
@@ -392,11 +392,17 @@ impl App {
         match code {
             // Shift+Tab arrives as BackTab or as Tab with Shift.
             KeyCode::BackTab | KeyCode::Tab if matches!(code, KeyCode::BackTab) || mods.contains(KeyModifiers::SHIFT) => {
-                let next_mode = cx.perm.state().mode().next();
+                let next_mode = cx.perm.state().mode().next_with_yolo(self.config.yolo_mode);
                 cx.perm.state().set_mode(next_mode);
                 self.remember_mode(next_mode);
                 self.refresh_welcome(cx.source, cx.mascot_mood);
                 self.custom_placeholder = Some(format!("{} {}", tr("Permission mode set to:"), tr(next_mode.label())));
+                if next_mode.is_yolo() {
+                    self.say(BackgroundNotice::fading(
+                        tr("YOLO: no filters · any tool and any command runs without asking"),
+                        8,
+                    ));
+                }
                 self.suggested_prompt = None;
                 self.renderer.request_reprint();
             }

@@ -722,6 +722,44 @@ fn the_next_launch_starts_in_the_mode_the_user_left_in() {
 }
 
 #[test]
+fn yolo_is_reachable_only_after_settings_enable_it() {
+    let server = MockServer::start(Vec::new());
+    let home = Home::new();
+    {
+        let mut term = ready(&home, &server);
+        // The switch is off on a fresh config: the command says so ...
+        term.type_text("/mode yolo");
+        term.send(ENTER);
+        term.wait_for("YOLO is not enabled", WAIT);
+        // ... and four Shift+Tabs never land on it.
+        for _ in 0..4 {
+            term.send("\x1b[Z");
+        }
+        let screen = term.wait_for("Permission mode set to: Accept Edits", WAIT);
+        assert!(!screen.contains("[YOLO]"), "YOLO was reachable with its switch off:\n{screen}");
+        quit(&mut term);
+    }
+
+    // Armed in Settings, the fifth step is there: Accept Edits -> Accept All
+    // -> YOLO, and the choice survives the restart.
+    let home = Home::new();
+    let mut term = ready_with(&home, &server, serde_json::json!({ "yolo_mode": true }));
+    term.send("\x1b[Z");
+    term.wait_for("Permission mode set to: Accept All", WAIT);
+    term.send("\x1b[Z");
+    term.wait_for("Permission mode set to: YOLO", WAIT);
+    term.wait_for("[YOLO]", WAIT);
+    quit(&mut term);
+
+    let config: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(home.config_path()).unwrap()).unwrap();
+    assert_eq!(config["permission_mode"].as_str().unwrap_or_default().to_lowercase(), "yolo");
+    let term = Term::start(&home, &["-y"], COLS, ROWS);
+    term.wait_for(PROMPT, WAIT);
+    term.wait_for("[YOLO]", WAIT);
+}
+
+#[test]
 fn planning_mode_runs_a_command_that_only_reads_without_asking() {
     let server = MockServer::start(vec![shell_call("ls"), Reply::Text("Listed the folder.".into())]);
     let home = Home::new();
@@ -5025,8 +5063,8 @@ fn the_interface_language_can_be_turned_in_settings() {
 
     term.send(TAB);
     term.wait_for("╭─ Settings", WAIT);
-    // The language row is the eighth of the General tab.
-    for _ in 0..7 {
+    // The language row is the ninth of the General tab (YOLO comes third).
+    for _ in 0..8 {
         term.send(DOWN);
     }
     term.wait_for("Interface language", WAIT);

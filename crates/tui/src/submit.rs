@@ -9,7 +9,7 @@ const HELP_COMMANDS: &[(&str, &str)] = &[
     ("/model, /m, F3", "choose and switch the model"),
     ("/provider [name]", "switch to another saved provider, local or cloud; add or edit them"),
     ("/effort, /t, F4", "thinking effort (also Ctrl+T)"),
-    ("/mode [plan|man|edits|all]", "permission mode (also Shift+Tab)"),
+    ("/mode [plan|man|edits|all|yolo]", "permission mode (also Shift+Tab; YOLO needs Settings)"),
     ("/context, F1", "what fills the context window"),
     ("/compact [focus]", "summarize older turns to free context"),
     ("/memory [summary]", "what FlashAgent remembers; the summary groups it by topic"),
@@ -564,12 +564,19 @@ impl App {
     }
 
     fn show_goal_usage(&mut self) {
+        let refused = if self.config.permission_mode.is_yolo() {
+            // Saying otherwise would describe a filter YOLO has already
+            // turned off.
+            String::new()
+        } else {
+            " (dangerous shell commands are refused)".to_string()
+        };
         self.chat.push_system(&format!(
             "Autonomous Goal Mode:\n\
              Usage: /goal <task description>\n\
              Example: /goal Refactor error handling in the core crate and run the test suite\n\
              Limits: {}. Change them in Settings → Goal.\n\
-             In goal mode FlashAgent approves its own tool calls (dangerous shell commands are refused), \
+             In goal mode FlashAgent approves its own tool calls{refused}, \
              thinks at maximum effort and works on its own. A question it asks you waits {} for an answer, \
              then the run carries on without it.",
             GoalBudgets::from_config(&self.config).summary(),
@@ -596,7 +603,11 @@ impl App {
         });
         self.goal_ledger = Some(GoalLedger::new(task_desc.clone(), goal_budgets.clone()));
 
-        cx.perm.state().set_mode(PermissionMode::Bypass);
+        // A /goal run approves its own calls instead of asking. YOLO is the
+        // stronger promise the owner already made: the run keeps it rather
+        // than stepping down to Accept All's still-refused commands.
+        let goal_mode = if cx.perm.state().mode().is_yolo() { PermissionMode::Yolo } else { PermissionMode::Bypass };
+        cx.perm.state().set_mode(goal_mode);
         cx.perm.state().set_goal_active(true);
         self.current_effort = "high".to_string();
         cx.tools_arc.set_goal_mode(true);
@@ -822,17 +833,26 @@ impl App {
 
     fn mode_command(&mut self, cx: &LoopCtx<'_>, arg: &str) {
         let mode = match arg.to_lowercase().as_str() {
-            "" => cx.perm.state().mode().next(),
+            "" => cx.perm.state().mode().next_with_yolo(self.config.yolo_mode),
             "planning" | "plan" => PermissionMode::Planning,
             "manual" | "man" => PermissionMode::Manual,
             "acceptedits" | "accept_edits" | "edits" | "auto" | "default" => PermissionMode::AcceptEdits,
             "bypass" | "accept_all" | "all" => PermissionMode::Bypass,
+            "yolo" => {
+                // The mode is armed in Settings, not typed into being: a
+                // command alone must not turn every filter off.
+                if !self.config.yolo_mode {
+                    self.notice(tr("YOLO is not enabled: turn it on in Settings → General first"));
+                    return;
+                }
+                PermissionMode::Yolo
+            }
             "autonomic" => {
                 self.notice(tr("Autonomous mode runs only inside /goal <task>"));
                 return;
             }
             _ => {
-                self.notice(tr("Usage: /mode planning | /mode manual | /mode edits | /mode all"));
+                self.notice(tr("Usage: /mode planning | /mode manual | /mode edits | /mode all | /mode yolo"));
                 return;
             }
         };
@@ -840,6 +860,12 @@ impl App {
         self.remember_mode(mode);
         self.refresh_welcome(cx.source, cx.mascot_mood);
         self.notice(format!("{} {}", tr("Permission mode set to:"), tr(mode.label())));
+        if mode.is_yolo() {
+            self.say(BackgroundNotice::fading(
+                tr("YOLO: no filters · any tool and any command runs without asking"),
+                8,
+            ));
+        }
     }
 
     fn channel_command(&mut self, cx: &LoopCtx<'_>, arg: &str) {

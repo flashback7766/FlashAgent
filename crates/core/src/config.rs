@@ -462,6 +462,12 @@ pub struct AppConfig {
     pub active_provider: String,
     /// The mode the user was in last time; Accept Edits on the first run.
     pub permission_mode: PermissionMode,
+    /// YOLO is armed: Shift+Tab gains its fifth step, and `/mode yolo` is
+    /// accepted. Off by default, so the mode is never one keystroke away on a
+    /// machine where nobody turned it on. Turning it off while YOLO is active
+    /// falls back to Accept Edits.
+    #[serde(default)]
+    pub yolo_mode: bool,
     /// "default", "off", "low", "medium", "high".
     pub thinking_effort: String,
     #[serde(default)]
@@ -781,6 +787,7 @@ impl Default for AppConfig {
             providers: Vec::new(),
             active_provider: String::new(),
             permission_mode: PermissionMode::AcceptEdits,
+            yolo_mode: false,
             thinking_effort: "auto".to_string(),
             sampling_preset: SamplingPreset::Coding,
             temperature: 0.60,
