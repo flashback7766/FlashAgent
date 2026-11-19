@@ -58,6 +58,21 @@ impl App {
                 self.server_silent = false;
                 self.on_server_discovered(cx, disc)
             }
+            UiEvent::Retry { generation } => {
+                if generation == self.retry_generation && self.retry_after_error && !self.running {
+                    self.resume_failed_turn(cx);
+                }
+            }
+            UiEvent::UserNotice { level, text } => {
+                let heading = match level.as_str() {
+                    "success" => "[ok] ",
+                    "warning" => "[!] ",
+                    "error" => "[x] ",
+                    _ => "",
+                };
+                self.chat.push_system(&format!("  {heading}{text}"));
+                self.renderer.request_reprint();
+            }
             UiEvent::ServerSilent(url) => self.server_silent = self.provider_switch.is_none() && url == cx.source.0.base_url(),
             UiEvent::CompactionDelta(delta) => self.chat.append_compaction_delta(&delta),
             UiEvent::CompactionReset => self.chat.restart_compaction_card(),
@@ -350,7 +365,7 @@ impl App {
         if !self.apply_compaction_result(session, cx.session_id, history, card, cx.cwd_display) {
             return;
         }
-        update_context_usage(&self.current_model, &mut self.context_usage, &self.history, cx.memory_block, &self.chat, cx.perm);
+        update_context_usage(&self.current_model, &mut self.context_usage, &self.history, &self.memory_block, &self.chat, cx.perm);
         // Whatever was typed while compaction ran goes out now (whether the
         // summary was saved or not) as steering if a turn is under way, or a
         // fresh turn otherwise.
@@ -465,7 +480,7 @@ impl App {
                 cx.tools_arc.set_model_name(&self.current_model);
                 cx.source.set_effort_bias(self.effort_memory.steps(&self.current_model));
                 cx.tools_arc.set_vision_supported(model_sees_images(cx.source, &self.current_model));
-                update_context_usage(&self.current_model, &mut self.context_usage, &self.history, cx.memory_block, &self.chat, cx.perm);
+                update_context_usage(&self.current_model, &mut self.context_usage, &self.history, &self.memory_block, &self.chat, cx.perm);
 
                 // Only for the provider the client talks to: another's model
                 // must not be written beside it.
@@ -580,7 +595,7 @@ impl App {
         if self.chat.take_needs_reprint() {
             self.renderer.request_reprint();
         }
-        update_context_usage(&self.current_model, &mut self.context_usage, &self.history, cx.memory_block, &self.chat, cx.perm);
+        update_context_usage(&self.current_model, &mut self.context_usage, &self.history, &self.memory_block, &self.chat, cx.perm);
     }
 
     /// The live phase, the token rate and what the turn did, for the status
@@ -609,9 +624,12 @@ impl App {
                     self.turn_outcome.failed_tools += 1;
                 }
                 // Memory is written unasked, so it is announced, on the line under the input.
-                let wrote_memory = self.last_tool_name
-                    .as_deref()
-                    .is_some_and(|n| matches!(n, "memory_create" | "memory_update" | "memory_remove"));
+                let wrote_memory = self.last_tool_name.as_deref() == Some("memory")
+                    && result.as_deref().is_some_and(|r| {
+                        ["Created ", "Replaced ", "Inserted ", "Deleted ", "Renamed ", "Imported "]
+                            .iter()
+                            .any(|prefix| r.starts_with(prefix))
+                    });
                 if wrote_memory && !*is_error {
                     if let Some(said) = result.as_deref().and_then(|r| r.lines().next()) {
                         self.say(BackgroundNotice::fading(
@@ -924,6 +942,9 @@ impl App {
                 .filter(|_| self.overlay.is_some())
                 .map(|line| HoverTarget::Card(line, m.column));
         }
+        if self.renderer.mode_press(m.row, m.column) {
+            return Some(HoverTarget::Mode);
+        }
         if self.renderer.gauge_press(m.row, m.column) {
             return Some(HoverTarget::Gauge);
         }
@@ -1016,6 +1037,13 @@ impl App {
         if self.renderer.card_line(m.row).is_some() {
             return;
         }
+        // The permission-mode label cycles the mode, as Shift+Tab does.
+        if self.renderer.mode_press(m.row, m.column) {
+            self.zone_flash = self.renderer.mode_zone().map(|(row, from, to)| (row, from, to, flashagent_tui::anim::now_ms()));
+            self.cycle_permission_mode(cx);
+            self.renderer.request_reprint();
+            return;
+        }
         // The context gauge at the end of the status line is a widget of its
         // own the same way: a press there opens what F1 opens.
         if self.renderer.gauge_press(m.row, m.column) {
@@ -1050,10 +1078,7 @@ impl App {
         // A subagent row opens its own detail too, and only the mouse does:
         // F2 is for the transcript and never touches the rows above the composer.
         if let Some(id) = self.renderer.agent_row_at(m.row).map(str::to_string) {
-            if !self.expanded_agents.remove(&id) {
-                self.expanded_agents.insert(id);
-            }
-            self.renderer.request_reprint();
+            self.open_agents_view(Some(&id));
             return;
         }
         if let Some(row) = self.renderer.chat_row_at(m.row) {
@@ -1075,6 +1100,24 @@ impl App {
                 self.settle_block(before);
                 self.renderer.request_reprint();
                 return;
+            }
+        }
+        // The command popup's rows are items: a press picks one, the way Tab
+        // completes the one in use, only without cycling past it.
+        if self.overlay.is_none() {
+            if let Some(rows) = self.renderer.popup_rows.as_ref() {
+                if let Some(popup_row) = rows.row_at(m.row) {
+                    if let Some(popup) = self.command_popup() {
+                        if let Some(at) = popup.click_item(popup_row) {
+                            if let Some(item) = popup.items.get(at) {
+                                self.input.set(format!("{} ", item.trigger));
+                                self.autocomplete_idx = 0;
+                                self.renderer.request_reprint();
+                                return;
+                            }
+                        }
+                    }
+                }
             }
         }
         // What the scrollbar, a subagent row and the card left behind is the

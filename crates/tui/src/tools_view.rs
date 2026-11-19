@@ -19,7 +19,7 @@ const TEXT_AMBER: &str = "\x1b[38;2;225;175;95m";
 /// The tools a safe session does not have: the shell, the web and the
 /// subagents. Reading and editing inside the project stay, so the agent can
 /// still do the work; it just cannot leave the project or run anything.
-pub const SAFE_MODE_TOOLS: [&str; 6] = ["run_shell", "web_search", "web_fetch", "spawn_agent", "send_message", "review_agent"];
+pub const SAFE_MODE_TOOLS: [&str; 4] = ["run_shell", "web", "http_request", "agent"];
 
 /// One tool in the list.
 #[derive(Debug, Clone, PartialEq, Eq)]

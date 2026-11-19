@@ -243,6 +243,17 @@ pub(crate) fn parse_recap_and_suggestion_json(raw: &str) -> Option<RecapAndTitle
 pub(crate) fn sanitize_session_title(s: &str) -> Option<String> {
     let text = s.split_whitespace().collect::<Vec<_>>().join(" ");
     let text = text.trim_matches(['"', '\'', '«', '»']).trim();
+    // The model sometimes dresses a name in status glyphs ("●▶ fix the
+    // parser"): the picker shows them as noise before the subject. Words
+    // survive, decoration goes — and the spaces between the glyphs go too,
+    // or one pass would leave the next glyph behind. The set is written as
+    // code points (the geometric-shape block plus the few outside it), so
+    // the font test does not take them for symbols the UI draws.
+    let is_decoration = |c: char| {
+        let n = c as u32;
+        matches!(n, 0x25A0..=0x25CF | 0x2022 | 0x25E6 | 0x2726 | 0x2727 | 0x2013 | 0x2014 | 0x203A | 0x00B7 | 0x00BB) || c == '*' || c == ' ' || c == '\t'
+    };
+    let text = text.trim_start_matches(is_decoration).trim();
     if text.is_empty() || is_generic_recap(text) {
         return None;
     }
@@ -439,5 +450,13 @@ mod tests {
         // The latest turn has no answer yet: there is no recap to write.
         history.pop();
         assert!(build_recap_messages(&history).is_none());
+    }
+
+    #[test]
+    fn a_title_keeps_its_words_and_drops_the_model_s_decoration() {
+        assert_eq!(sanitize_session_title("●▶ yay -S yersinia").as_deref(), Some("yay -S yersinia"));
+        assert_eq!(sanitize_session_title("fix the parser").as_deref(), Some("fix the parser"));
+        assert_eq!(sanitize_session_title("— • redo the install").as_deref(), Some("redo the install"));
+        assert_eq!(sanitize_session_title("● ● ●"), None, "a title of only glyphs names nothing");
     }
 }

@@ -82,6 +82,11 @@ pub(crate) struct Renderer {
     status_gauge_cols: Option<(u16, u16)>,
     /// (row, from column, to column) of the gauge on screen, for a click.
     status_gauge: Option<(u16, u16, u16)>,
+    /// The permission-mode label's columns on the status row, when it is a
+    /// control (not during a goal, whose mode is fixed).
+    status_mode_cols: Option<(u16, u16)>,
+    /// (row, from column, to column) of that label on screen.
+    status_mode: Option<(u16, u16, u16)>,
     /// Where the pointer was last seen: the scrollbar shows itself only to a
     /// hand near the right edge of the transcript.
     pub(crate) mouse_at: Option<(u16, u16)>,
@@ -94,6 +99,26 @@ pub(crate) struct Renderer {
     overlay_close_col: Option<u16>,
     /// (row, column) of the ✕ on screen, for a click.
     overlay_close: Option<(usize, u16)>,
+    /// The command popup's place on the last frame, when one was open.
+    pub(crate) popup_rows: Option<PopupRows>,
+}
+
+/// Where the command popup sat on the last frame. A press on one of its rows
+/// picks the item, the way Tab completes the one in use.
+pub(crate) struct PopupRows {
+    top: usize,
+    /// Popup rows the screen cut away above.
+    skipped: usize,
+    count: usize,
+}
+
+impl PopupRows {
+    /// The popup row a screen row holds: 0 is the top border, the item rows
+    /// follow, the last row is the bottom border. `None` off the popup.
+    pub(crate) fn row_at(&self, row: u16) -> Option<usize> {
+        let at = (row as usize).checked_sub(self.top)? + self.skipped;
+        (at > 0 && at + 1 < self.count).then_some(at)
+    }
 }
 
 /// Where the scrollbar thumb sits while it is being dragged.
@@ -127,6 +152,8 @@ pub(crate) struct FrameState<'a> {
     pub(crate) safe_mode: bool,
     pub(crate) is_goal_active: bool,
     pub(crate) goal_progress: Option<&'a str>,
+    /// An automatic reconnect is waiting or running: attempt and ceiling.
+    pub(crate) reconnecting: Option<(usize, usize)>,
     /// Laid out by `TipAnimator::render_lines`; `None` with tips off.
     pub(crate) tip_lines: Option<&'a [String]>,
     pub(crate) reasoning_expand: ReasoningExpansion,
@@ -200,6 +227,8 @@ pub(crate) struct FrameState<'a> {
     pub(crate) overlay_flash: Option<usize>,
     /// The pointer is on the status line's context gauge.
     pub(crate) hover_gauge: bool,
+    /// The pointer is on the permission-mode label.
+    pub(crate) hover_mode: bool,
     /// The pointer is on the "more lines below" marker.
     pub(crate) hover_marker: bool,
     /// A click on a welcome-card button, the gauge or the marker: those cells
@@ -616,10 +645,13 @@ impl Renderer {
             scrollbar_drag: None,
             status_gauge_cols: None,
             status_gauge: None,
+            status_mode_cols: None,
+            status_mode: None,
             mouse_at: None,
             scroll_marker: None,
             overlay_close_col: None,
             overlay_close: None,
+            popup_rows: None,
         }
     }
 
@@ -778,7 +810,9 @@ fn tasks_status(running: usize) -> String {
 }
 
 /// The mode, and what the turn waits on when that is not the model: the phase
-/// itself is written in the composer, the speed on the line above.
+/// itself is written in the composer, the speed on the line above. The
+/// arguments are the states the one row can be in.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn format_status_left(
     running: bool,
     is_goal_active: bool,
@@ -786,6 +820,7 @@ pub(crate) fn format_status_left(
     goal_progress: Option<&str>,
     mode_label: &str,
     yolo: bool,
+    reconnecting: Option<(usize, usize)>,
     expand_status: &str,
 ) -> String {
     let mode_str = if is_goal_active {
@@ -796,13 +831,20 @@ pub(crate) fn format_status_left(
     } else {
         format!("\x1b[38;2;160;155;145m[{mode_label}]\x1b[0m")
     };
-    let activity = match (running, awaiting_user, goal_progress) {
+    let activity = if let Some((n, max)) = reconnecting {
+        format!(
+            "\x1b[38;2;245;160;80m{}\x1b[0m",
+            flashagent_tui::i18n::tr_fill("reconnecting {n}/{max}", &[("n", &n.to_string()), ("max", &max.to_string())])
+        )
+    } else {
+        match (running, awaiting_user, goal_progress) {
         // Stopped at an approval card: waiting for the user, not generating.
         (true, true, _) => format!("\x1b[38;2;225;175;95m{}\x1b[0m", flashagent_tui::i18n::tr("Waiting for your answer")),
         // During a goal the budget burn-down.
         (true, false, Some(p)) => format!("\x1b[38;2;138;180;248m{p}\x1b[0m"),
         (true, false, None) => return format!("  {mode_str}{expand_status}"),
         (false, ..) => format!("\x1b[38;2;135;130;125m{}\x1b[0m", flashagent_tui::i18n::tr("Ready")),
+        }
     };
     format!("  {mode_str} \x1b[38;2;95;90;85m·\x1b[0m {activity}{expand_status}")
 }
@@ -958,7 +1000,12 @@ fn context_gauges(context_usage: &ContextUsage, reported: bool, warn_threshold: 
 
 /// The status row, and how many cells its gauge takes at the end (0: the row
 /// shows no gauge this frame).
-fn footer_status(width: usize, context_usage: &ContextUsage, st: &FrameState<'_>, awaiting_user: bool) -> (String, usize) {
+fn footer_status(
+    width: usize,
+    context_usage: &ContextUsage,
+    st: &FrameState<'_>,
+    awaiting_user: bool,
+) -> (String, usize, Option<(usize, usize)>) {
     // The safe mode is said where the permission mode is: both say what the
     // session may do, and one of them can change what the other allows.
     // The mode and the safe marker are the interface's own words.
@@ -1000,9 +1047,15 @@ fn footer_status(width: usize, context_usage: &ContextUsage, st: &FrameState<'_>
         st.goal_progress,
         &mode_label,
         st.mode.is_yolo(),
+        st.reconnecting,
         &format!("{}{expand_status}", tasks_status(st.background_tasks)),
     );
-    fit_status_row(width, &left_telemetry, &format_provider(st.provider.0, st.provider.1), &gauge_str)
+    // The label is a control when the mode can change at all: a goal fixes it
+    // to Accept All, so a press there would promise something it cannot do.
+    let mode_end = 2 + visible_width(&mode_label) + 2;
+    let mode_cols = (!st.is_goal_active && width > mode_end).then_some((2, mode_end));
+    let (row, gauge) = fit_status_row(width, &left_telemetry, &format_provider(st.provider.0, st.provider.1), &gauge_str);
+    (row, gauge, mode_cols)
 }
 
 /// The row, right-aligned gauge last, and the gauge's width: the cells a click
@@ -1072,11 +1125,13 @@ fn append_approval_card(tail: &mut Vec<RenderLine>, gate: &TuiGate, st: &FrameSt
     // questions and the three buttons under them went past the translation
     // table, so a Russian interface showed an English card in the middle of
     // a Russian conversation.
+    let edit_mode = args.get("mode").and_then(|m| m.as_str()).unwrap_or("replace");
     let question = match req.tool.as_str() {
         "run_shell" => tr("Run this command?").to_string(),
+        "edit" if new_file && edit_mode == "write" => tr("Create this file?").to_string(),
         "write_file" if new_file => tr("Create this file?").to_string(),
-        "edit_file" | "patch_file" | "write_file" if several_files => tr("Change these files?").to_string(),
-        "edit_file" | "patch_file" | "write_file" => tr("Change this file?").to_string(),
+        "edit" | "edit_file" | "patch_file" | "write_file" if several_files => tr("Change these files?").to_string(),
+        "edit" | "edit_file" | "patch_file" | "write_file" => tr("Change this file?").to_string(),
         tool => tr_fill("Allow {tool}?", &[("tool", tool)]),
     };
     let title = format!(" \x1b[1;38;2;225;175;95m{question}\x1b[0m ");
@@ -1524,12 +1579,15 @@ struct LayoutInputs<'a> {
     zone_at: &'a dyn Fn(usize, usize) -> Option<(usize, usize)>,
     /// The screen row the pointer is on, when it is over the transcript.
     hover_chat: Option<(u16, u16)>,
-    /// The pointer is on the status line's context gauge / the marker row.
+    /// The pointer is on the status line's context gauge / permission mode.
     hover_gauge: bool,
+    hover_mode: bool,
     hover_marker: bool,
     /// The cells a just-clicked welcome button, the gauge or the marker keeps
     /// a pressed look on, for a moment.
     zone_flash: Option<(u16, usize, usize)>,
+    /// Rows the command popup takes under the card, when it is open.
+    popup_lines: usize,
 }
 
 impl Renderer {
@@ -1663,7 +1721,6 @@ impl Renderer {
             card_hits = hits;
         } else if let Some(overlay) = overlay {
             // The composer turns into the open menu or screen.
-            // The composer turns into the open menu or screen.
             let first_overlay_line = tail.len();
             tail.extend(overlay.render(width, height as usize, st.overlay_hover, st.overlay_flash));
             // Every card closes from its own corner: the top row's last dash
@@ -1715,6 +1772,9 @@ impl Renderer {
         if let Some(ac) = autocomplete {
             tail.extend(ac.render(width));
         }
+        // The popup sits between the card and the footer; its rows are what a
+        // click above the composer may reach.
+        let popup_lines = if autocomplete.is_some() { tail.len().saturating_sub(paint_start + card_drawn) } else { 0 };
 
         // Three footer lines: hints, tip, and context status.
         let shown = FooterVisibility {
@@ -1726,8 +1786,9 @@ impl Renderer {
         tail.push((LineKind::System, footer_hint(shown, &st, width, t)));
         append_tip_rows(&mut tail, &st, width);
         let awaiting_user = gate.pending().is_some() || question_gate.pending().is_some();
-        let (status_row, gauge_vis) = footer_status(width, context_usage, &st, awaiting_user);
+        let (status_row, gauge_vis, mode_cols) = footer_status(width, context_usage, &st, awaiting_user);
         tail.push((LineKind::System, status_row));
+        self.status_mode_cols = mode_cols.map(|(from, to)| (from as u16, to as u16));
         // The gauge is the status row's last cells; which screen row that is
         // paint_layout knows, after the frame has been cut to the terminal.
         self.status_gauge_cols = (gauge_vis > 0).then(|| (width.saturating_sub(gauge_vis + 1) as u16, width as u16));
@@ -1743,14 +1804,16 @@ impl Renderer {
             zone_at: &|row, col| chat.tool_action_zone_at(row, col).map(|zone| (zone.from, zone.to)).or_else(|| chat.welcome_zone_at(row, col)),
             hover_chat: st.hover_chat,
             hover_gauge: st.hover_gauge,
+            hover_mode: st.hover_mode,
             hover_marker: st.hover_marker,
             zone_flash: st.zone_flash,
+            popup_lines,
         });
     }
     fn paint_layout(&mut self, settled: &[RenderLine], tail: &mut Vec<RenderLine>, layout: LayoutInputs<'_>) {
         let LayoutInputs {
             width, height, card_key, card_start, paint_start, mut input_line_idx, text_cursor, border_color, selection, owner_at, zone_at, hover_chat,
-            hover_gauge, hover_marker, zone_flash, mut card_lines,
+            hover_gauge, hover_mode, hover_marker, zone_flash, mut card_lines, popup_lines,
         } = layout;
     // The conversation scrolls; the composer and the footer under it stay where
     // they are, so a reply can be written while reading back.
@@ -1844,14 +1907,10 @@ impl Renderer {
     // A composer taller than the screen keeps its end, where the typing is.
     let cut = rows.len().saturating_sub(height);
     rows.drain(..cut);
-    // The prompt sits on the terminal's last row: what the conversation does
-    // not fill is blank space above it, never a dead band under the composer.
-    let pad = height.saturating_sub(rows.len());
-    if pad > 0 {
-        let mut padded = vec![String::new(); pad];
-        padded.append(&mut rows);
-        rows = padded;
-    }
+    // The conversation starts at the top and grows downward; the prompt sits
+    // under the last line, where the eye already is. Blank space at the bottom
+    // belongs to the terminal, not to a composer pushed away from the text.
+    let pad = 0usize;
     self.top_pad = pad;
     // The "more lines below" marker is the conversation's last painted row;
     // whatever the screen cut from the top, that is where a click finds it.
@@ -1873,10 +1932,22 @@ impl Renderer {
         Some(top) => (pad + top, 0),
         None => (pad, cut - card_first_abs),
     };
+    let card_drawn_on_screen = card_lines.len();
     self.card_rows = Some(CardRows {
         top,
         first,
         lines: card_lines,
+    });
+    // The command popup follows the card block: its first screen row is the
+    // card's last one plus one, and whatever the screen cut from the top took
+    // some of its rows with it.
+    self.popup_rows = (popup_lines > 0).then(|| {
+        let popup_first_abs = card_first_abs + card_drawn_on_screen;
+        PopupRows {
+            top: pad + popup_first_abs.saturating_sub(cut),
+            skipped: cut.saturating_sub(popup_first_abs),
+            count: popup_lines,
+        }
     });
     // The ✕ lives on the card's first row, which a card taller than the screen
     // takes off the top: a corner nobody can reach is not a button.
@@ -1906,6 +1977,13 @@ impl Renderer {
     }
     // The gauge and the marker carry the same quiet light while the pointer
     // is on them.
+    if hover_mode {
+        if let Some((row, from, to)) = self.status_mode {
+            if (row as usize) < rows.len() {
+                rows[row as usize] = flashagent_tui::style_span(&rows[row as usize], from as usize, to as usize, "\x1b[48;2;38;36;33m", "\x1b[49m");
+            }
+        }
+    }
     if hover_gauge {
         if let Some((row, from, to)) = self.status_gauge {
             if (row as usize) < rows.len() {
@@ -1985,7 +2063,22 @@ impl Renderer {
     // The status row is the last one painted, however much the screen cut from
     // the top; the gauge's columns were measured when the frame was built.
     self.status_gauge = self.status_gauge_cols.map(|(from, to)| (rows.len().saturating_sub(1) as u16, from, to));
+    self.status_mode = self.status_mode_cols.map(|(from, to)| (rows.len().saturating_sub(1) as u16, from, to));
     self.screen.paint(&rows, cursor);
+    }
+
+    /// A press on the permission-mode label: it cycles the mode, exactly as
+    /// Shift+Tab does.
+    pub(crate) fn mode_press(&self, row: u16, column: u16) -> bool {
+        match self.status_mode {
+            Some((mode_row, from, to)) => row == mode_row && (from..to).contains(&column),
+            None => false,
+        }
+    }
+
+    /// The label's cells, for the pressed look.
+    pub(crate) fn mode_zone(&self) -> Option<(u16, usize, usize)> {
+        self.status_mode.map(|(row, from, to)| (row, from as usize, to as usize))
     }
 
     /// A press on the context gauge at the end of the status line: the bar
@@ -2175,6 +2268,7 @@ impl App {
                     selection,
                     hover_chat,
                     hover_gauge: self.hovered.as_ref().is_some_and(|h| matches!(h, HoverTarget::Gauge)),
+                    hover_mode: self.hovered.as_ref().is_some_and(|h| matches!(h, HoverTarget::Mode)),
                     hover_marker: self.hovered.as_ref().is_some_and(|h| matches!(h, HoverTarget::Marker)),
                     zone_flash: self.zone_flash.map(|(row, from, to, _)| (row, from, to)),
                     overlay_hover,
@@ -2190,6 +2284,7 @@ impl App {
                 safe_mode: self.config.safe_mode,
                 is_goal_active: self.goal_state.is_some(),
                 goal_progress: goal_progress.as_deref(),
+                reconnecting: self.reconnecting,
                 tip_lines: config.show_tips.then_some(cx.tip_lines.as_slice()),
                 reasoning_expand: ReasoningExpansion { all: self.all_expanded, last: self.last_expanded },
                 running: self.running,
@@ -2529,19 +2624,19 @@ mod footer_tests {
 
     #[test]
     fn the_yolo_mode_is_the_one_warning_colour_in_the_status_row() {
-        let yolo = format_status_left(false, false, false, None, "YOLO", true, "");
+        let yolo = format_status_left(false, false, false, None, "YOLO", true, None, "");
         assert!(yolo.contains("[YOLO]"));
         assert!(yolo.contains("245;160;80"), "YOLO does not stand out: {yolo:?}");
-        let manual = format_status_left(false, false, false, None, "Manual", false, "");
+        let manual = format_status_left(false, false, false, None, "Manual", false, None, "");
         assert!(manual.contains("160;155;145"), "the usual mode is neutral, not a success colour: {manual:?}");
         // A goal run's own banner still wins: it says who is driving.
-        let goal = format_status_left(true, true, false, None, "YOLO", true, "");
+        let goal = format_status_left(true, true, false, None, "YOLO", true, None, "");
         assert!(goal.contains("Goal: Autonomous"));
     }
 
     #[test]
     fn the_status_row_never_exceeds_the_window() {
-        let left = format_status_left(false, false, false, None, "Manual", false, "");
+        let left = format_status_left(false, false, false, None, "Manual", false, None, "");
         let provider = format_provider("Anthropic", "claude-opus-5-5");
         for width in 1..120 {
             let (row, _) = fit_status_row(width, &left, &provider, "");
@@ -2551,7 +2646,7 @@ mod footer_tests {
 
     #[test]
     fn the_status_row_drops_the_model_then_the_provider() {
-        let left = format_status_left(false, false, false, None, "Manual", false, "");
+        let left = format_status_left(false, false, false, None, "Manual", false, None, "");
         let provider_only = format_provider("Anthropic", "");
         let provider = format_provider("Anthropic", "claude-opus-5-5");
         let (with_provider, _) = fit_status_row(visible_width(&left) + visible_width(&provider_only) + 4, &left, &provider, "");
@@ -2567,7 +2662,7 @@ mod footer_tests {
 
     #[test]
     fn the_gauges_columns_are_the_ones_a_click_on_the_status_end_hits() {
-        let left = format_status_left(false, false, false, None, "Manual", false, "");
+        let left = format_status_left(false, false, false, None, "Manual", false, None, "");
         let provider = format_provider("OpenCode Go", "deepseek-v4.1-flash");
         let width = 100;
         let (row, gauge_vis) = fit_status_row(width, &left, &provider, "1% · 9.5K/1M");

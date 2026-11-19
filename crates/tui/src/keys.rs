@@ -152,7 +152,7 @@ impl App {
     /// The command popup the arrows move in: only while a command is being
     /// typed. A recalled prompt that starts with a path (`/home/me/shot.png
     /// what is this`) has none, and the arrows go on through the history.
-    fn command_popup(&self) -> Option<AutocompletePopup> {
+    pub(crate) fn command_popup(&self) -> Option<AutocompletePopup> {
         if self.running || self.history_index.is_some() || !self.input.starts_with('/') || self.input.line_count() != 1 {
             return None;
         }
@@ -388,23 +388,28 @@ impl App {
         Some(Flow::Next)
     }
 
+    /// Shift+Tab and a click on the mode label do the same thing.
+    pub(crate) fn cycle_permission_mode(&mut self, cx: &mut LoopCtx<'_>) {
+        let next_mode = cx.perm.state().mode().next_with_yolo(self.config.yolo_mode);
+        cx.perm.state().set_mode(next_mode);
+        self.remember_mode(next_mode);
+        self.refresh_welcome(cx.source, cx.mascot_mood);
+        self.custom_placeholder = Some(format!("{} {}", tr("Permission mode set to:"), tr(next_mode.label())));
+        if next_mode.is_yolo() {
+            self.say(BackgroundNotice::fading(
+                tr("YOLO: no filters · any tool and any command runs without asking"),
+                8,
+            ));
+        }
+        self.suggested_prompt = None;
+        self.renderer.request_reprint();
+    }
+
     fn handle_navigation_key(&mut self, cx: &mut LoopCtx<'_>, code: KeyCode, mods: KeyModifiers) -> Option<Flow> {
         match code {
             // Shift+Tab arrives as BackTab or as Tab with Shift.
             KeyCode::BackTab | KeyCode::Tab if matches!(code, KeyCode::BackTab) || mods.contains(KeyModifiers::SHIFT) => {
-                let next_mode = cx.perm.state().mode().next_with_yolo(self.config.yolo_mode);
-                cx.perm.state().set_mode(next_mode);
-                self.remember_mode(next_mode);
-                self.refresh_welcome(cx.source, cx.mascot_mood);
-                self.custom_placeholder = Some(format!("{} {}", tr("Permission mode set to:"), tr(next_mode.label())));
-                if next_mode.is_yolo() {
-                    self.say(BackgroundNotice::fading(
-                        tr("YOLO: no filters · any tool and any command runs without asking"),
-                        8,
-                    ));
-                }
-                self.suggested_prompt = None;
-                self.renderer.request_reprint();
+                self.cycle_permission_mode(cx);
             }
             // While a card is up the keys go to it: `handle_overlay_key` claims
             // them before this runs, and the card's own handler answers them.

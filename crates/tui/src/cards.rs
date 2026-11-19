@@ -11,10 +11,6 @@ impl App {
     /// started: the card at the top says what runs now. Before the first
     /// message it is the same card, drawn as usual.
     pub(crate) fn refresh_welcome_state(&mut self, source: &BackendSource, mood: MascotMood) {
-        if !self.chat.has_user_message() {
-            self.animate_welcome(source, mood, None, None);
-            return;
-        }
         let card = self.welcome_lines(source, mood, None);
         self.chat.update_welcome_card_state(card);
     }

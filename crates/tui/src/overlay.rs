@@ -1,5 +1,6 @@
 use super::*;
 
+use flashagent_tui::agents_view::AgentsView;
 use flashagent_tui::memory_view::MemoryModal;
 
 /// The panel in the composer's place: a menu, settings or a modal. At most
@@ -20,6 +21,8 @@ pub(crate) enum Overlay {
     Sampling(SamplingView),
     Context(ContextModal),
     Memory(MemoryModal),
+    /// /agents and a click on a pinned subagent: its own chat and controls.
+    Agents(AgentsView),
     Mcp(McpModal),
     /// /tasks: background commands.
     Tasks(flashagent_tui::TasksModal),
@@ -60,6 +63,7 @@ impl Overlay {
             Overlay::Providers(view) => view.wheel(dir),
             Overlay::Sampling(view) => view.wheel(dir),
             Overlay::Memory(modal) => modal.wheel(dir),
+            Overlay::Agents(view) => { view.scroll_by(dir as isize * 3); true }
             Overlay::Mcp(modal) => modal.wheel(dir),
             Overlay::Tasks(modal) => modal.wheel(dir),
             Overlay::Tools(view) => view.wheel(dir),
@@ -89,13 +93,14 @@ impl Overlay {
             Overlay::Settings(view) => view.render(width, hover, flash),
             Overlay::Sampling(view) => view.render(width),
             Overlay::Context(modal) => modal.render(width),
-            Overlay::Memory(modal) => modal.render(width),
+            Overlay::Memory(modal) => modal.render(width, height),
+            Overlay::Agents(view) => view.render(width, height),
             Overlay::Mcp(modal) => modal.render(width),
             Overlay::Tasks(modal) => modal.render(width),
             Overlay::Tools(view) => view.render(width, hover, flash),
             Overlay::Notices(view) => view.render(width, hover, flash),
             Overlay::Rules(view) => view.render(width, hover, flash),
-            Overlay::Usage(view) => view.render(width, height),
+            Overlay::Usage(view) => view.render(width, height, hover),
         }
     }
 }
@@ -131,6 +136,30 @@ impl App {
             Some(Overlay::Tools(mut view)) => {
                 let action = view.click(line);
                 self.tools_action(cx, view, action);
+                true
+            }
+            // The strip switches tabs, the Limits footer's "r refresh" asks
+            // the providers again: both go through the action the key takes.
+            Some(Overlay::Usage(mut view)) => {
+                use flashagent_tui::usage_view::UsageAction;
+                match view.click(line, column) {
+                    UsageAction::RefreshLimits => {
+                        view.set_limits_loading(true);
+                        self.overlay = Some(Overlay::Usage(view));
+                        self.refresh_usage_limits(cx);
+                    }
+                    _ => self.overlay = Some(Overlay::Usage(view)),
+                }
+                true
+            }
+            Some(Overlay::Agents(view)) => {
+                self.agents_click(cx, view, line, column);
+                true
+            }
+            // A memory row selects, the selected row opens in the editor, and
+            // the hint words act as their keys — forget stays with the keys.
+            Some(Overlay::Memory(view)) => {
+                self.memory_click(cx, view, line, column);
                 true
             }
             // Selecting only: taking a rule or a notice back stays with the

@@ -152,12 +152,10 @@ pub(crate) fn mascot_color(px: u8, breath: u8, offline: bool) -> Option<(u8, u8,
         (lo as i32 + span * breath as i32 / 5) as u8
     };
     let color = match px {
-        // Brass on warm graphite: the mascot is the one bright thing, not a
-        // second blue brand beside the amber chrome.
-        b'#' => (160, 155, 145),
-        b'o' => (lift(210, 232), lift(160, 190), lift(80, 120)),
+        b'#' => (138, 180, 248),
+        b'o' => (lift(150, 194), lift(196, 231), lift(224, 255)),
         b'w' => (255, 255, 255),
-        b'k' => (38, 36, 33),
+        b'k' => (32, 42, 62),
         _ => return None,
     };
     if offline {
@@ -282,6 +280,95 @@ pub fn key_hints(pairs: &[(&str, &str)], width: usize) -> String {
 fn plain_width(parts: &[(String, String)], sep_w: usize) -> usize {
     let text: usize = parts.iter().map(|(plain, _)| plain.chars().count()).sum();
     text + sep_w * parts.len().saturating_sub(1)
+}
+
+#[cfg(test)]
+mod zone_tests {
+    use super::*;
+
+    #[test]
+    fn zones_cover_what_the_line_shows_and_nothing_else() {
+        let pairs = [("m", "message"), ("x", "stop"), ("Esc", "close")];
+        let zones = key_hint_zones(&pairs, 100);
+        let text: Vec<char> = pairs
+            .iter()
+            .map(|(k, w)| format!("{k} {}", crate::i18n::tr(w)))
+            .collect::<Vec<_>>()
+            .join(" · ")
+            .chars()
+            .collect();
+        for (at, zone) in zones.iter().enumerate() {
+            let (from, to) = zone.expect("a wide line keeps every pair");
+            let plain = format!("{} {}", pairs[at].0, crate::i18n::tr(pairs[at].1));
+            assert_eq!(text[from..to].iter().collect::<String>(), plain, "zone {at} matches the drawn cells");
+        }
+        // The whole line fits, so every pair is a button.
+        assert!(zones.iter().all(|z| z.is_some()));
+        assert_eq!(zones.last().unwrap().unwrap().1, text.len());
+    }
+
+    #[test]
+    fn a_dropped_pair_is_no_button() {
+        // Far too narrow for everything: fit_hints keeps the way out and a
+        // prefix of the rest, so the middle pairs vanish.
+        let pairs = [("m", "message"), ("x", "stop"), ("c", "copy"), ("Esc", "close")];
+        let zones = key_hint_zones(&pairs, 12);
+        assert!(zones.last().unwrap().is_some(), "the way out is always kept");
+        assert!(zones.iter().rev().skip(1).any(|z| z.is_none()), "some middle pair was dropped: {zones:?}");
+        for (at, zone) in zones.iter().enumerate() {
+            if let Some((from, to)) = zone {
+                let plain = format!("{} {}", pairs[at].0, crate::i18n::tr(pairs[at].1));
+                assert_eq!(*to - *from, plain.chars().count(), "a kept zone keeps its size");
+            }
+        }
+    }
+}
+
+/// Where each pair's text lands on the line `key_hints(pairs, width)` draws:
+/// one zone per pair, aligned with `pairs`, `None` where the fitting dropped
+/// it. A click on a hint line finds its button here, measured the way
+/// `fit_hints` laid the line out — keep the two in step.
+pub fn key_hint_zones(pairs: &[(&str, &str)], width: usize) -> Vec<Option<(usize, usize)>> {
+    const SEP_W: usize = 3; // " · "
+    let plain: Vec<usize> = pairs
+        .iter()
+        .map(|(key, what_key)| {
+            let what = crate::i18n::tr(what_key);
+            let key_w = key.chars().count();
+            if what.is_empty() {
+                key_w
+            } else {
+                key_w + 1 + what.chars().count()
+            }
+        })
+        .collect();
+    let total = plain.iter().sum::<usize>() + SEP_W * plain.len().saturating_sub(1);
+    let kept: Vec<usize> = if total <= width {
+        (0..pairs.len()).collect()
+    } else {
+        // The way out stays, then a prefix of the rest, as fit_hints keeps.
+        let mut kept = Vec::new();
+        let mut used = plain[pairs.len() - 1];
+        for (i, w) in plain.iter().enumerate().take(pairs.len() - 1) {
+            if used + w + SEP_W > width {
+                break;
+            }
+            used += w + SEP_W;
+            kept.push(i);
+        }
+        kept.push(pairs.len() - 1);
+        kept
+    };
+    let mut zones = vec![None; pairs.len()];
+    let mut at = 0usize;
+    for (n, i) in kept.iter().enumerate() {
+        if n > 0 {
+            at += SEP_W;
+        }
+        zones[*i] = Some((at, at + plain[*i]));
+        at += plain[*i];
+    }
+    zones
 }
 
 /// Composer (3), hint line, tip and status line. The card gets the rest.

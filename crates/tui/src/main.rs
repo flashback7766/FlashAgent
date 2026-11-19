@@ -617,6 +617,8 @@ async fn main() -> Result<()> {
         // The tools the owner has switched off, and the ones the safe mode
         // takes away: not offered, and refused.
         disabled_tools: Some(disabled_tools.clone()),
+        // The real home: this is the app, not a test.
+        home: None,
     })?);
     // A closed terminal window (SIGHUP) or a kill (SIGTERM) skips the normal
     // exit; the background tasks run in their own process groups and would
@@ -644,7 +646,7 @@ async fn main() -> Result<()> {
     // a running child's steps go to the screen, and a finished child's answer
     // becomes a notice the model reads without anyone asking for it.
     let (agent_tx, agent_events) = tokio::sync::mpsc::unbounded_channel();
-    let (composite, agent_finished) =
+    let (composite, agent_finished, agent_control) =
         flashagent_tools::agent_tools(tools_arc.clone(), source.clone(), state.clone(), Some(agent_tx));
     let perm: &'static PermissionedTools =
         Box::leak(Box::new(PermissionedTools::new(Arc::new(composite), Some(tools_arc.clone()), state.clone())));
@@ -657,11 +659,9 @@ async fn main() -> Result<()> {
 
     // Project and global memory docs, injected into the system prompt.
     let home = std::env::var("HOME").or_else(|_| std::env::var("USERPROFILE")).map(std::path::PathBuf::from).unwrap_or_default();
-    let docs = flashagent_core::collect(&cwd, &home.join(".flashagent"));
-    // The budget is in the tokens of the model that will read it, so the
-    // memory is measured the same way.
-    let memory_block = flashagent_core::injection_block(&model, &docs, config.token_budget);
-    let memory_docs = docs.len();
+    // The indexes come from the two stores; the user's rules are read the
+    // same way. The budget is in the tokens of the model that will read it.
+    let (memory_block, memory_docs) = flashagent_core::memory_context(&model, &cwd, &home, config.token_budget);
 
     // The interface language before anything renders; the system prompt is
     // not part of it.
@@ -688,6 +688,7 @@ async fn main() -> Result<()> {
         first_run_verdict,
         pending_discovery,
         agent_events,
+        agent_control,
         agent_finished,
     }).await
 }
@@ -778,7 +779,7 @@ struct LoopCtx<'a> {
     gate: &'a Arc<TuiGate>,
     question_gate: &'a Arc<TuiQuestionGate>,
     tools_arc: &'a Arc<BuiltinTools>,
-    memory_block: &'a String,
+    agent_control: &'a flashagent_core::SubagentControl,
     cwd_display: &'a String,
     /// Where the file tools write.
     cwd: &'a std::path::Path,
@@ -844,6 +845,8 @@ pub(crate) enum HoverTarget {
     Chat(u16, u16),
     /// The context gauge at the end of the status line.
     Gauge,
+    /// The permission-mode label at the start of the status line.
+    Mode,
     /// The "more lines below" marker.
     Marker,
 }
@@ -957,9 +960,23 @@ struct App {
     last_tool_args: String,
     /// Kept so the prompt can be rebuilt when the voice changes.
     prompt_config: SystemPromptConfig,
+    /// The memory block the current system prompt carries. Rebuilt at the
+    /// start of every turn: a fact written in the last turn is in the next
+    /// prompt without a restart.
+    memory_block: String,
     /// A `/goal` run is under way: the rules that only hold inside one belong in
     /// the prompt, and they are not there the rest of the time.
     goal_active: bool,
+    /// The last turn stopped at an error. Ctrl+R resumes from that point
+    /// instead of cutting the history back to the first prompt.
+    retry_after_error: bool,
+    /// Automatic reconnects already spent on this failure.
+    auto_retry_attempt: usize,
+    /// Makes a scheduled retry from a superseded turn harmless.
+    retry_generation: u64,
+    /// `x/y` while an automatic reconnect is waiting or running, for the
+    /// status line.
+    reconnecting: Option<(usize, usize)>,
     /// What the system prompt measured this session. The tool schemas are given
     /// what the context window has left after this, so it is kept here rather
     /// than measured again at every model switch.
@@ -1070,6 +1087,8 @@ struct AppContext {
     /// What running subagents report, and everything the rest of the task says:
     /// a child that answered, a message between agents, a review of a report.
     agent_finished: tokio::sync::mpsc::UnboundedReceiver<flashagent_core::SubagentOutbound>,
+    /// The person's handle on a running child: message or stop it.
+    agent_control: flashagent_core::SubagentControl,
 }
 
 /// Set while an external editor has the terminal; the key reader waits.
@@ -1147,6 +1166,47 @@ fn open_in_external_editor(initial_text: &str, preferred_editor: &str) -> std::i
 
     let _ = std::fs::remove_file(&temp_file);
     Ok(result)
+}
+
+/// Opens a real file in the owner's editor, with the terminal handed over the
+/// same way a prompt is. Used by `/memory`: the memory files are plain text,
+/// and the person who owns them can change them without going through a model.
+fn edit_file_externally(path: &std::path::Path, preferred_editor: &str) -> std::io::Result<()> {
+    if !path.is_file() {
+        return Err(std::io::Error::new(std::io::ErrorKind::NotFound, path.display().to_string()));
+    }
+    let editor = editor_command(preferred_editor);
+    INPUT_PAUSED.store(true, Ordering::SeqCst);
+    std::thread::sleep(std::time::Duration::from_millis(60));
+    restore_enhanced_keys();
+    let _ = crossterm::terminal::disable_raw_mode();
+    let _ = crossterm::execute!(
+        std::io::stdout(),
+        crossterm::cursor::Show,
+        crossterm::event::DisableMouseCapture,
+        crossterm::terminal::LeaveAlternateScreen
+    );
+    let mut words = editor.split_whitespace();
+    let status = match words.next() {
+        Some(program) => std::process::Command::new(program).args(words).arg(path).status(),
+        None => Err(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            flashagent_tui::i18n::tr("no editor configured"),
+        )),
+    };
+    let _ = crossterm::terminal::enable_raw_mode();
+    let _ = crossterm::execute!(
+        std::io::stdout(),
+        crossterm::terminal::EnterAlternateScreen,
+        crossterm::event::EnableMouseCapture
+    );
+    enable_enhanced_keys();
+    INPUT_PAUSED.store(false, Ordering::SeqCst);
+    match status {
+        Ok(s) if s.success() => Ok(()),
+        Ok(s) => Err(std::io::Error::other(format!("the editor exited with {s}"))),
+        Err(e) => Err(e),
+    }
 }
 
 /// With a Russian layout Ctrl+D arrives as the key that holds `v` in Latin
@@ -1511,6 +1571,7 @@ fn initial_app(init: InitialApp) -> App {
     // Measured before the text moves into the history: what the schemas are
     // given is what the prompt actually costs, not what its ceiling allows.
     let prompt_tokens = flashagent_llm::count_tokens(&model, &system_prompt_text);
+    let memory_block = system_prompt_config.memory.clone().unwrap_or_default();
     App {
         question_ui_state: QuestionUiState::default(),
         history: vec![ChatMessage::system(system_prompt_text)],
@@ -1573,6 +1634,7 @@ fn initial_app(init: InitialApp) -> App {
         last_tool_args: String::new(),
         context_request_tokens: 0,
         prompt_config: system_prompt_config,
+        memory_block,
         goal_active: false,
         prompt_tokens,
         cwd_display: cwd_display.clone(),
@@ -1611,6 +1673,10 @@ fn initial_app(init: InitialApp) -> App {
         max_steps: app_config.max_steps,
         goal_state: None,
         goal_ledger: None,
+        retry_after_error: false,
+        auto_retry_attempt: 0,
+        retry_generation: 0,
+        reconnecting: None,
         copy_toast: None,
         last_ctrl_c: None,
         last_mascot_mood: MascotMood::Checking,
@@ -1629,6 +1695,7 @@ struct Wiring {
     gate: Arc<TuiGate>,
     question_gate: Arc<TuiQuestionGate>,
     tools_arc: Arc<BuiltinTools>,
+    agent_control: flashagent_core::SubagentControl,
     memory_block: String,
     cwd_display: String,
     cwd: std::path::PathBuf,
@@ -1656,7 +1723,7 @@ impl Wiring {
             gate: &self.gate,
             question_gate: &self.question_gate,
             tools_arc: &self.tools_arc,
-            memory_block: &self.memory_block,
+            agent_control: &self.agent_control,
             cwd_display: &self.cwd_display,
             cwd: &self.cwd,
             cancel: &self.cancel,
@@ -1682,8 +1749,29 @@ struct Inbox {
     channel_probes: tokio::sync::mpsc::UnboundedReceiver<ChannelTarget>,
 }
 
+/// The address or the server kind says this model runs on this machine or the
+/// local network.
+pub(crate) fn backend_is_local(source: &BackendSource) -> bool {
+    if source.0.discovery_kind().is_some_and(|kind| kind.runs_local_models()) {
+        return true;
+    }
+    flashagent_core::url_host(&source.0.base_url()).is_some_and(|host| flashagent_core::is_local_host(&host))
+}
+
+/// What the server said about this model's reasoning channel. An unreported
+/// profile is treated as thinking-capable: the model may still think, and the
+/// instructions do no harm; a server that said "unsupported" is believed.
+pub(crate) fn model_reasoning_supported(source: &BackendSource, model: &str) -> bool {
+    source
+        .0
+        .discovery()
+        .and_then(|disc| disc.model(model).map(|m| m.thinking.supported || m.thinking.is_unreported()))
+        .unwrap_or(true)
+}
+
 async fn run_app(ctx: AppContext) -> Result<SaveOutcome> {
     let (tx, events) = tokio::sync::mpsc::unbounded_channel::<UiEvent>();
+    ctx.question_gate.set_notice_sender(tx.clone());
     // Start-up already asked, and was told nothing.
     let startup_silent = ctx.pending_discovery.is_none() && ctx.available_models.is_empty();
     start_event_sources(&tx, &ctx.tools_arc, ctx.pending_discovery, ctx.source.0.base_url());
@@ -1729,6 +1817,7 @@ async fn run_app(ctx: AppContext) -> Result<SaveOutcome> {
         gate: ctx.gate,
         question_gate: ctx.question_gate,
         tools_arc: ctx.tools_arc,
+        agent_control: ctx.agent_control,
         memory_block: ctx.memory_block,
         cwd_display: ctx.cwd_display,
         cwd: ctx.cwd,
@@ -1747,7 +1836,13 @@ async fn run_app(ctx: AppContext) -> Result<SaveOutcome> {
     // for something that is not there, and a turn is spent on the refusal.
     let offered = w.perm.specs();
     let has_tool = |name: &str| offered.iter().any(|s| s.name == name);
+    let prompt_local = backend_is_local(&w.source);
+    let prompt_reasoning = model_reasoning_supported(&w.source, &ctx.model);
+    let prompt_detail = flashagent_core::PromptDetail::auto(prompt_local, ctx.context_capacity, &ctx.config.prompt_detail);
     let system_prompt_config = SystemPromptConfig::new()
+        .with_detail(prompt_detail)
+        .with_reasoning(prompt_reasoning)
+        .with_local(prompt_local)
         .with_cwd(&w.cwd_display)
         .with_platform(flashagent_tools::shell::platform())
         .with_model(&ctx.model)
@@ -1755,8 +1850,8 @@ async fn run_app(ctx: AppContext) -> Result<SaveOutcome> {
         // `spawn_agent` and `ask_user` are on offer, so the rules about a
         // subagent's report and about asking belong in the prompt. Both can be
         // switched off, and then the rules go with them.
-        .with_subagents(has_tool("spawn_agent"))
-        .with_ask_user(has_tool("ask_user"))
+        .with_subagents(has_tool("agent"))
+        .with_ask_user(has_tool("user_interaction"))
         // Memory is an instruction, not a user turn: it stays in the system
         // prompt and is rebuilt with it when the voice or model changes.
         .with_memory(&w.memory_block)
@@ -1789,11 +1884,10 @@ async fn run_app(ctx: AppContext) -> Result<SaveOutcome> {
         effort_memory,
     });
     app.server_silent = startup_silent;
-    update_context_usage(&app.current_model, &mut app.context_usage, &app.history, &w.memory_block, &app.chat, w.perm);
+    update_context_usage(&app.current_model, &mut app.context_usage, &app.history, &app.memory_block, &app.chat, w.perm);
     // Before the warm-up: it exists to prefill exactly the prefix the first turn
     // will send, and a system message that gains a line after it went out is no
     // longer that prefix.
-    app.refresh_context_line();
 
     // Before anything is drawn. A resumed session's card is drawn whole: the
     // reveal stops once the transcript has a user message.
@@ -1809,7 +1903,8 @@ async fn run_app(ctx: AppContext) -> Result<SaveOutcome> {
     // The unreadable file keeps its name: saving over it would destroy what may
     // still be recoverable by hand.
     if let Some(id) = resume_session_id.as_deref() {
-        if app.resume_at_start(id, &w.memory_block, w.perm) {
+        let memory_block = app.memory_block.clone();
+        if app.resume_at_start(id, &memory_block, w.perm) {
             app.tell_of_lost_tasks(&w.tools_arc.shells().tasks());
         } else {
             session_id = new_session_id();
@@ -1847,7 +1942,8 @@ async fn event_loop(app: &mut App, w: &Wiring, mut inbox: Inbox, session_id: &mu
         // Switched here, where the session id and the snapshot store live.
         if let Some(id) = app.pending_resume.take().filter(|id| id != session_id) {
             let running = w.tools_arc.shells().running_ids();
-            if app.switch_session(session_id, &id, &w.memory_block, w.perm, &running) {
+            let memory_block = app.memory_block.clone();
+            if app.switch_session(session_id, &id, &memory_block, w.perm, &running) {
                 app.tell_of_lost_tasks(&w.tools_arc.shells().tasks());
                 *session_id = id;
                 w.source.set_session_id(session_id);
@@ -3401,20 +3497,20 @@ mod tests {
 
     #[test]
     fn the_status_line_names_the_mode_and_what_the_turn_waits_on() {
-        let running = format_status_left(true, false, false, None, "Normal", false, "");
+        let running = format_status_left(true, false, false, None, "Normal", false, None, "");
         assert!(running.contains("[Normal]"), "{running}");
         // The phase is in the composer; saying it again here was noise.
         assert!(!running.contains("Generating"), "{running}");
         assert!(!running.contains("Ready"), "{running}");
 
-        let idle = format_status_left(false, false, false, None, "Normal", false, "");
+        let idle = format_status_left(false, false, false, None, "Normal", false, None, "");
         assert!(idle.contains("[Normal]") && idle.contains("Ready"), "{idle}");
 
-        let goal = format_status_left(true, true, false, Some("step 12/250 · 4.2k tok · 3m05s/1h0m"), "Autonomous", false, "");
+        let goal = format_status_left(true, true, false, Some("step 12/250 · 4.2k tok · 3m05s/1h0m"), "Autonomous", false, None, "");
         assert!(goal.contains("[Goal: Autonomous]"), "{goal}");
         assert!(goal.contains("step 12/250") && goal.contains("3m05s/1h0m"), "{goal}");
 
-        let waiting = format_status_left(true, false, true, None, "Manual", false, "");
+        let waiting = format_status_left(true, false, true, None, "Manual", false, None, "");
         assert!(waiting.contains("Waiting for your answer"), "{waiting}");
     }
 

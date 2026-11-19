@@ -64,6 +64,7 @@ impl App {
                 Overlay::Settings(view) => self.settings_key(cx, view, code, mods).await,
                 Overlay::Sampling(view) => self.sampling_key(cx, view, code, mods),
                 Overlay::Memory(modal) => self.memory_key(cx, modal, code, mods),
+                Overlay::Agents(view) => self.agents_key(cx, view, code, mods),
                 Overlay::Context(modal) => {
                     if !matches!(code, KeyCode::F(1) | KeyCode::Enter | KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('Q')) {
                         self.overlay = Some(Overlay::Context(modal));
@@ -544,6 +545,169 @@ impl App {
         }
     }
 
+    /// The `/agents` panel: a list of children and the selected one's own
+    /// transcript. Letters in the message field belong to the field.
+    fn agents_key(
+        &mut self,
+        cx: &LoopCtx<'_>,
+        mut view: flashagent_tui::agents_view::AgentsView,
+        code: KeyCode,
+        mods: KeyModifiers,
+    ) {
+        use flashagent_tui::agents_view::AgentsClick;
+        let width = self.last_term_size.0 as usize;
+        if let Some(message) = view.message.as_mut() {
+            match code {
+                KeyCode::Esc => view.message = None,
+                KeyCode::Backspace => {
+                    message.pop();
+                }
+                KeyCode::Enter => {
+                    let text = std::mem::take(message).trim().to_string();
+                    view.message = None;
+                    if let Some(row) = view.current() {
+                        if !text.is_empty() {
+                            match cx.agent_control.message(&row.id, &text) {
+                                Ok(_) => self.notice(tr_fill("Sent to {id}", &[("id", &row.id)])),
+                                Err(why) => self.notice(why),
+                            }
+                        }
+                    }
+                }
+                KeyCode::Char(c) if !mods.contains(KeyModifiers::CONTROL) => message.push(c),
+                _ => {}
+            }
+            view.refresh(&self.agents, width);
+            self.overlay = Some(Overlay::Agents(view));
+            self.renderer.request_reprint();
+            return;
+        }
+
+        match code {
+            KeyCode::Esc | KeyCode::Char('q') => {}
+            KeyCode::Up | KeyCode::Char('k') => {
+                view.move_by(-1, &self.agents, width);
+                self.overlay = Some(Overlay::Agents(view));
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                view.move_by(1, &self.agents, width);
+                self.overlay = Some(Overlay::Agents(view));
+            }
+            KeyCode::PageUp => {
+                view.scroll_by(10);
+                self.overlay = Some(Overlay::Agents(view));
+            }
+            KeyCode::PageDown => {
+                view.scroll_by(-10);
+                self.overlay = Some(Overlay::Agents(view));
+            }
+            KeyCode::Home => {
+                view.scroll = view.transcript_len();
+                self.overlay = Some(Overlay::Agents(view));
+            }
+            KeyCode::End => {
+                view.scroll = 0;
+                self.overlay = Some(Overlay::Agents(view));
+            }
+            KeyCode::Char('m') => self.agents_perform(cx, view, AgentsClick::Message, width),
+            KeyCode::Char('x') => self.agents_perform(cx, view, AgentsClick::Stop, width),
+            KeyCode::Char('c') => self.agents_perform(cx, view, AgentsClick::Copy, width),
+            KeyCode::Char('o') | KeyCode::Enter => self.agents_perform(cx, view, AgentsClick::Report, width),
+            _ => self.overlay = Some(Overlay::Agents(view)),
+        }
+        self.renderer.request_reprint();
+    }
+
+    /// A press on the panel: the click already picked what it reached.
+    pub(crate) fn agents_click(
+        &mut self,
+        cx: &LoopCtx<'_>,
+        mut view: flashagent_tui::agents_view::AgentsView,
+        line: usize,
+        column: usize,
+    ) {
+        let width = self.last_term_size.0 as usize;
+        match view.click(line, column, &self.agents, width) {
+            flashagent_tui::agents_view::AgentsClick::None => self.overlay = Some(Overlay::Agents(view)),
+            // The row the press landed on is selected in the view; nothing to
+            // act on beyond showing it.
+            flashagent_tui::agents_view::AgentsClick::Select(_) => self.overlay = Some(Overlay::Agents(view)),
+            act => self.agents_perform(cx, view, act, width),
+        }
+        self.renderer.request_reprint();
+    }
+
+    /// What message/stop/copy/report do to the selected child: one body for
+    /// the keys and their click targets, so the two cannot answer differently.
+    /// `Report` on a child with an answer closes the panel — the report goes
+    /// into the conversation; everything else puts the panel back.
+    fn agents_perform(
+        &mut self,
+        cx: &LoopCtx<'_>,
+        mut view: flashagent_tui::agents_view::AgentsView,
+        act: flashagent_tui::agents_view::AgentsClick,
+        width: usize,
+    ) {
+        use flashagent_tui::agents_view::AgentsClick;
+        match act {
+            AgentsClick::Message => {
+                if view.current().is_some_and(|row| row.done.is_none()) {
+                    view.message = Some(String::new());
+                } else {
+                    self.notice(tr("That subagent has finished; there is nobody to message"));
+                }
+                self.overlay = Some(Overlay::Agents(view));
+            }
+            AgentsClick::Stop => {
+                if let Some(row) = view.current() {
+                    if row.done.is_none() {
+                        if cx.agent_control.stop(&row.id) {
+                            self.notice(tr_fill("Stopped {id}", &[("id", &row.id)]));
+                        } else {
+                            self.notice(tr_fill("{id} had already finished", &[("id", &row.id)]));
+                        }
+                    } else {
+                        self.notice(tr("That subagent has already finished"));
+                    }
+                }
+                view.refresh(&self.agents, width);
+                self.overlay = Some(Overlay::Agents(view));
+            }
+            AgentsClick::Copy => {
+                if let Some(row) = view.current() {
+                    match row.answer.as_deref().filter(|a| !a.trim().is_empty()) {
+                        Some(answer) => {
+                            let copied = flashagent_tui::clipboard::set_clipboard_text(answer);
+                            self.notice(tr(if copied { "Copied the report" } else { "Clipboard copy failed" }));
+                        }
+                        None => self.notice(tr("That subagent has no report yet")),
+                    }
+                }
+                self.overlay = Some(Overlay::Agents(view));
+            }
+            AgentsClick::Report => {
+                if let Some(row) = view.current().cloned() {
+                    if let Some(answer) = row.answer.clone().filter(|a| !a.trim().is_empty()) {
+                        let finished = flashagent_core::SubagentFinished {
+                            id: row.id.clone(),
+                            role: row.role.clone(),
+                            answer,
+                            done: row.done.unwrap_or(flashagent_core::DoneReason::Completed),
+                            usage: row.usage,
+                        };
+                        self.chat.push_subagent_answer(&finished, &row.role, row.seconds);
+                        self.renderer.request_reprint();
+                    } else {
+                        self.notice(tr("That subagent has no report yet"));
+                        self.overlay = Some(Overlay::Agents(view));
+                    }
+                }
+            }
+            AgentsClick::None | AgentsClick::Select(_) => self.overlay = Some(Overlay::Agents(view)),
+        }
+        self.renderer.request_reprint();
+    }
+
     /// Owns every key: 'd' and 'e' are list commands and letters in a note.
     fn memory_key(
         &mut self,
@@ -552,14 +716,38 @@ impl App {
         code: KeyCode,
         mods: KeyModifiers,
     ) {
+        let action = modal.handle_key(code, mods);
+        self.memory_apply(cx, modal, action);
+    }
+
+    /// A press on the memory screen: the row a click reached selects, and a
+    /// hint word acts as its key. Forgettable stays with the keyboard.
+    pub(crate) fn memory_click(
+        &mut self,
+        cx: &LoopCtx<'_>,
+        mut modal: flashagent_tui::memory_view::MemoryModal,
+        line: usize,
+        column: usize,
+    ) {
+        let action = modal.click(line, column);
+        self.memory_apply(cx, modal, action);
+    }
+
+    /// What a memory action starts: the keys' and the clicks' one path.
+    fn memory_apply(
+        &mut self,
+        cx: &LoopCtx<'_>,
+        modal: flashagent_tui::memory_view::MemoryModal,
+        action: flashagent_tui::memory_view::MemoryAction,
+    ) {
         use flashagent_tui::memory_view::MemoryAction;
-        match modal.handle_key(code, mods) {
+        match action {
             MemoryAction::None => self.overlay = Some(Overlay::Memory(modal)),
             MemoryAction::Close => {}
             MemoryAction::Forget { name, scope } => {
                 let cwd = std::env::current_dir().unwrap_or_default();
                 let removed = flashagent_core::MemoryStore::for_scope(scope, &cwd)
-                    .map(|store| store.remove(&name).unwrap_or(false))
+                    .map(|store| store.delete(&name).unwrap_or(false))
                     .unwrap_or(false);
                 self.notice(if removed {
                     tr_fill("Forgot \"{name}\"", &[("name", &name)])
@@ -571,6 +759,14 @@ impl App {
             MemoryAction::Summarize { .. } => {
                 spawn_summary(cx.source.clone(), modal.rows.clone(), cx.tx.clone());
                 self.overlay = Some(Overlay::Memory(modal));
+            }
+            MemoryAction::Edit { path } => {
+                match crate::edit_file_externally(&path, &self.config.external_editor) {
+                    Ok(()) => self.notice(tr_fill("Edited {path}", &[("path", &path.display().to_string())])),
+                    Err(err) => self.notice(tr_fill("Failed to launch external editor: {err}", &[("err", &err.to_string())])),
+                }
+                self.renderer.request_reprint();
+                self.overlay = Some(Overlay::Memory(open_memory_modal()));
             }
             MemoryAction::Tell { message } => {
                 // An ordinary turn: the model decides what to change and says so.
@@ -839,7 +1035,7 @@ impl App {
             cx.tools_arc.set_model_name(&self.current_model);
             cx.tools_arc.set_prompt_tokens(self.prompt_tokens);
         }
-        update_context_usage(&self.current_model, &mut self.context_usage, &self.history, cx.memory_block, &self.chat, cx.perm);
+        update_context_usage(&self.current_model, &mut self.context_usage, &self.history, &self.memory_block, &self.chat, cx.perm);
         self.warm_prompt_cache(cx.source, cx.perm);
         // The rule waits for the message that first uses the new model: a menu
         // pick alone must not write above a chat with nothing in it yet.

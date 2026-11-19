@@ -10,10 +10,13 @@ const HELP_COMMANDS: &[(&str, &str)] = &[
     ("/provider [name]", "switch to another saved provider, local or cloud; add or edit them"),
     ("/effort, /t, F4", "thinking effort (also Ctrl+T)"),
     ("/mode [plan|man|edits|all|yolo]", "permission mode (also Shift+Tab; YOLO needs Settings)"),
+    ("/prompt [auto|compact|standard|full]", "how much system prompt a model gets; auto follows its window and backend"),
     ("/context, F1", "what fills the context window"),
     ("/usage", "session, saved-session and lifetime tokens and cost, plus provider limits"),
     ("/compact [focus]", "summarize older turns to free context"),
+    ("/agents", "subagents: live transcript, message or stop one"),
     ("/memory [summary]", "what FlashAgent remembers; the summary groups it by topic"),
+    ("/migrate-memory [run|verify|cleanup]", "convert the old memory layout to MEMORY.md + topic files, with a backup"),
     ("/verbose [all|last|off]", "show thoughts and tool calls (also F2, Alt+O, Ctrl+O)"),
     ("/regenerate, Ctrl+R", "answer the last prompt again from scratch"),
     ("/rewind [n]", "files and conversation go back to before turn n"),
@@ -135,14 +138,14 @@ enum WhileRunning {
 
 fn while_running(name: &str) -> WhileRunning {
     match name {
-        "help" | "?" | "whatsnew" | "changelog" | "memory" | "memories" | "context" | "verbose" | "expand" | "think"
+        "help" | "?" | "whatsnew" | "changelog" | "agents" | "memory" | "memories" | "context" | "verbose" | "expand" | "think"
         | "o" | "diff" | "commit" | "settings" | "config" | "sampling" | "params" | "effort" | "thinking" | "t"
-        | "model" | "models" | "m" | "mode" | "skills" | "tools" | "notices" | "log" | "safe" | "rules" | "usage" | "theme" => {
+        | "model" | "models" | "m" | "mode" | "prompt" | "skills" | "tools" | "notices" | "log" | "safe" | "rules" | "usage" | "theme" => {
             WhileRunning::Now
         }
         "compact" | "clear" | "export" | "rewind" => WhileRunning::AfterTurn,
         "goal" | "resume" | "regenerate" | "retry" | "update" | "channel" | "mcp" | "editor" | "exit" | "quit" | "q"
-        | "uninstall" => WhileRunning::Refuse,
+        | "uninstall" | "migrate-memory" => WhileRunning::Refuse,
         _ if name.starts_with("skill:") => WhileRunning::Refuse,
         _ if name.is_empty() || name.contains(['/', '\\', '.']) => WhileRunning::Text,
         _ if find_skill_file(name).is_some() => WhileRunning::Refuse,
@@ -223,6 +226,12 @@ impl App {
         let line = self.input.trim().to_string();
         if line.starts_with('/') {
             let (name, arg) = split_command(&line);
+            // A command is a thing the owner typed and may want again. It goes
+            // into the same history as a prompt, before it runs; a path such as
+            // `/tmp/shot.png` is not a command and stays out.
+            if !matches!(while_running(name), WhileRunning::Unknown | WhileRunning::Text) {
+                self.remember_prompt(&line);
+            }
             // The history is with the compaction task: a command that starts a
             // turn would begin from nothing, so it waits with a message.
             if self.compacting && starts_a_turn(name, arg) {
@@ -376,6 +385,8 @@ impl App {
             }
             "usage" => self.open_usage(cx),
             "whatsnew" | "changelog" => self.show_whatsnew(cx).await,
+            "agents" => self.open_agents_view(None),
+            "migrate-memory" => self.migrate_memory(cx, arg),
             "memory" | "memories" => {
                 let mut modal = open_memory_modal();
                 if matches!(arg, "summary" | "s") && !modal.rows.is_empty() {
@@ -388,7 +399,7 @@ impl App {
                 self.open_overlay(Overlay::Memory(modal));
             }
             "context" => {
-                update_context_usage(&self.current_model, &mut self.context_usage, &self.history, cx.memory_block, &self.chat, cx.perm);
+                update_context_usage(&self.current_model, &mut self.context_usage, &self.history, &self.memory_block, &self.chat, cx.perm);
                 self.open_overlay(Overlay::Context(ContextModal::new(self.context_usage.clone())));
             }
             "clear" => self.clear_chat(),
@@ -408,6 +419,7 @@ impl App {
             "provider" | "providers" => self.provider_command(cx, arg),
             "sampling" | "params" => self.open_overlay(Overlay::Sampling(SamplingView::new(&self.config))),
             "mode" => self.mode_command(cx, arg),
+            "prompt" => self.prompt_command(cx, arg),
             "uninstall" => {
                 self.uninstall_confirm = true;
                 self.suggested_prompt = None;
@@ -498,6 +510,12 @@ impl App {
     }
 
     fn send_prompt(&mut self, cx: &LoopCtx<'_>) {
+        // A new message is a new intent: a reconnect timer from the failed
+        // turn must not fire into it.
+        self.retry_after_error = false;
+        self.auto_retry_attempt = 0;
+        self.retry_generation = self.retry_generation.wrapping_add(1);
+        self.reconnecting = None;
         let text = self.input.take();
         self.remember_prompt(&text);
         self.history_index = None;
@@ -594,9 +612,8 @@ impl App {
             }
         };
         let goal_budgets = GoalBudgets::from_config(&self.config);
-        // A goal is a conversation of its own; the state card from before it is
-        // no longer what runs.
-        self.chat.dismiss_welcome();
+        // The state card stays above the goal: it says what runs now, and a
+        // goal changes its lines rather than taking it away.
 
         // Restored when the goal ends.
         self.goal_state = Some(SavedGoalState {
@@ -716,6 +733,7 @@ impl App {
             self.notice(said);
             return;
         };
+        self.clear_retry_state();
         self.flush_switch_notice();
         self.chat.push_user(&format!("/skill:{name}"));
         self.history.push(ChatMessage::user(format!("Execute skill: {name}\n\nSkill Instructions:\n{skill_content}")));
@@ -1353,7 +1371,7 @@ impl App {
         self.chat.truncate_before_nth_last_user(taken_back);
         self.renderer.scroll_to_bottom();
         self.context_usage.invalidate_server();
-        update_context_usage(&self.current_model, &mut self.context_usage, &self.history, cx.memory_block, &self.chat, cx.perm);
+        update_context_usage(&self.current_model, &mut self.context_usage, &self.history, &self.memory_block, &self.chat, cx.perm);
         self.suggested_prompt = None;
         self.latest_suggestion = None;
         self.custom_placeholder = None;
@@ -1362,6 +1380,155 @@ impl App {
         self.input.set(extract_user_prompt(&prompt).to_string());
         self.autosave(cx.session_id, cx.cwd_display);
         self.renderer.request_reprint();
+    }
+}
+
+impl App {
+    /// `/prompt`: the compact/standard/full choice. Auto is the default and
+    /// follows what the running model can take; an explicit choice is kept in
+    /// the config for this and later sessions.
+    pub(crate) fn prompt_command(&mut self, cx: &LoopCtx<'_>, arg: &str) {
+        let arg = arg.trim();
+        if arg.is_empty() {
+            let effective = flashagent_core::PromptDetail::auto(
+                crate::backend_is_local(cx.source),
+                self.context_usage.total_capacity,
+                &self.config.prompt_detail,
+            );
+            self.notice(tr_fill(
+                "Prompt: {configured} (this model gets {effective})",
+                &[("configured", &self.config.prompt_detail), ("effective", effective.label())],
+            ));
+            return;
+        }
+        let chosen = arg.to_ascii_lowercase();
+        if chosen != "auto" && flashagent_core::PromptDetail::parse(&chosen).is_none() {
+            self.notice(tr_fill(
+                "Unknown prompt detail: {name}; use auto, compact, standard or full",
+                &[("name", arg)],
+            ));
+            return;
+        }
+        self.config.prompt_detail = chosen.clone();
+        self.save_config();
+        self.refresh_prompt_tier(cx);
+        self.notice(tr_fill("Prompt detail: {name}", &[("name", &chosen)]));
+        self.renderer.request_reprint();
+    }
+
+    /// `/migrate-memory`: the old store is listed, then a confirmed run backs
+    /// it up and hands the conversion to the agent. Nothing is deleted until
+    /// `cleanup confirm`, and the backup stays.
+    pub(crate) fn migrate_memory(&mut self, cx: &mut LoopCtx<'_>, arg: &str) {
+        use flashagent_core::memory_store::{self, Scope, Store};
+        let cwd = std::env::current_dir().unwrap_or_default();
+        let Some(home) = memory_store::home_dir() else {
+            self.notice(tr("No home directory to read memory from"));
+            return;
+        };
+        let inventory = memory_store::legacy_inventory(&cwd, &home);
+        let argument = arg.trim().to_ascii_lowercase();
+        match argument.as_str() {
+            "" | "plan" => {
+                if inventory.is_empty() {
+                    self.notice(tr("There is no old memory to migrate"));
+                    return;
+                }
+                let project = Store::for_scope_at(&home, Scope::Project, &cwd);
+                let global = Store::for_scope_at(&home, Scope::Global, &cwd);
+                let mut text = tr_fill(
+                    "Old memory: {count} entries ({project} in the project, {global} global).",
+                    &[
+                        ("count", &inventory.count().to_string()),
+                        ("project", &inventory.by_scope(Scope::Project).len().to_string()),
+                        ("global", &inventory.by_scope(Scope::Global).len().to_string()),
+                    ],
+                );
+                text.push_str(&format!(
+                    "\n\nNew project memory: {}\nNew global memory: {}\n\n/migrate-memory run backs the old files up and lets the agent convert them; /migrate-memory verify counts what arrived; /migrate-memory cleanup confirm removes the old files after you have checked. Nothing is deleted before that.",
+                    project.dir().display(),
+                    global.dir().display()
+                ));
+                self.chat.push_system(&text);
+            }
+            "run" => {
+                if inventory.is_empty() {
+                    self.notice(tr("There is no old memory to migrate"));
+                    return;
+                }
+                let stamp = format!("{}-{}", memory_store::today(), std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0));
+                let backup = match memory_store::backup_legacy(&cwd, &home, &stamp) {
+                    Ok(path) => path,
+                    Err(why) => {
+                        self.notice(tr_fill("Could not back up the old memory: {why}", &[("why", &why.to_string())]));
+                        return;
+                    }
+                };
+                let prompt = flashagent_tools::memory_tools::migration_prompt(&inventory, &backup);
+                self.notice(tr_fill("Old memory backed up to {path}", &[("path", &backup.display().to_string())]));
+                // The owner asked for this migration, so the memory calls it
+                // needs do not ask one by one. The rule is for this process
+                // only; it is not written to the config.
+                cx.perm.state().allow_tool_always("memory");
+                // An ordinary turn: the agent reads each old entry with the
+                // memory tool and imports it. The backup is already safe.
+                self.input.set(prompt);
+                let _ = cx.tx.send(UiEvent::Key(KeyCode::Enter, KeyModifiers::NONE));
+            }
+            "verify" => {
+                let project = Store::for_scope_at(&home, Scope::Project, &cwd);
+                let global = Store::for_scope_at(&home, Scope::Global, &cwd);
+                let new_project = project.list().len();
+                let new_global = global.list().len();
+                self.chat.push_system(&tr_fill(
+                    "New memory: {project} project and {global} global topic(s). Old entries still on disk: {old}. A run that left some behind is visible by comparing the two.",
+                    &[
+                        ("project", &new_project.to_string()),
+                        ("global", &new_global.to_string()),
+                        ("old", &inventory.count().to_string()),
+                    ],
+                ));
+            }
+            "cleanup" | "cleanup confirm" => {
+                if argument == "cleanup" {
+                    self.chat.push_system(tr(
+                        "This removes the old project memory files and the generated index blocks after the backup. Type /migrate-memory cleanup confirm if you have checked /migrate-memory verify.",
+                    ));
+                    return;
+                }
+                let backups = home.join(".flashagent").join("memory-backup");
+                if !backups.is_dir() {
+                    self.notice(tr("Refusing to clean up without a backup: run /migrate-memory run first"));
+                    return;
+                }
+                let mut done = Vec::new();
+                match memory_store::strip_legacy_index(&cwd.join(memory_store::INDEX)) {
+                    Ok(_) => done.push(cwd.join(memory_store::INDEX).display().to_string()),
+                    Err(why) => self.notice(tr_fill("Could not clean {path}: {why}", &[("path", &cwd.join(memory_store::INDEX).display().to_string()), ("why", &why.to_string())])),
+                }
+                if memory_store::remove_legacy_project_dir(&cwd).unwrap_or(false) {
+                    done.push(cwd.join("memory").display().to_string());
+                }
+                // The old global index is outside the new store; the new
+                // global topics are the migrated files and stay.
+                let global_old_index = home.join(".flashagent").join(memory_store::INDEX);
+                if let Err(why) = memory_store::strip_legacy_index(&global_old_index) {
+                    self.notice(tr_fill("Could not clean {path}: {why}", &[("path", &global_old_index.display().to_string()), ("why", &why.to_string())]));
+                }
+                if done.is_empty() {
+                    self.notice(tr("There is no old memory to clean up"));
+                } else {
+                    self.notice(tr_fill("Cleaned {paths}. The backup under {backup} is kept.", &[
+                        ("paths", &done.join(", ")),
+                        ("backup", &backups.display().to_string()),
+                    ]));
+                }
+            }
+            _ => self.notice(tr("Usage: /migrate-memory [run|verify|cleanup [confirm]]")),
+        }
     }
 }
 
@@ -1383,14 +1550,14 @@ mod tests {
 
     #[test]
     fn a_command_typed_during_a_turn_runs_waits_or_is_refused_by_what_it_touches() {
-        for name in ["help", "verbose", "diff", "mode", "effort", "model", "memory", "context", "usage", "theme"] {
+        for name in ["help", "verbose", "diff", "mode", "prompt", "effort", "model", "agents", "memory", "context", "usage", "theme"] {
             assert_eq!(while_running(name), WhileRunning::Now, "{name}");
         }
         // The conversation belongs to the turn until it ends.
         for name in ["compact", "clear", "export", "rewind"] {
             assert_eq!(while_running(name), WhileRunning::AfterTurn, "{name}");
         }
-        for name in ["goal", "resume", "regenerate", "exit", "uninstall", "skill:review", "update"] {
+        for name in ["goal", "resume", "regenerate", "exit", "uninstall", "skill:review", "update", "migrate-memory"] {
             assert_eq!(while_running(name), WhileRunning::Refuse, "{name}");
         }
         // A path is for the model; a misspelt command is not.

@@ -187,6 +187,19 @@ impl GoalLedger {
                 };
                 let call = self.open_calls.remove(pos);
                 match (call.name.as_str(), *is_error) {
+                    ("edit", false) => {
+                        let mode = flashagent_llm::repair::effective_args(&call.args_json, "edit")
+                            .and_then(|a| a.get("mode").and_then(|m| m.as_str()).map(str::to_string))
+                            .unwrap_or_else(|| "replace".to_string());
+                        if mode == "write" {
+                            push_unique(&mut self.written, call.subject);
+                        } else {
+                            let changed = if call.files.is_empty() { vec![call.subject] } else { call.files };
+                            for file in changed {
+                                push_unique(&mut self.edited, file);
+                            }
+                        }
+                    }
                     ("write_file", false) => push_unique(&mut self.written, call.subject),
                     ("edit_file" | "patch_file", false) => {
                         // A batch edit changed every file it names.
@@ -415,7 +428,7 @@ fn first_line(text: &str) -> String {
 
 /// Its `path`, then each of its `files`.
 fn files_of(name: &str, args_json: &str) -> Vec<String> {
-    if !matches!(name, "edit_file" | "read_file") {
+    if !matches!(name, "edit" | "edit_file" | "read_file" | "read") {
         return Vec::new();
     }
     let Some(args) = flashagent_llm::repair::effective_args(args_json, name) else {

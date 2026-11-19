@@ -10,6 +10,7 @@ use parking_lot::Mutex;
 use unicode_width::UnicodeWidthChar;
 
 pub mod agents;
+pub mod agents_view;
 pub mod anim;
 pub mod autocomplete;
 pub mod backend_error;
@@ -131,6 +132,11 @@ pub enum UiEvent {
     TaskEnded(flashagent_tools::TaskNotice),
     /// One provider answered the limits check `/usage` asked for.
     UsageLimits { provider: String, outcome: flashagent_llm::limits::LimitsOutcome },
+    /// A notice the model posted through `user_interaction` mode notify.
+    UserNotice { level: String, text: String },
+    /// The wait before an automatic reconnect is over. The generation makes a
+    /// timer from a superseded turn harmless.
+    Retry { generation: u64 },
     /// Something a running subagent did, tagged with which child did it.
     SubagentEvent(flashagent_core::SubagentEvent),
     /// What a child has finished, said, or what the parent made of a report.
@@ -378,9 +384,6 @@ pub struct ChatView {
     open_tool: Option<usize>,
     /// Lines in the welcome card.
     card_len: usize,
-    /// The card was taken away by the first prompt or by a goal: no refresh
-    /// of the server state may bring it back into the middle of a conversation.
-    welcome_dismissed: bool,
     /// The card's own buttons: (card row, from column, to column, what a click
     /// there does). Columns count visible cells of the row as painted.
     welcome_zones: Vec<(usize, usize, usize, crate::welcome::WelcomeButton)>,
@@ -637,7 +640,6 @@ impl ChatView {
         self.reasoning_start = None;
         self.open_tool = None;
         self.card_len = 0;
-        self.welcome_dismissed = false;
         self.welcome_zones.clear();
         self.needs_reprint = false;
         self.context_baseline_line = 0;
@@ -786,32 +788,8 @@ impl ChatView {
         }
     }
 
-    /// Takes the welcome card away. The first prompt does this itself; a
-    /// `/goal` run starts a conversation without a user message, so it asks.
-    pub fn dismiss_welcome(&mut self) {
-        self.welcome_dismissed = true;
-        if self.card_len == 0 {
-            return;
-        }
-        let gone = self.card_len.min(self.lines.len());
-        self.lines.drain(..gone);
-        for idx in [&mut self.streaming, &mut self.streaming_reasoning, &mut self.open_tool].into_iter().flatten() {
-            *idx = idx.saturating_sub(gone);
-            if *idx >= self.lines.len() {
-                *idx = 0;
-            }
-        }
-        self.card_len = 0;
-        self.welcome_zones.clear();
-        *self.settled_cache.lock() = SettledRenderCache::default();
-        self.needs_reprint = true;
-    }
-
     /// Keeps any notices after it.
     pub fn update_welcome_card(&mut self, new_card: crate::welcome::WelcomeRender) {
-        if self.welcome_dismissed || self.has_user_message() {
-            return;
-        }
         self.replace_welcome_card(new_card);
     }
 
@@ -819,31 +797,43 @@ impl ChatView {
     /// model, the provider or the level changed, and the card says what runs
     /// now instead of what ran when the session started.
     pub fn update_welcome_card_state(&mut self, new_card: crate::welcome::WelcomeRender) {
-        if self.welcome_dismissed || self.has_user_message() {
-            return;
-        }
         self.replace_welcome_card(new_card);
     }
 
-    /// The card's lines become the new ones; everything after it stays.
+    /// The card's lines become the new ones; everything after it stays. When
+    /// there is no card yet (a restored session), the card is put at the top
+    /// and every line already on screen comes after it.
     fn replace_welcome_card(&mut self, new_card: crate::welcome::WelcomeRender) {
         *self.settled_cache.lock() = SettledRenderCache::default();
-        let end_idx = if self.card_len > 0 {
-            self.card_len.min(self.lines.len())
+        let old_card = self.card_len;
+        let new_card_len = new_card.lines.len();
+        let remaining: Vec<ChatLine> = if old_card > 0 {
+            self.lines.drain(old_card.min(self.lines.len())..).collect()
         } else {
-            self.lines
-                .iter()
-                .position(|l| l.text.trim_start().starts_with('['))
-                .unwrap_or(self.lines.len())
+            std::mem::take(&mut self.lines)
         };
-        let remaining_notices: Vec<ChatLine> = self.lines.drain(end_idx..).collect();
         self.lines.clear();
-        self.card_len = new_card.lines.len();
+        self.card_len = new_card_len;
         self.welcome_zones = new_card.zones;
         for (kind, text) in new_card.lines {
             self.lines.push(ChatLine::new(kind, text));
         }
-        self.lines.extend(remaining_notices);
+        self.lines.extend(remaining);
+        // A live answer, thought or open tool card sits after the card; its
+        // index moves by however much the card grew or shrank.
+        let moved = |idx: usize| -> usize {
+            if idx >= old_card {
+                idx.saturating_sub(old_card) + new_card_len
+            } else {
+                idx
+            }
+        };
+        for idx in [&mut self.streaming, &mut self.streaming_reasoning, &mut self.open_tool].into_iter().flatten() {
+            *idx = moved(*idx);
+        }
+        if self.context_baseline_line >= old_card {
+            self.context_baseline_line = self.context_baseline_line.saturating_sub(old_card) + new_card_len;
+        }
     }
 
     /// The cells a welcome-card button occupies under the pointer, for the
@@ -1088,6 +1078,27 @@ impl ChatView {
         open
     }
 
+    /// How many lines the child's transcript holds. Used by the subagent panel
+    /// to bound it and to know when an event changed it.
+    pub(crate) fn line_count(&self) -> usize {
+        self.lines.len()
+    }
+
+    /// Keep only the newest `keep` lines. A subagent may run 500 steps; the
+    /// panel needs its recent history, not an unbounded transcript.
+    pub(crate) fn trim_to_last(&mut self, keep: usize) {
+        if self.lines.len() <= keep {
+            return;
+        }
+        let drop = self.lines.len() - keep;
+        self.lines.drain(..drop);
+        for idx in [&mut self.streaming, &mut self.streaming_reasoning, &mut self.open_tool].into_iter().flatten() {
+            *idx = idx.saturating_sub(drop);
+        }
+        *self.settled_cache.lock() = SettledRenderCache::default();
+        self.needs_reprint = true;
+    }
+
     pub fn push_line(&mut self, kind: LineKind, text: impl Into<String>) {
         self.streaming = None;
         self.streaming_reasoning = None;
@@ -1099,18 +1110,9 @@ impl ChatView {
         self.streaming = None;
         self.streaming_reasoning = None;
         self.open_tool = None;
-        // The welcome card has done its job when the first prompt arrives: it
-        // describes the state before the conversation, and left above the
-        // answer it was a half-clipped card pushing the actual work down.
-        self.welcome_dismissed = true;
-        if !self.has_user_message() && self.card_len > 0 {
-            let gone = self.card_len.min(self.lines.len());
-            self.lines.drain(..gone);
-            self.card_len = 0;
-            self.welcome_zones.clear();
-            *self.settled_cache.lock() = SettledRenderCache::default();
-            self.needs_reprint = true;
-        }
+        // The welcome card stays above the conversation. It is the state of
+        // the session, not a splash screen: the first prompt does not make the
+        // model, provider or context disappear from the top of the screen.
         self.lines.push(ChatLine::new(LineKind::User, text.to_string()));
     }
 
@@ -2492,7 +2494,7 @@ mod tests {
         let mut v6 = ChatView::default();
         v6.on_event(&LoopEvent::ToolStarted {
             id: "u1".into(),
-            name: "ask_user".into(),
+            name: "user_interaction".into(),
             args_json: r#"{"question":"Deploy now?"}"#.into(),
         });
         v6.on_event(&LoopEvent::ToolFinished { id: "u1".into(), is_error: false, result_len: 5, result: None });
@@ -3226,7 +3228,10 @@ hm".into()));
     #[test]
     fn update_welcome_card_replaces_card_and_preserves_notices() {
         let mut v = ChatView::default();
-        v.push_line(LineKind::System, "banner-v1");
+        v.update_welcome_card(crate::welcome::WelcomeRender {
+            lines: vec![(LineKind::System, "banner-v1".to_string())],
+            zones: Vec::new(),
+        });
         v.push_line(LineKind::System, "[Verbose mode: last]");
         assert!(!v.has_user_message());
 
@@ -3241,7 +3246,8 @@ hm".into()));
         // A later notice is preserved.
         assert_eq!(v.lines.last().unwrap().text, "[Verbose mode: last]");
 
-        // After a user message the card is left alone.
+        // After a user message the card is still the first thing on screen,
+        // and a state change replaces it in place.
         v.push_user("hello");
         assert!(v.has_user_message());
         let new_card_c = crate::welcome::WelcomeRender {
@@ -3249,25 +3255,30 @@ hm".into()));
             zones: Vec::new(),
         };
         v.update_welcome_card(new_card_c);
-        assert!(!v.lines.iter().any(|l| l.text.contains("banner-v3")));
+        assert!(v.lines.iter().any(|l| l.text.contains("banner-v3")));
+        assert!(!v.lines.iter().any(|l| l.text.contains("banner-v2")));
+        assert!(v.lines.iter().any(|l| l.text == "[Verbose mode: last]"));
+        assert_eq!(v.lines.last().unwrap().text, "hello", "the message stays after the card");
     }
 
     #[test]
-    fn the_welcome_card_is_gone_once_the_conversation_starts() {
+    fn the_welcome_card_stays_above_the_conversation() {
         let mut v = ChatView::default();
         v.update_welcome_card(crate::welcome::WelcomeRender {
             lines: vec![(LineKind::System, "model-a".to_string())],
             zones: Vec::new(),
         });
         v.push_user("hello");
-        // The first prompt takes the card away, and a later state change must
-        // not bring it back into the middle of the conversation; the status
-        // row is what says which model runs now.
+        // The card stays above the conversation, and a state change replaces
+        // its top rows instead of bringing a second card into the middle.
         v.update_welcome_card_state(crate::welcome::WelcomeRender {
             lines: vec![(LineKind::System, "model-b".to_string())],
             zones: Vec::new(),
         });
-        assert!(!v.lines.iter().any(|l| l.text.contains("model-a") || l.text.contains("model-b")), "the card came back");
+        let cards = v.lines.iter().filter(|l| l.text.contains("model-")).count();
+        assert_eq!(cards, 1, "one card, not two");
+        assert!(v.lines.iter().any(|l| l.text.contains("model-b")), "the card says what runs now");
+        assert!(!v.lines.iter().any(|l| l.text.contains("model-a")), "the old state is gone");
         assert!(v.lines.iter().any(|l| l.text.contains("hello")), "the conversation is still there");
     }
 
@@ -3543,8 +3554,8 @@ hm".into()));
         let checking = mascot_swift_lines_mood(0, MascotMood::Checking);
         assert!(happy != offline && happy != checking && checking != offline);
         // Offline must not use the healthy body colour.
-        assert!(!offline.concat().contains("160;155;145"), "offline must not use the healthy body");
-        assert!(happy.concat().contains("160;155;145"));
+        assert!(!offline.concat().contains("138;180;248"), "offline must not use the healthy blue");
+        assert!(happy.concat().contains("138;180;248"));
     }
 
     #[test]

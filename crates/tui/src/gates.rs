@@ -119,6 +119,9 @@ pub struct TuiQuestionGate {
     waiting: Mutex<Vec<WaitingQuestion>>,
     next_id: std::sync::atomic::AtomicU64,
     changed: tokio::sync::Notify,
+    /// Where a one-way notice from the model is sent. Set once the UI event
+    /// channel exists; a question gate can outlive the first frame.
+    notice_tx: Mutex<Option<tokio::sync::mpsc::UnboundedSender<crate::UiEvent>>>,
 }
 
 impl TuiQuestionGate {
@@ -130,6 +133,10 @@ impl TuiQuestionGate {
     pub fn pending(&self) -> Option<QuestionRequest> {
         let waiting = self.waiting.lock();
         waiting.first().filter(|w| w.answer.is_none()).map(|w| w.request.clone())
+    }
+
+    pub fn set_notice_sender(&self, tx: tokio::sync::mpsc::UnboundedSender<crate::UiEvent>) {
+        *self.notice_tx.lock() = Some(tx);
     }
 
     pub fn respond(&self, answer: String, is_write_in: bool) {
@@ -193,6 +200,51 @@ impl flashagent_tools::QuestionGate for TuiQuestionGate {
         self.changed.notify_waiters();
         self.wait_answer(id).await
     }
+
+    async fn open(&self, target: &str) -> Result<(), String> {
+        open_external(target)
+    }
+
+    async fn notify(&self, level: &str, text: &str) -> Result<(), String> {
+        let sender = self.notice_tx.lock().clone();
+        let Some(sender) = sender else {
+            return Err("the interface is not ready for notices".into());
+        };
+        sender
+            .send(crate::UiEvent::UserNotice { level: level.to_string(), text: text.to_string() })
+            .map_err(|_| "the interface is no longer listening".to_string())
+    }
+}
+
+/// Open a URL or a path in whatever the system uses for it. The process is
+/// detached: the terminal stays with FlashAgent.
+fn open_external(target: &str) -> Result<(), String> {
+    use std::process::{Command, Stdio};
+    #[cfg(target_os = "windows")]
+    let mut command = {
+        let mut c = Command::new("cmd");
+        c.args(["/C", "start", "", target]);
+        c
+    };
+    #[cfg(target_os = "macos")]
+    let mut command = {
+        let mut c = Command::new("open");
+        c.arg(target);
+        c
+    };
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let mut command = {
+        let mut c = Command::new("xdg-open");
+        c.arg(target);
+        c
+    };
+    command
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .map(|_| ())
+        .map_err(|e| format!("could not open {target}: {e}"))
 }
 
 #[cfg(test)]

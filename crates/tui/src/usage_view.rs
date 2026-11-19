@@ -97,6 +97,9 @@ pub struct UsageView {
     /// scroll can go without guessing.
     body_rows: Cell<usize>,
     window: Cell<usize>,
+    /// Where the "r refresh" hint sits on the footer line, when this tab has
+    /// one: a click there asks the providers again, as the key does.
+    refresh_zone: Cell<Option<(usize, usize)>>,
     session: SessionUsage,
     history: Vec<HistoryRow>,
     lifetime: flashagent_core::usage_history::UsageHistory,
@@ -123,6 +126,7 @@ impl UsageView {
             scroll: Cell::new(0),
             body_rows: Cell::new(0),
             window: Cell::new(10),
+            refresh_zone: Cell::new(None),
             session,
             history,
             lifetime,
@@ -212,7 +216,48 @@ impl UsageView {
         self.scroll.get() != before
     }
 
-    pub fn render(&self, width: usize, height: usize) -> Vec<RenderLine> {
+    /// Which tab a click at `column` on the strip lands on, if one. The strip
+    /// starts four cells in (`"  │ "`), the open tab wears brackets, two
+    /// spaces sit between tabs — measured the way `render` draws them.
+    fn tab_at(column: usize, active: UsageTab) -> Option<UsageTab> {
+        let mut col = 4usize;
+        for tab in UsageTab::ALL {
+            let label = tr(tab.label());
+            let cells = label.chars().count() + if tab == active { 2 } else { 0 };
+            if column >= col && column < col + cells {
+                return Some(tab);
+            }
+            col += cells + 2;
+        }
+        None
+    }
+
+    /// A press on the card: the tab strip switches, the footer's "r refresh"
+    /// on the Limits tab asks the providers again. Row 0 is the top border,
+    /// which the ✕ owns; the rest of the card is reading, and the wheel and
+    /// arrows already serve it.
+    pub fn click(&mut self, line: usize, column: usize) -> UsageAction {
+        if line == 1 {
+            if let Some(tab) = Self::tab_at(column, self.tab) {
+                self.switch(tab);
+            }
+            return UsageAction::None;
+        }
+        // Body rows start after the strip and its blank; the window holds
+        // every drawn body row, blanks included, so the footer's place does
+        // not move with the list's length.
+        let hint_line = 3 + self.window.get();
+        if line == hint_line && self.tab == UsageTab::Limits {
+            if let Some((from, to)) = self.refresh_zone.get() {
+                if column >= from && column < to {
+                    return UsageAction::RefreshLimits;
+                }
+            }
+        }
+        UsageAction::None
+    }
+
+    pub fn render(&self, width: usize, height: usize, hover: Option<(usize, u16)>) -> Vec<RenderLine> {
         let border = "\x1b[38;2;95;90;85m";
         let reset = "\x1b[0m";
         let inner_w = width.saturating_sub(6).min(100);
@@ -227,7 +272,10 @@ impl UsageView {
             format!("  {border}│{reset} {clipped}{pad} {border}│{reset}")
         };
 
-        // The tab strip: the open one carries the accent.
+        // The tab strip: the open one carries the accent, the one under the
+        // pointer takes the same colour without the brackets, as Settings'
+        // tabs do — a hover says a press would go there.
+        let hovered_tab = hover.and_then(|(line, col)| (line == 1).then_some(col)).and_then(|col| Self::tab_at(col as usize, self.tab));
         let mut strip = String::new();
         for (i, tab) in UsageTab::ALL.iter().enumerate() {
             if i > 0 {
@@ -235,6 +283,8 @@ impl UsageView {
             }
             if *tab == self.tab {
                 strip.push_str(&format!("\x1b[1;38;2;225;175;95m[{}]\x1b[0m", tr(tab.label())));
+            } else if hovered_tab == Some(*tab) {
+                strip.push_str(&format!("\x1b[38;2;185;150;90m{}\x1b[0m", tr(tab.label())));
             } else {
                 strip.push_str(&format!("\x1b[38;2;160;155;145m{}\x1b[0m", tr(tab.label())));
             }
@@ -266,8 +316,15 @@ impl UsageView {
         }
 
         let mut hint = String::from(&format!("\x1b[38;2;135;130;125m{}\x1b[0m", crate::key_hints(&[("Tab", "switch"), ("↑↓", "scroll"), ("Esc", "close")], inner_w.saturating_sub(2))));
+        self.refresh_zone.set(None);
         if self.tab == UsageTab::Limits {
+            // The zone is measured off the line as built, so a click means
+            // what the screen shows: the content starts four cells in, the
+            // separator is three, the "r refresh" chunk follows it.
+            let before = crate::visible_width(&hint);
             hint.push_str(&format!(" \x1b[38;2;135;130;125m· {}\x1b[0m", crate::key_hints(&[("r", "refresh")], inner_w.saturating_sub(2))));
+            let from = 4 + before + 3;
+            self.refresh_zone.set(Some((from, from + visible_width(&format!("r {}", tr("refresh"))))));
         }
         lines.push((LineKind::System, pad_row(&hint)));
         if total > window {
@@ -373,10 +430,12 @@ impl UsageView {
             }
         }
         rows.push(section(tr("Saved sessions")));
-        rows.push(kv(tr("Sessions"), &flashagent_core::CostLedger::turns_phrase(self.history.len() as u64)));
-        rows.push(kv(tr("With usage"), &flashagent_core::CostLedger::turns_phrase(recorded.len() as u64)));
+        // Counts of sessions, not of turns: the label already says the noun,
+        // and "50 turns" next to "Tokens 1.2M" read as if turns were spent.
+        rows.push(kv(tr("Sessions"), &self.history.len().to_string()));
+        rows.push(kv(tr("With usage"), &recorded.len().to_string()));
         if !estimated.is_empty() {
-            rows.push(kv(tr("Older, estimated"), &flashagent_core::CostLedger::turns_phrase(estimated.len() as u64)));
+            rows.push(kv(tr("Older, estimated"), &estimated.len().to_string()));
         }
         if tokens > 0 {
             rows.push(kv(tr("Tokens"), &ContextUsage::format_tokens(tokens as usize)));
@@ -391,7 +450,9 @@ impl UsageView {
             rows.push(String::new());
             rows.push(section(tr("Recent")));
         }
-        for row in self.history.iter().take(30) {
+        // Every saved session, not the newest thirty: the list scrolls, and a
+        // cap made the range footer name rows the list could never reach.
+        for row in self.history.iter() {
             let title = if row.title.is_empty() { tr("(no prompt)") } else { &row.title };
             let usage = row.usage.as_ref().or(row.estimated.as_ref());
             let detail = match usage {
@@ -515,7 +576,7 @@ mod tests {
 
     #[test]
     fn the_session_tab_shows_what_the_ledger_recorded() {
-        let lines = view().render(100, 40);
+        let lines = view().render(100, 40, None);
         let text = lines.iter().map(|(_, row)| crate::strip_ansi(row)).collect::<Vec<_>>().join("\n");
         assert!(text.contains("Usage"));
         assert!(text.contains("OpenCode Go"));
@@ -531,5 +592,36 @@ mod tests {
         view.handle_key(crossterm::event::KeyCode::Home, crossterm::event::KeyModifiers::NONE);
         view.handle_key(crossterm::event::KeyCode::Down, crossterm::event::KeyModifiers::NONE);
         assert!(view.scroll.get() <= view.body_rows.get());
+    }
+
+    #[test]
+    fn saved_sessions_are_counted_as_sessions_not_turns() {
+        let rows = vec![HistoryRow { when: "2026-11-19".into(), title: "a".into(), model: "m".into(), usage: Some(UsageTotals::default()), estimated: None }];
+        let mut view = UsageView::new(SessionUsage::default(), rows, Default::default(), Vec::new(), false);
+        view.switch(UsageTab::History);
+        let text = view.render(100, 40, None).iter().map(|(_, row)| crate::strip_ansi(row)).collect::<Vec<_>>().join("\n");
+        assert!(text.contains("Sessions") && text.contains("1"), "{text}");
+        assert!(!text.contains("1 turn"), "a session count read as turns:\n{text}");
+    }
+
+    #[test]
+    fn a_click_on_the_strip_switches_tabs_and_on_refresh_refreshes() {
+        let mut view = view();
+        // The strip row: the open tab wears brackets ("[Session]", nine cells),
+        // two spaces sit between labels.
+        view.click(1, 4);
+        assert_eq!(view.tab, UsageTab::Session, "a click on the open tab keeps it");
+        view.click(1, 4 + "Session".chars().count() + 2 + 2);
+        assert_eq!(view.tab, UsageTab::History);
+        // The refresh hint only answers on the Limits tab, and only on its own
+        // cells. The window is known once the card was drawn at this height.
+        view.switch(UsageTab::Limits);
+        view.render(100, 40, None);
+        let hint_line = 3 + view.window.get();
+        let (from, _) = view.refresh_zone.get().unwrap();
+        assert_eq!(view.click(hint_line, from), UsageAction::RefreshLimits);
+        assert_eq!(view.click(hint_line, from.saturating_sub(1)), UsageAction::None);
+        view.switch(UsageTab::Session);
+        assert_eq!(view.click(hint_line, from), UsageAction::None, "no refresh off the Limits tab");
     }
 }

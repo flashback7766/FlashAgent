@@ -58,9 +58,65 @@ pub(crate) fn arguments(call: &ToolCallRecord) -> serde_json::Value {
 pub(crate) fn target(name: &str, parsed: &serde_json::Value) -> String {
     let text = |key: &str| parsed.get(key).and_then(|value| value.as_str());
     match name {
-        "read_file" | "outline_file" | "edit_file" | "write_file" | "patch_file" => {
+        "read" | "read_file" | "outline_file" => {
             let paths = call_paths(parsed);
             if paths.is_empty() { tr("file").to_string() } else { paths.join(", ") }
+        }
+        "edit" => {
+            let mode = text("mode").unwrap_or("replace");
+            let paths = call_paths(parsed);
+            let what = if paths.is_empty() { tr("file").to_string() } else { paths.join(", ") };
+            format!("{mode} {what}")
+        }
+        "edit_file" | "write_file" | "patch_file" => {
+            let paths = call_paths(parsed);
+            if paths.is_empty() { tr("file").to_string() } else { paths.join(", ") }
+        }
+        "search" => {
+            let mode = text("mode").unwrap_or("content");
+            match mode {
+                "list" => text("path").unwrap_or(".").to_string(),
+                "files" => format!("\"{}\"", text("pattern").unwrap_or("")),
+                _ => {
+                    let pattern = text("pattern").unwrap_or("");
+                    match text("glob") {
+                        Some(filter) => format!("\"{pattern}\" [{filter}]"),
+                        None => format!("\"{pattern}\""),
+                    }
+                }
+            }
+        }
+        "git" => {
+            let action = text("action").unwrap_or("status");
+            match text("path") {
+                Some(path) => format!("{action} {path}"),
+                None => action.to_string(),
+            }
+        }
+        "web" => {
+            let action = text("action").unwrap_or("fetch");
+            if action == "search" {
+                format!("\"{}\"", text("query").unwrap_or(""))
+            } else {
+                text("url").unwrap_or("").to_string()
+            }
+        }
+        "http_request" => format!("{} {}", text("method").unwrap_or("GET"), text("url").unwrap_or("")),
+        "skill" => match text("name") {
+            Some(name) => format!("{} {name}", text("action").unwrap_or("list")),
+            None => text("action").unwrap_or("list").to_string(),
+        },
+        "task" => match parsed.get("task_id").and_then(|id| id.as_u64()) {
+            Some(id) => format!("{} #{id}", text("action").unwrap_or("list")),
+            None => text("action").unwrap_or("list").to_string(),
+        },
+        "agent" => {
+            let action = text("action").unwrap_or("spawn");
+            match action {
+                "message" => format!("message {}", text("to").unwrap_or("")),
+                "review" => format!("review {}", text("agent").unwrap_or("")),
+                _ => text("task").unwrap_or(tr("task")).to_string(),
+            }
         }
         "run_shell" => text("command").unwrap_or(tr("command")).to_string(),
         "grep" => {
@@ -84,6 +140,31 @@ pub(crate) fn target(name: &str, parsed: &serde_json::Value) -> String {
                 question.push_str(&tr(" (+{more} more)").replace("{more}", &more.to_string()));
             }
             question
+        }
+        "user_interaction" => {
+            let mode = text("mode").unwrap_or("ask");
+            match mode {
+                "ask" => {
+                    let questions = parsed.get("questions").and_then(|q| q.as_array());
+                    let first = questions.and_then(|q| q.first()).and_then(|q| q.get("question")).and_then(|q| q.as_str());
+                    first.or_else(|| text("question")).unwrap_or(tr("a question")).to_string()
+                }
+                "attach" => text("prompt").unwrap_or(tr("a file")).to_string(),
+                "handoff" => text("path").unwrap_or(tr("file")).to_string(),
+                "open" => text("target").unwrap_or("").to_string(),
+                "form" => text("title").map(str::to_string).unwrap_or_else(|| tr("form").to_string()),
+                "steps" => text("title").map(str::to_string).unwrap_or_else(|| tr("steps").to_string()),
+                "notify" => text("text").unwrap_or("").to_string(),
+                _ => mode.to_string(),
+            }
+        }
+        "memory" => {
+            let command = text("command").unwrap_or("view");
+            let scope = text("scope").unwrap_or("project");
+            match text("path").or_else(|| text("old_path")) {
+                Some(path) => format!("{command} [{scope}] {path}"),
+                None => format!("{command} [{scope}]"),
+            }
         }
         name if name.starts_with("memory_") => {
             let scope = text("scope").unwrap_or("project");
@@ -112,6 +193,26 @@ fn action(name: &str, parsed: &serde_json::Value, state: CallState) -> String {
     }
     let verbs = match name {
         "run_shell" => (tr("Running"), tr("Ran"), tr("Failed")),
+        "read" => (tr("Reading"), tr("Read"), tr("Failed to read")),
+        "search" => (tr("Searching"), tr("Searched"), tr("Failed to explore")),
+        "edit" => match parsed.get("mode").and_then(|m| m.as_str()).unwrap_or("replace") {
+            "write" => (tr("Writing"), tr("Wrote"), tr("Not written:")),
+            "patch" => (tr("Patching"), tr("Patched"), tr("Failed to edit")),
+            _ => (tr("Editing"), tr("Edited"), tr("Failed to edit")),
+        },
+        "git" => (tr("Checking git"), tr("Checked git"), tr("Failed to check git")),
+        "web" => match parsed.get("action").and_then(|a| a.as_str()).unwrap_or("fetch") {
+            "search" => (tr("Searching web:"), tr("Searched web:"), tr("Web search failed:")),
+            _ => (tr("Fetching"), tr("Fetched"), tr("Failed to fetch")),
+        },
+        "http_request" => (tr("Requesting"), tr("Requested"), tr("Request failed")),
+        "skill" => (tr("Reading skill"), tr("Read skill"), tr("Failed to read skill")),
+        "task" => (tr("Checking tasks"), tr("Checked tasks"), tr("Failed to check tasks")),
+        "agent" => match parsed.get("action").and_then(|a| a.as_str()).unwrap_or("spawn") {
+            "message" => (tr("Messaging agent:"), tr("Messaged agent:"), tr("Message failed:")),
+            "review" => (tr("Reviewing subagent:"), tr("Reviewed subagent:"), tr("Review failed:")),
+            _ => (tr("Running subagent:"), tr("Subagent finished:"), tr("Subagent failed:")),
+        },
         "read_file" => (tr("Reading"), tr("Read"), tr("Failed to read")),
         "outline_file" => (tr("Outlining"), tr("Outlined"), tr("Failed to outline")),
         "list_dir" => (tr("Analyzing"), tr("Analyzed"), tr("Failed to explore")),
@@ -119,10 +220,24 @@ fn action(name: &str, parsed: &serde_json::Value, state: CallState) -> String {
         "edit_file" | "patch_file" => (tr("Editing"), tr("Edited"), tr("Failed to edit")),
         "write_file" => (tr("Writing"), tr("Wrote"), tr("Not written:")),
         "spawn_agent" => (tr("Running subagent:"), tr("Subagent finished:"), tr("Subagent failed:")),
+        "user_interaction" => match parsed.get("mode").and_then(|m| m.as_str()).unwrap_or("ask") {
+            "attach" => (tr("Asking for files:"), tr("Files attached:"), tr("No files attached")),
+            "handoff" => (tr("Opening for you:"), tr("Handed off:"), tr("Handoff failed:")),
+            "open" => (tr("Opening"), tr("Opened"), tr("Failed to open")),
+            "form" => (tr("Filling a form:"), tr("Form answered:"), tr("Form cancelled")),
+            "steps" => (tr("Walking through:"), tr("Walkthrough done:"), tr("Walkthrough stopped:")),
+            "notify" => (tr("Notifying user:"), tr("Notified user:"), tr("Notice failed:")),
+            _ => (tr("Asking user:"), tr("Asked user:"), tr("Cancelled question")),
+        },
+        "memory" => match parsed.get("command").and_then(|c| c.as_str()).unwrap_or("view") {
+            "create" => (tr("Creating memory"), tr("Created memory"), tr("Failed to create memory")),
+            "str_replace" | "insert" => (tr("Updating memory"), tr("Updated memory"), tr("Failed to update memory")),
+            "delete" => (tr("Removing memory"), tr("Removed memory"), tr("Failed to remove memory")),
+            "rename" => (tr("Renaming memory"), tr("Renamed memory"), tr("Failed to rename memory")),
+            "import" => (tr("Importing memory"), tr("Imported memory"), tr("Failed to import memory")),
+            _ => (tr("Reading memory"), tr("Read memory"), tr("Failed to read memory")),
+        },
         "memory_read" => (tr("Reading memory"), tr("Read memory"), tr("Failed to read memory")),
-        "memory_create" => (tr("Creating memory"), tr("Created memory"), tr("Failed to create memory")),
-        "memory_update" => (tr("Updating memory"), tr("Updated memory"), tr("Failed to update memory")),
-        "memory_remove" => (tr("Removing memory"), tr("Removed memory"), tr("Failed to remove memory")),
         "web_search" => (tr("Searching web:"), tr("Searched web:"), tr("Web search failed:")),
         "web_fetch" => (tr("Fetching"), tr("Fetched"), tr("Failed to fetch")),
         "git_status" => (tr("Checking git status"), tr("Checked git status"), tr("Failed to check git status")),
@@ -183,6 +298,21 @@ fn change_size(added: usize, deleted: usize) -> Option<String> {
 }
 
 pub(crate) fn requested_change(name: &str, parsed: &serde_json::Value) -> (usize, usize, Option<String>) {
+    if name == "edit" {
+        return match parsed.get("mode").and_then(|m| m.as_str()).unwrap_or("replace") {
+            "write" => {
+                let content = parsed.get("content").and_then(|s| s.as_str());
+                (content.map_or(0, |s| s.lines().count()), 0, content.map(str::to_string))
+            }
+            "patch" => {
+                let patch = parsed.get("patch").and_then(|s| s.as_str());
+                let added = patch.map_or(0, |s| s.lines().filter(|l| l.starts_with('+') && !l.starts_with("+++")).count());
+                let deleted = patch.map_or(0, |s| s.lines().filter(|l| l.starts_with('-') && !l.starts_with("---")).count());
+                (added, deleted, patch.map(str::to_string))
+            }
+            _ => requested_edits(parsed),
+        };
+    }
     match name {
         "write_file" => {
             let content = parsed.get("content").and_then(|s| s.as_str());
@@ -194,23 +324,25 @@ pub(crate) fn requested_change(name: &str, parsed: &serde_json::Value) -> (usize
             let deleted = patch.map_or(0, |s| s.lines().filter(|l| l.starts_with('-') && !l.starts_with("---")).count());
             (added, deleted, patch.map(str::to_string))
         }
-        _ => {
-            let mut body = String::new();
-            let mut added = 0;
-            let mut deleted = 0;
-            for edit in call_edits(parsed) {
-                for (key, mark) in [("old_string", '-'), ("new_string", '+')] {
-                    for line in edit.get(key).and_then(|s| s.as_str()).unwrap_or("").lines() {
-                        body.push(mark);
-                        body.push_str(line);
-                        body.push('\n');
-                        if mark == '+' { added += 1; } else { deleted += 1; }
-                    }
-                }
+        _ => requested_edits(parsed),
+    }
+}
+
+fn requested_edits(parsed: &serde_json::Value) -> (usize, usize, Option<String>) {
+    let mut body = String::new();
+    let mut added = 0;
+    let mut deleted = 0;
+    for edit in call_edits(parsed) {
+        for (key, mark) in [("old_string", '-'), ("new_string", '+')] {
+            for line in edit.get(key).and_then(|s| s.as_str()).unwrap_or("").lines() {
+                body.push(mark);
+                body.push_str(line);
+                body.push('\n');
+                if mark == '+' { added += 1; } else { deleted += 1; }
             }
-            (added, deleted, (!body.is_empty()).then_some(body))
         }
     }
+    (added, deleted, (!body.is_empty()).then_some(body))
 }
 
 /// One outcome line: what the tool reported. Only a real change size gets the
@@ -264,14 +396,22 @@ fn outcome(call: &ToolCallRecord, parsed: &serde_json::Value) -> Option<Outcome>
         return None;
     }
     match call.name.as_str() {
-        "read_file" => result.map(|text| {
+        "read" | "read_file" => result.map(|text| {
             Outcome::Text(if text.trim() == "(empty or past end of file)" { text.trim().to_string() }
             else { crate::text::plural(crate::tool_views::read_line_count(text), "line", "lines") })
+        }),
+        "search" => result.map(|text| {
+            let mode = parsed.get("mode").and_then(|m| m.as_str()).unwrap_or("content");
+            match mode {
+                "files" => Outcome::Text(crate::text::plural(crate::tool_views::listing_count(text), "file", "files")),
+                "list" => Outcome::Text(crate::text::plural(crate::tool_views::listing_count(text), "entry", "entries")),
+                _ => Outcome::Text(crate::text::plural(text.lines().filter(|line| crate::tool_views::search_match(line).is_some()).count(), "match", "matches")),
+            }
         }),
         "grep" => result.map(|text| Outcome::Text(crate::text::plural(text.lines().filter(|line| crate::tool_views::search_match(line).is_some()).count(), "match", "matches"))),
         "glob" => result.map(|text| Outcome::Text(crate::text::plural(crate::tool_views::listing_count(text), "file", "files"))),
         "list_dir" => result.map(|text| Outcome::Text(crate::text::plural(crate::tool_views::listing_count(text), "entry", "entries"))),
-        "edit_file" | "write_file" | "patch_file" => {
+        "edit" | "edit_file" | "write_file" | "patch_file" => {
             if call.diff.is_some() {
                 change_size(call.added, call.deleted)
                     .map(Outcome::Change)
@@ -366,7 +506,7 @@ pub(crate) fn call_title(call: &ToolCallRecord, waiting: bool) -> String {
 }
 
 fn is_explore(name: &str) -> bool {
-    matches!(name, "read_file" | "outline_file" | "list_dir" | "glob" | "grep")
+    matches!(name, "read" | "read_file" | "outline_file" | "search" | "list_dir" | "glob" | "grep")
 }
 
 fn has_problem(call: &ToolCallRecord) -> bool {
@@ -380,7 +520,7 @@ fn exploration_counts(calls: &[ToolCallRecord]) -> (usize, usize) {
     let mut files = 0;
     let mut searches = 0;
     for call in calls {
-        if matches!(call.name.as_str(), "read_file" | "outline_file") {
+        if matches!(call.name.as_str(), "read" | "read_file" | "outline_file") {
             files += call_paths(&arguments(call)).len().max(1);
         } else {
             searches += 1;
@@ -444,12 +584,15 @@ fn sync_line(line: &mut ChatLine) {
     } else {
         match last.name.as_str() {
             "run_shell" => ToolGroupKind::Command { count: 1, last_cmd: what, is_running: running },
-            "edit_file" | "write_file" | "patch_file" => {
+            "edit" | "edit_file" | "write_file" | "patch_file" => {
                 let (added, deleted, _) = requested_change(&last.name, &parsed);
                 ToolGroupKind::Edit { path: what, added: last.diff.as_ref().map_or(added, |_| last.added), deleted: last.diff.as_ref().map_or(deleted, |_| last.deleted), is_running: running }
             }
+            "agent" if parsed.get("action").and_then(|a| a.as_str()).unwrap_or("spawn") == "spawn" => {
+                ToolGroupKind::Subagent { count: 1, last_task: what, is_running: running }
+            }
             "spawn_agent" => ToolGroupKind::Subagent { count: 1, last_task: what, is_running: running },
-            "memory_read" => ToolGroupKind::Memory { scopes: vec![parsed.get("scope").and_then(|s| s.as_str()).unwrap_or("project").to_string()], is_running: running },
+            "memory" | "memory_read" => ToolGroupKind::Memory { scopes: vec![parsed.get("scope").and_then(|s| s.as_str()).unwrap_or("project").to_string()], is_running: running },
             _ => ToolGroupKind::Generic { name: last.name.clone(), summary: what, is_running: running },
         }
     });
@@ -645,7 +788,7 @@ mod tests {
             ("run_shell", r#"{"command":"pwd"}"#),
             ("edit_file", r#"{"path":"src/a.rs","edits":[]}"#),
             ("spawn_agent", r#"{"task":"inspect"}"#),
-            ("memory_read", r#"{"scope":"project"}"#),
+            ("memory", r#"{"command":"view","scope":"project"}"#),
         ] {
             let mut chat = started(name, args);
             chat.tool_finished(false, Some("ok"));
