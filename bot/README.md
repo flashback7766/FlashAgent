@@ -1,43 +1,60 @@
-# FlashAgent Telegram bot
+# FlashAgent Telegram bot (v2)
 
-The Telegram face of FlashAgent: one bot process, many rooms. Every room in
-the config is one deployment — its own backend (`flashagent --serve`), its
-own session and memory vault, and its own mode:
+The Telegram face of FlashAgent: one bot process, one project, three room
+kinds. The bot is transport only — the conversation lives in each room's
+`flashagent --serve` session, the background chatter lives in journal
+files the brains read themselves, and the state the bot owns (limits,
+usage, mutes) sits in `data_dir`.
 
-- **The developer room** (`mode = "dev"`): the whole brain. The bot listens
-  to the conversation, answers questions with the chat as context, drafts
-  channel posts with publish/cancel buttons, writes facts into the memory
-  vault, and surfaces approvals with Allow/Deny buttons.
-- **The users' room** (`mode = "users"`): reports and questions on the
-  compact tier. `/report` keeps a problem report (the bot stores it itself —
-  no tokens burn on storing one); `/digest` asks the room's backend to group
-  the batch and name the worst first. The room's backend runs `--prompt
-  compact --mode manual`, so a report room can neither run a shell nor edit
-  anything without the admins allowing it.
+## The rooms
 
-Every room's backend is bounded: the folder is read behind a two-second
-clock, the prompt tier is set per room, and the room speaks only when
-addressed — a reply to the bot, or a command.
+- **dev** — the team group. Full brain: commands, tools, approvals, the
+  memory vault. The bot is an *active participant*: it journals every
+  message, and after `pulse_minutes` of quiet it reads the journal and
+  speaks up — or answers SKIP and stays silent. Addressed messages are
+  `/ask`, a reply to the bot, or an @mention.
+- **users** — the community chat. Free conversation with guardrails: the
+  room's brain only reaches its own serve dir (reports, screenshots),
+  requests are rate limited (`requests_per_hour`), and a spammer who
+  pushes past the cooldown warning is ignored for `ignore_hours`.
+  `/report` starts the issue pipeline: the bot discusses first, dedups
+  against existing issues, then files one under the GitHub account.
+- **channel** — broadcast only. Posts are drafted in the dev room with
+  publish/redo/cancel buttons; series (the devlog) run on a schedule.
+
+## The steering model
+
+No buffer, no cost per background message:
+
+- the bot writes **every** room message to the room's journal file
+  (`journal`, relative to the serve's `dir`), zero tokens;
+- a message that arrives **while the brain is already answering** flies
+  into the running turn via serve's `/steer` instead of queueing;
+- the users' room runs with a bounded context (`--context-cap`,
+  auto-compaction at `--compact-at`), so a long community day cannot
+  blow the window.
 
 ## Setup
 
-1. Backends: `flashagent --serve --dir <folder> --port <port>
-   [--prompt compact] [--mode manual]` with `FLASHAGENT_SERVE_TOKEN=<secret>`
-   in the environment. The config must already be set up (`flashagent
-   --setup`); the model, the provider and the memory vault come from the same
-   files the TUI uses.
-2. Bot side: copy `config.example.toml` to `bot.toml`; fill in the BotFather
-   token, the channel id, the admin ids, one `[[serve]]` block per backend,
-   and one `[[chat]]` room per group naming its backend.
-   `pip install -r requirements.txt`, then `python3 bot.py`.
-3. Add the bot to the rooms (give it access to messages) and make it an admin
-   in the channel it posts to.
+1. Brains: `flashagent --serve --dir <folder> --port <port>
+   [--prompt compact] [--mode manual] [--context-cap N] [--compact-at N]`
+   with `FLASHAGENT_SERVE_TOKEN=<secret>` in the environment. The model,
+   the provider and the vault come from the same files the TUI uses.
+2. Bot: copy `config.example.toml` to `bot.toml`; fill in the BotFather
+   token, the admin ids, one `[serve.<name>]` per brain, one
+   `[chat.<name>]` per room. Then `pip install -r requirements.txt` and
+   `python3 -m flashagent_bot bot.toml`.
+3. Add the bot to the rooms (message access on) and make it an admin in
+   the channel it posts to.
 
-## The commands, per room
+## Commands
 
-Developer room: `/ask`, `/post`, `/remember`, `/status`, `/cancel`,
-`/newsession`. Users' room: `/report`, `/digest` (admins), `/status`.
+`/ask`, `/report` — everyone. `/post`, `/remember`, `/digest`, `/usage`,
+`/status`, `/cancel`, `/newsession` — admins. Approvals surface as
+Allow/Deny buttons; unanswered ones are denied by the serve's clock.
 
-The commands are for the admins; the listening and the reply-to-ask are for
-everyone in the room. Unanswered approvals are denied after the backend's
-clock, and the model adapts.
+## Tests
+
+`pytest tests/` — config validation, the journal retention, the rate
+limiter (including the mute surviving a restart), token accounting and
+the Telegram chunking. The suite runs in CI with the Rust gates.

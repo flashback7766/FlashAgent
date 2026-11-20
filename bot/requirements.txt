@@ -1,1 +1,2 @@
-aiogram>=3.13
+aiogram>=3.13,<4
+httpx>=0.27
