@@ -5656,18 +5656,12 @@ fn the_plan_shows_as_a_box_in_the_corner_and_leaves_when_it_is_done() {
     assert!(screen.contains("plan:"), "the transcript names the plan:\n{screen}");
     assert!(screen.contains("2 step(s)"), "the transcript keeps a short line while the box shows:\n{screen}");
 
-    // A click sends the box away; the next call brings it back. A press that
-    // lands a row off the header still hits the box, and a person whose first
-    // click did nothing clicks again — the scenario does the same.
+    // A click sends the box away; the next call brings it back. The wait is a
+    // clock, not a fixed pause: a loaded runner may take its time to process
+    // the press while the turn keeps streaming.
     let (row, col) = term.find_on_screen("Plan · 0/2").expect("the box header is on screen");
-    for _ in 0..2 {
-        term.click(row, col);
-        std::thread::sleep(std::time::Duration::from_millis(200));
-        if !term.screen().contains("Plan · 0/2") {
-            break;
-        }
-    }
-    assert!(!term.screen().contains("Plan · 0/2"), "the click hid the box:\n{}", term.screen());
+    term.click(row, col);
+    term.wait_gone("Plan · 0/2", WAIT);
     term.wait_for("Plan · 1/2", WAIT);
 
     // Everything done: the box goes, the short line stays with the count.
