@@ -113,3 +113,14 @@ def test_owner_can_be_named_explicitly(tmp_path):
     text = VALID.replace("admins = [1, 2]", "admins = [1, 2]\nowner = 2")
     cfg = load(write(tmp_path, text))
     assert cfg.owner == 2
+
+
+def test_replies_per_turn_defaults_and_override(tmp_path):
+    cfg = load(write(tmp_path, VALID))
+    assert cfg.replies_per_turn == 3
+    text = VALID.replace("pulse_minutes = 12", "pulse_minutes = 12")
+    text = VALID.replace(
+        "pulse_minutes = 12", "pulse_minutes = 12\n"
+    )  # sanity: unrelated sections keep the default
+    cfg2 = load(write(tmp_path, text))
+    assert cfg2.replies_per_turn == 3

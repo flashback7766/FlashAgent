@@ -54,6 +54,7 @@ class Config:
     github: Github | None
     requests_per_hour: int
     ignore_hours: int
+    replies_per_turn: int  # hard cap: no turn may flood the room
     daily_tokens: int  # soft cap per day; 0 = unlimited
 
 
@@ -168,6 +169,7 @@ def load(path: Path) -> Config:
         github=github,
         requests_per_hour=int(limits.get("requests_per_hour", 30)),
         ignore_hours=int(limits.get("ignore_hours", 12)),
+        replies_per_turn=int(limits.get("replies_per_turn", 3)),
         daily_tokens=int(budget.get("daily_tokens", 0)),
     )
 

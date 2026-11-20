@@ -457,6 +457,13 @@ class App:
                         # likes to follow its answer with a state report.
                         if ev.message_id in answered:
                             continue
+                        if replies >= self.cfg.replies_per_turn:
+                            log.warning(
+                                "turn hit the %d-reply cap; dropped a reply to msg:%s",
+                                self.cfg.replies_per_turn,
+                                ev.message_id,
+                            )
+                            continue
                         if await self._deliver_reply(st, chat_id, ev.message_id, ev.text):
                             answered.add(ev.message_id)
                             replies += 1

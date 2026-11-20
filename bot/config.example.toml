@@ -18,6 +18,7 @@ repo = "rentalx-wifi/rx-playa"
 [limits]
 requests_per_hour = 30          # per user in the users' room
 ignore_hours = 12               # spam after the cooldown warning gets muted
+replies_per_turn = 3            # hard cap: one turn may not flood the room
 
 [budget]
 daily_tokens = 2000000          # soft cap: warn + economy mode after; 0 = off
