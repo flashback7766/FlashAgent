@@ -421,21 +421,6 @@ async def async_main(cfg: dict) -> None:
         )
         in_room = F.chat.id == chat_id
 
-        @dp.message(in_room, F.text)
-        async def on_room_message(message: Message, room: Room = room) -> None:
-            who = message.from_user.full_name if message.from_user else "?"
-            room.collector.add(who, message.text)
-            if message.text.startswith("/"):
-                return
-            # Both rooms answer only when addressed: a reply to one of the
-            # bot's messages. The users' room turns a reply into a report; the
-            # dev room treats it as a question with the chat as context.
-            if message.reply_to_message and message.reply_to_message.from_user.id == bot.id:
-                if room.mode == "users":
-                    await app.cmd_report(message, room, message.text)
-                else:
-                    await app.cmd_ask(message, room, message.text)
-
         @dp.message(Command("ask"), in_room, admin_here)
         async def on_ask(message: Message, command: CommandObject, room: Room = room) -> None:
             await app.cmd_ask(message, room, command.args or "")
@@ -478,6 +463,23 @@ async def async_main(cfg: dict) -> None:
         @dp.message(Command("digest"), in_room, admin_here)
         async def on_digest(message: Message, room: Room = room) -> None:
             await app.cmd_digest(message, room)
+
+        @dp.message(in_room, F.text)
+        async def on_room_message(message: Message, room: Room = room) -> None:
+            who = message.from_user.full_name if message.from_user else "?"
+            log.info("message in %s (%s) from %s id=%s", message.chat.id, room.name, who, message.from_user.id if message.from_user else "?")
+            room.collector.add(who, message.text)
+            if message.text.startswith("/"):
+                return
+            # Both rooms answer only when addressed: a reply to one of the
+            # bot's messages. The users' room turns a reply into a report; the
+            # dev room treats it as a question with the chat as context.
+            if message.reply_to_message and message.reply_to_message.from_user.id == bot.id:
+                if room.mode == "users":
+                    await app.cmd_report(message, room, message.text)
+                else:
+                    await app.cmd_ask(message, room, message.text)
+
 
     @dp.callback_query(F.data.startswith("approve:"))
     async def on_approve(query: CallbackQuery) -> None:
