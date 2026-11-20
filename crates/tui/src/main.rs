@@ -608,7 +608,28 @@ async fn main() -> Result<()> {
 
     let gate = TuiGate::new();
     let question_gate = TuiQuestionGate::new();
-    let mcp_manager = flashagent_tools::mcp::McpManager::new(cwd.clone());
+    trace("main: mcp manager");
+    // Reading a project's `.mcp.json` is two lookups in the working folder,
+    // and a folder can answer them for minutes (a backup dump of millions of
+    // entries, a disk that is failing). The lookups run behind a clock; a
+    // folder that cannot answer in two seconds answers with no MCP servers
+    // this session rather than with a blank screen.
+    let mcp_manager = {
+        let cwd = cwd.clone();
+        match tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            tokio::task::spawn_blocking(move || flashagent_tools::mcp::McpManager::new(cwd)),
+        )
+        .await
+        {
+            Ok(Ok(manager)) => manager,
+            _ => {
+                trace("main: the project folder did not answer; no mcp servers this session");
+                flashagent_tools::mcp::McpManager::new(std::env::temp_dir())
+            }
+        }
+    };
+    trace("main: mcp manager ready");
     // A project's `.mcp.json` can start a program, so the owner is asked
     // before it runs. The answer is remembered, unless the safe mode is on:
     // there, nothing runs without a question every time.
@@ -628,6 +649,7 @@ async fn main() -> Result<()> {
     let state = Arc::new(PermissionState::new(config.permission_mode, gate.clone()));
     // Files outside this folder are never read or written on a mode's say alone.
     state.set_project_root(cwd.clone());
+    trace("main: project root set");
     // Only the MCP config (`read_only`, `read_only_tools`) marks external tools as reads.
     let hint_mgr = mcp_manager.clone();
     state.set_read_only_hint(Arc::new(move |tool: &str| hint_mgr.is_tool_read_only(tool)));
@@ -656,6 +678,7 @@ async fn main() -> Result<()> {
         // The real home: this is the app, not a test.
         home: None,
     })?);
+    trace("main: tools built");
     // A closed terminal window (SIGHUP) or a kill (SIGTERM) skips the normal
     // exit; the background tasks run in their own process groups and would
     // outlive FlashAgent, holding their ports.
@@ -684,6 +707,7 @@ async fn main() -> Result<()> {
     let (agent_tx, agent_events) = tokio::sync::mpsc::unbounded_channel();
     let (composite, agent_finished, agent_control) =
         flashagent_tools::agent_tools(tools_arc.clone(), source.clone(), state.clone(), Some(agent_tx));
+    trace("main: agent tools built");
     let perm: &'static PermissionedTools =
         Box::leak(Box::new(PermissionedTools::new(Arc::new(composite), Some(tools_arc.clone()), state.clone())));
     // The three tools only the top has are not the built-in ones, so the
@@ -697,12 +721,36 @@ async fn main() -> Result<()> {
     let home = std::env::var("HOME").or_else(|_| std::env::var("USERPROFILE")).map(std::path::PathBuf::from).unwrap_or_default();
     // The indexes come from the two stores; the user's rules are read the
     // same way. The budget is in the tokens of the model that will read it.
-    let (memory_block, memory_docs) = flashagent_core::memory_context(&model, &cwd, &home, config.token_budget);
+    // The project's rules are lookups in the working folder, and a folder can
+    // take minutes to answer one — a backup dump of millions of entries did,
+    // holding the whole start-up in the kernel with a blank screen. Behind a
+    // clock, a folder that cannot answer costs its rules, not the interface.
+    trace("main: reading memory");
+    let (memory_block, memory_docs) = {
+        let (m, c, h) = (model.clone(), cwd.clone(), home.clone());
+        let budget = config.token_budget;
+        match tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            tokio::task::spawn_blocking(move || flashagent_core::memory_context(&m, &c, &h, budget)),
+        )
+        .await
+        {
+            Ok(Ok(found)) => found,
+            _ => {
+                trace("main: the project folder did not answer; global memory only this session");
+                // The global vault lives under the home folder and still counts;
+                // the walk of the project's rules is what the wait drops.
+                flashagent_core::memory_context(&model, &std::env::temp_dir(), &home, config.token_budget)
+            }
+        }
+    };
+    trace("main: memory read");
 
     // The interface language before anything renders; the system prompt is
     // not part of it.
     install_crash_hook(config.crash_reports);
 
+    trace("main: entering the terminal");
     run_terminal(AppContext {
         config,
         source,
@@ -1916,10 +1964,25 @@ async fn run_app(ctx: AppContext) -> Result<SaveOutcome> {
         // prompt and is rebuilt with it when the voice or model changes.
         .with_memory(&w.memory_block)
         // The plan of the project: what is where, so the model does not spend
-        // turns looking for the file it wants.
+        // turns looking for the file it wants. The walk runs on a blocking
+        // thread behind a clock: a folder holding millions of entries, or a
+        // disk that answers slowly, once held the whole start-up in a kernel
+        // read for minutes with a blank screen. A project that cannot say
+        // what it holds in two seconds says nothing this session.
         .with_plan({
             trace("run_app: walking the project");
-            let outline = flashagent_core::plan::project_outline(&w.cwd, PLAN_CHARS);
+            let outline = {
+                let cwd = w.cwd.clone();
+                match tokio::time::timeout(
+                    std::time::Duration::from_secs(2),
+                    tokio::task::spawn_blocking(move || flashagent_core::plan::project_outline(&cwd, PLAN_CHARS)),
+                )
+                .await
+                {
+                    Ok(Ok(outline)) => outline,
+                    _ => String::new(),
+                }
+            };
             trace("run_app: project walked");
             outline
         });
@@ -2102,7 +2165,9 @@ async fn approve_project_mcp_servers(
     mcp: &flashagent_tools::mcp::McpManager,
     cwd: &std::path::Path,
 ) -> Vec<String> {
+    trace("main: reading the project's mcp servers");
     let servers = mcp.project_servers();
+    trace("main: project mcp servers read");
     if servers.is_empty() {
         return Vec::new();
     }
