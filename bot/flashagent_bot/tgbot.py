@@ -46,6 +46,8 @@ from .util import (
     lang_hint,
     parse_dedup_decision,
     parse_issue_sentinel,
+    plain_text,
+    sanitize_tg_html,
     search_keywords,
     split_reply,
 )
@@ -312,19 +314,19 @@ class App:
         the member's message; the rest follow plainly — in forum groups the
         reply also lands the answer in the right topic."""
         assert self.bot is not None
-        for i, part in enumerate(split_reply(escape_html(text))):
+        for i, part in enumerate(split_reply(text)):
             try:
                 if i == 0 and reply_to is not None:
                     await self.bot.send_message(
                         chat_id,
-                        part,
+                        sanitize_tg_html(part),
                         reply_parameters=ReplyParameters(message_id=reply_to.message_id),
                     )
                 else:
-                    await self.bot.send_message(chat_id, part)
+                    await self.bot.send_message(chat_id, sanitize_tg_html(part))
             except Exception:
                 # A stale reply target must not eat the answer.
-                await self.bot.send_message(chat_id, part)
+                await self.bot.send_message(chat_id, plain_text(part))
 
     async def _ask_approval(self, chat_id: int, what: str) -> None:
         assert self.bot is not None
@@ -541,13 +543,13 @@ class App:
             try:
                 msg = await self.bot.send_message(
                     chat_id,
-                    parts[0],
+                    sanitize_tg_html(parts[0]),
                     reply_parameters=ReplyParameters(message_id=target),
                 )
             except Exception:
                 # The member's message may be gone; the answer still lands.
                 try:
-                    msg = await self.bot.send_message(chat_id, escape_html(parts[0]))
+                    msg = await self.bot.send_message(chat_id, plain_text(parts[0]))
                 except Exception:
                     log.exception("reply to msg:%s failed", target)
                     return False
@@ -555,12 +557,13 @@ class App:
             slot_id = msg.message_id
         else:
             try:
-                await self.bot.edit_message_text(parts[0], chat_id=chat_id, message_id=slot_id)
+                await self.bot.edit_message_text(sanitize_tg_html(parts[0]), chat_id=chat_id, message_id=slot_id)
             except Exception:
-                # The brain's HTML did not pass the parser: unformatted, same place.
+                # The brain's markup did not pass the parser even sanitized:
+                # plain text, same place, no literal tags.
                 try:
                     await self.bot.edit_message_text(
-                        escape_html(parts[0]), chat_id=chat_id, message_id=slot_id
+                        plain_text(parts[0]), chat_id=chat_id, message_id=slot_id
                     )
                 except Exception:
                     log.exception("edit reply to msg:%s failed", target)
@@ -569,9 +572,9 @@ class App:
         self._save_delivered()
         for part in parts[1:]:
             try:
-                await self.bot.send_message(chat_id, part)
+                await self.bot.send_message(chat_id, sanitize_tg_html(part))
             except Exception:
-                await self.bot.send_message(chat_id, escape_html(part))
+                await self.bot.send_message(chat_id, plain_text(part))
         return True
 
     async def _deliver_text(self, chat_id: int, status: Message, text: str) -> None:
@@ -580,18 +583,18 @@ class App:
         assert self.bot is not None
         parts = split_reply(text)
         try:
-            await status.edit_text(parts[0])
+            await status.edit_text(sanitize_tg_html(parts[0]))
         except Exception:
             try:
-                await status.edit_text(escape_html(parts[0]))
+                await status.edit_text(plain_text(parts[0]))
             except Exception:
                 log.exception("final edit failed")
                 return
         for part in parts[1:]:
             try:
-                await self.bot.send_message(chat_id, part)
+                await self.bot.send_message(chat_id, sanitize_tg_html(part))
             except Exception:
-                await self.bot.send_message(chat_id, escape_html(part))
+                await self.bot.send_message(chat_id, plain_text(part))
 
     async def _steer(
         self, st: RoomState, prompt: str, chat_id: int, reply_to: Message | None

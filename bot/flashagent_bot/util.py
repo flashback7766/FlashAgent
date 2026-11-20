@@ -2,9 +2,37 @@
 
 from __future__ import annotations
 
+import re
+
 
 def escape_html(text: str) -> str:
     return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+
+_ALLOWED_TAGS = {"b", "i", "u", "s", "code", "pre"}
+_TAG_RE = re.compile(r"&lt;(/?)([a-zA-Z][a-zA-Z0-9]*)((?:\s[^&<>]*?)?)&gt;")
+
+
+def sanitize_tg_html(text: str) -> str:
+    """The model writes Telegram HTML and likes to slip in a stray '<', and
+    Telegram rejects the whole message for one bad tag. Escape everything,
+    then let back only the handful of tags Telegram renders — an unknown or
+    unparseable tag becomes plain text instead of a failed send."""
+    escaped = escape_html(text)
+
+    def restore(m: "re.Match[str]") -> str:
+        slash, name, attrs = m.group(1), m.group(2).lower(), m.group(3)
+        if name in _ALLOWED_TAGS:
+            return f"<{slash}{name}{attrs}>"
+        return ""  # a tag Telegram does not render: drop it, keep the text
+
+    return _TAG_RE.sub(restore, escaped)
+
+
+def plain_text(text: str) -> str:
+    """The message with every tag stripped and escaped — the fallback when
+    even the sanitized markup does not parse: readable, no literal junk."""
+    return escape_html(re.sub(r"<[^>]*>", "", text))
 
 
 def split_reply(text: str, limit: int = 3900) -> list[str]:

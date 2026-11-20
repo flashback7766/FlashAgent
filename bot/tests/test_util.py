@@ -65,3 +65,25 @@ def test_real_answers_are_not_stubs():
     assert is_stub_reply(".")
     assert is_stub_reply("—")
     assert is_stub_reply("   ")
+
+
+def test_sanitizer_keeps_allowed_tags_and_drops_the_rest():
+    from flashagent_bot.util import plain_text, sanitize_tg_html
+    text = "<b>flashagent</b> на хосте <pre>ok</pre> путь <div>мусор</div>"
+    out = sanitize_tg_html(text)
+    assert "<b>flashagent</b>" in out and "<pre>ok</pre>" in out
+    assert "<div>" not in out and "мусор" in out
+
+
+def test_sanitizer_neutralizes_stray_angle_brackets():
+    from flashagent_bot.util import sanitize_tg_html
+    out = sanitize_tg_html("a < b и <незакрытый тег")
+    assert "&lt;" in out  # nothing for Telegram to reject
+    assert "<незакрытый" not in out
+
+
+def test_plain_text_strips_tags_and_escapes():
+    from flashagent_bot.util import plain_text
+    out = plain_text("<b>bold</b> a<b <a href='x'>link</a>")
+    assert "bold" in out and "link" in out
+    assert "<" not in out
