@@ -3,6 +3,7 @@
 
 use std::io::IsTerminal;
 use std::sync::atomic::{AtomicBool, Ordering};
+use futures::FutureExt;
 use std::sync::Arc;
 
 use anyhow::Result;
@@ -739,7 +740,13 @@ async fn run_terminal(ctx: AppContext) -> Result<()> {
     );
     enable_enhanced_keys();
     trace("run_terminal: alternate screen");
-    let result = run_app(ctx).await;
+    // A panic must not leave the terminal in the alternate screen. The restore
+    // below waits after an await that an unwind never reaches, and a process
+    // dying inside the alt screen leaves the person a blank terminal with no
+    // message, no shell and no way to tell a crash from a hang. The unwind is
+    // caught, the screen is put back, and the panic goes on to print its own
+    // message on the normal screen.
+    let result = std::panic::AssertUnwindSafe(run_app(ctx)).catch_unwind().await;
     trace("run_terminal: app returned");
 
     flashagent_tui::screen::set_progress(flashagent_tui::screen::Progress::None);
@@ -754,6 +761,10 @@ async fn run_terminal(ctx: AppContext) -> Result<()> {
         LeaveAlternateScreen
     );
     disable_raw_mode()?;
+    let result = match result {
+        Ok(result) => result,
+        Err(payload) => std::panic::resume_unwind(payload),
+    };
     match result {
         Ok(Some(Ok(ref saved_id))) => {
             let (term_w, _) = crossterm::terminal::size().unwrap_or((80, 24));
