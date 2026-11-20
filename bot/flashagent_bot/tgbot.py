@@ -42,6 +42,7 @@ from .posts import parse_series
 from .usage import UsageStore
 from .util import (
     escape_html,
+    is_stub_reply,
     lang_hint,
     parse_dedup_decision,
     parse_issue_sentinel,
@@ -486,10 +487,10 @@ class App:
     ) -> bool:
         """One message per target prompt: the first chat_reply creates it
         as a reply to the member's message, the next ones edit it. Returns
-        False for stubs — a "." is not an answer, and the final text will
-        cover the prompt instead."""
+        False for stubs — a "." or the tool's own echoed result is not an
+        answer, and the final text will cover the prompt instead."""
         assert self.bot is not None
-        if not text.strip() or text.strip() in {".", "…", "-", "—", "•"}:
+        if is_stub_reply(text):
             return False
         parts = split_reply(text)
         slot_id = st.slots.get(target)

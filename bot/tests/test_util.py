@@ -46,3 +46,22 @@ def test_russian_gets_no_hint():
 def test_short_latin_is_ignored():
     # a mention or a filename must not flip the whole answer to English
     assert lang_hint("а что с main.rs?") == ""
+
+
+from flashagent_bot.util import is_stub_reply
+
+
+def test_tool_result_echo_is_a_stub():
+    # The model echoes the chat_reply tool result back as a "reply" — the
+    # one text a slot must never be replaced by.
+    assert is_stub_reply("Reply sent to msg:163.")
+    assert is_stub_reply("Replied to msg:42.")
+    assert is_stub_reply("reply sent to msg:7")
+
+
+def test_real_answers_are_not_stubs():
+    assert not is_stub_reply("Alive and hooked up — give me a task.")
+    assert not is_stub_reply("Сделал: склонировал репо в brain/rx-playa.")
+    assert is_stub_reply(".")
+    assert is_stub_reply("—")
+    assert is_stub_reply("   ")

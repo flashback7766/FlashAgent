@@ -44,6 +44,25 @@ def lang_hint(text: str) -> str:
 
 ISSUE_PREFIX = "ISSUE:"
 
+_ECHO_RE = None
+
+
+def is_stub_reply(text: str) -> bool:
+    """A chat_reply that says nothing: bare punctuation, or the tool's own
+    result echoed back by the model ("Reply sent to msg:163." as a reply —
+    the one thing a slot must never be replaced by)."""
+    global _ECHO_RE
+    stripped = (text or "").strip().strip("*_`")
+    if not stripped or stripped in {".", "…", "-", "—", "•"}:
+        return True
+    if _ECHO_RE is None:
+        import re
+
+        _ECHO_RE = re.compile(
+            r"^(?:reply sent to|replied to|sent to)\s+msg:\d+\.?$", re.IGNORECASE
+        )
+    return bool(_ECHO_RE.match(stripped))
+
 
 def parse_issue_sentinel(text: str) -> tuple[str, str | None]:
     """The users' brain ends a report discussion it considers clear with a
