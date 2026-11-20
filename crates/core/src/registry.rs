@@ -127,6 +127,9 @@ pub enum Handler {
     UserInteraction,
     Plan,
     Memory,
+    /// The chat this session serves: the headless mode's room. The tool only
+    /// exists when the host wired an outbox (serve does, the TUI does not).
+    ChatReply,
     Agent,
     /// The old three names are kept for the subagent internals, which still
     /// execute one verb each; the app offers `agent` instead.
@@ -153,6 +156,7 @@ impl Handler {
             Handler::UserInteraction => "user_interaction",
             Handler::Plan => "plan",
             Handler::Memory => "memory",
+            Handler::ChatReply => "chat_reply",
             Handler::Agent => "agent",
             Handler::SpawnAgent => "spawn_agent",
             Handler::SendMessage => "send_message",
@@ -177,6 +181,9 @@ pub enum Availability {
     /// Only the conversation at the top: a subagent does not review the work
     /// that sent it, and a tool it can never call is a tool it will ask for.
     Parent,
+    /// Only when the host wired a chat outbox (`flashagent --serve` with the
+    /// bot's room on the other side): the tool posts into that chat.
+    Serve,
 }
 
 pub struct ToolDef {
@@ -600,6 +607,21 @@ pub static TOOLS: &[ToolDef] = &[
         availability: Availability::Core,
     },
     ToolDef {
+        name: "chat_reply",
+        description: "Send a reply to ONE message of the chat this session is serving. Answer every member's message with its own call: message_id is the msg:N number the message carries (the journal uses the same ids). Several members asked the same thing: send one reply and mention the rest with <a href=\"tg://user?id=...\">Name</a> links instead of repeating yourself. The text may use Telegram HTML (<b>, <a href>, <i>). Do not use this tool when the task asked for a plain-text answer (an internal decision, a summary, a digest).",
+        params: &[
+            int("message_id", "The msg:N id of the message this reply answers"),
+            s("text", "The reply text; Telegram HTML is allowed"),
+        ],
+        required: &["message_id", "text"],
+        has_header: true,
+        handler: Handler::ChatReply,
+        category: Category::Read,
+        touches: Touches::Nothing,
+        preview: Preview::None,
+        availability: Availability::Serve,
+    },
+    ToolDef {
         name: "agent",
         description: "Work with subagents in one place: action spawn starts a self-contained agent and returns an agent_id; message writes to a running agent or to the parent; review records what you checked in a report before acting on it. A researcher or reviewer cannot write files or run commands; never guess a report that has not arrived.",
         params: &[AGENT_ACTION, AGENT_ROLE, AGENT_TASK, AGENT_STEPS, AGENT_TIMEOUT, AGENT_TO, AGENT_MESSAGE, AGENT_ID, AGENT_VERDICT, AGENT_NOTE],
@@ -692,13 +714,14 @@ pub fn find(name: &str) -> Option<&'static ToolDef> {
 /// settings. `core` is false for a window too small for the longer schemas: a
 /// compact window gets the ten tools a short task needs and nothing else, so
 /// the web and vision tools wait with the rest of the extended set.
-pub fn offered(def: &ToolDef, core: bool, vision: bool, web: bool, parent: bool) -> bool {
+pub fn offered(def: &ToolDef, core: bool, vision: bool, web: bool, parent: bool, serve: bool) -> bool {
     match def.availability {
         Availability::Always => true,
         Availability::Core => core,
         Availability::Vision => core && vision,
         Availability::Web => core && web,
         Availability::Parent => parent,
+        Availability::Serve => serve,
     }
 }
 
