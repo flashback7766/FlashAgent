@@ -56,8 +56,10 @@ RETRIES = 2  # automatic restarts after a failed turn
 EDIT_THROTTLE = 2.0  # seconds between stage-note edits
 ECONOMY_PER_HOUR = 5  # user turns per hour once the daily cap is hit
 BREVITY = (
-    "\n\n(Ответь кратко и по делу: Telegram не принимает сообщения"
-    " длиннее 4096 символов.)"
+    "\n\n(Без преамбул и рекапов: не пересказывай состояние проекта, что ты"
+    " делал в прошлых ходах и что лежит в папках — сразу ответ на вопрос,"
+    " кратко и по делу. Telegram не принимает сообщения длиннее 4096"
+    " символов.)"
 )
 
 ROOM_CONTEXT = {
