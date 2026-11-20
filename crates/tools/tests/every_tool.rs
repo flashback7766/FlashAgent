@@ -18,6 +18,8 @@ struct Project {
     dir: PathBuf,
     /// Shared: the subagent factory hands the same tools to every child.
     tools: Arc<BuiltinTools>,
+    /// The chat outbox behind `chat_reply`, recorded instead of sent.
+    sent: Arc<std::sync::Mutex<Vec<(i64, String)>>>,
 }
 
 impl Project {
@@ -40,19 +42,24 @@ impl Project {
         let home = dir.join("home");
         std::fs::create_dir_all(&home).unwrap();
 
+        let sent: Arc<std::sync::Mutex<Vec<(i64, String)>>> = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let outbox = sent.clone();
         let tools = Arc::new(
             BuiltinTools::new(BuiltinToolsConfig {
                 cwd: dir.clone(),
                 web_enabled: Some(true),
                 context_window: Some(200_000),
                 home: Some(home),
+                reply_outbox: Some(Arc::new(move |id: i64, text: &str| {
+                    outbox.lock().unwrap().push((id, text.to_string()));
+                })),
                 ..Default::default()
             })
             .unwrap(),
         );
         // `view_image` needs vision on. `/goal` stays off: it removes the memory tools.
         tools.set_vision_supported(true);
-        Project { dir, tools }
+        Project { dir, tools, sent }
     }
 
     /// Requires success.
@@ -133,6 +140,7 @@ fn really_invoked() -> BTreeSet<String> {
         "memory",
         "user_interaction",
         "plan",
+        "chat_reply",
         "agent",
     ]
     .iter()
@@ -238,6 +246,24 @@ async fn a_tool_added_to_the_registry_is_covered_without_being_written_down_twic
         flashagent_core::registry::TOOLS.len() > 15,
         "the registry is the list, not an afterthought: {}",
         flashagent_core::registry::TOOLS.len()
+    );
+}
+
+#[tokio::test]
+async fn a_chat_reply_flies_out_through_the_outbox() {
+    // The model's per-message answer: one call, one outbox entry with the
+    // msg id it answers — what the serve turns into a Telegram reply.
+    let project = Project::new();
+    let out = project
+        .call(
+            "chat_reply",
+            serde_json::json!({"message_id": 42, "text": "держи"}),
+        )
+        .await;
+    assert!(out.contains("msg:42"), "{out}");
+    assert_eq!(
+        *project.sent.lock().unwrap(),
+        vec![(42, "держи".to_string())]
     );
 }
 

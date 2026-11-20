@@ -80,6 +80,10 @@ fn truncate_output(mut text: String) -> String {
     text
 }
 
+/// Where a `chat_reply` goes: the host (serve) turns one call into one chat
+/// message the bot relays as a reply to that member. The TUI has none.
+pub type ReplyOutbox = std::sync::Arc<dyn Fn(i64, &str) + Send + Sync>;
+
 #[derive(Default)]
 pub struct BuiltinToolsConfig {
     /// For all filesystem tools and the shell.
@@ -99,6 +103,10 @@ pub struct BuiltinToolsConfig {
     /// Where `~` and the memory stores point. `None` reads HOME; a test sets
     /// it so no memory is written into the owner's home directory.
     pub home: Option<PathBuf>,
+    /// The chat outbox: set by `--serve`, whose bot relays each call to the
+    /// room as a reply to one member's message. `None` leaves `chat_reply`
+    /// off the toolset entirely — a terminal session has no chat to talk to.
+    pub reply_outbox: Option<ReplyOutbox>,
 }
 
 /// What a tool answered: text for the model, or a picture.
@@ -196,6 +204,8 @@ pub struct BuiltinTools {
     /// The tools that are off. Shared with the app, so the switch takes effect
     /// in the conversation that is running.
     disabled: Arc<std::sync::RwLock<Vec<String>>>,
+    /// The chat outbox behind `chat_reply`; `None` keeps the tool unoffered.
+    reply_outbox: Option<ReplyOutbox>,
     /// The measured tool list. Measuring it means tokenizing every schema,
     /// and the list is asked for on every tool call.
     specs_cache: parking_lot::Mutex<Option<SpecsCache>>,
@@ -229,6 +239,7 @@ impl BuiltinTools {
             vision_supported: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             mcp_manager,
             disabled: Arc::new(std::sync::RwLock::new(config.disabled_tools.unwrap_or_default())),
+            reply_outbox: config.reply_outbox,
             specs_cache: parking_lot::Mutex::new(None),
             #[cfg(test)]
             specs_measured: std::sync::atomic::AtomicUsize::new(0),
@@ -345,8 +356,9 @@ impl BuiltinTools {
                 )
             })
             // `BuiltinTools` is what a subagent is given, so the parent-only
-            // tools are not offered from here.
-            .filter(|def| registry::offered(def, core, vision, web, false))
+            // tools are not offered from here. The chat outbox makes
+            // `chat_reply` real; without it the tool is not on the table.
+            .filter(|def| registry::offered(def, core, vision, web, false, self.reply_outbox.is_some()))
             // A tool the owner has switched off is not on the table at all.
             .filter(|def| !self.tool_disabled(def.name))
             .map(|def| ToolSpec {
@@ -563,6 +575,14 @@ impl BuiltinTools {
                 .map(Answer::Text)
             }
             Handler::Plan => plan_tool::run_plan(&call.args_json).map(Answer::Text),
+            Handler::ChatReply => {
+                let outbox = self.reply_outbox.as_ref().ok_or_else(|| {
+                    ToolError::Other("chat_reply is not available here: nothing serves a chat".into())
+                })?;
+                let a: ChatReplyArgs = parse_args(&call.args_json, &call.name)?;
+                (outbox)(a.message_id, &a.text);
+                Ok(Answer::Text(format!("Reply sent to msg:{}.", a.message_id)))
+            }
             Handler::Memory => {
                 let a: memory_tools::MemoryArgs = parse_args(&call.args_json, &call.name)?;
                 memory_tools::memory(&self.cwd, self.home.as_deref(), &self.is_goal_mode, a).map(Answer::Text)
@@ -913,6 +933,12 @@ struct WebArgs {
 }
 
 #[derive(Deserialize)]
+struct ChatReplyArgs {
+    message_id: i64,
+    text: String,
+}
+
+#[derive(Deserialize)]
 struct HttpRequestArgs {
     method: Option<String>,
     url: String,
@@ -983,6 +1009,49 @@ mod tests {
         let diff = tools.preview_for(&call).expect("a preview");
         assert!(diff.contains("--- a/main.rs") && diff.contains("+++ b/main.rs"), "{diff}");
         assert!(!diff.contains("a//"), "{diff}");
+    }
+    #[tokio::test]
+    async fn a_chat_reply_lands_in_the_outbox_and_the_toolset() {
+        let dir = testing::tempdir();
+        let sent = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let keep = sent.clone();
+        let tools = BuiltinTools::new(BuiltinToolsConfig {
+            cwd: dir.clone(),
+            reply_outbox: Some(Arc::new(move |id: i64, text: &str| {
+                keep.lock().unwrap().push((id, text.to_string()));
+            })),
+            ..Default::default()
+        })
+        .expect("tools");
+        // With the outbox wired the tool is on the table.
+        assert!(tools.specs().iter().any(|s| s.name == "chat_reply"), "offered");
+        let out = tools
+            .execute(&batch_call(
+                "chat_reply",
+                serde_json::json!({"message_id": 42, "text": "держи"}),
+            ))
+            .await;
+        assert!(!out.is_error, "{}", out.content);
+        assert!(out.content.contains("msg:42"), "{}", out.content);
+        assert_eq!(*sent.lock().unwrap(), vec![(42, "держи".to_string())]);
+    }
+    #[tokio::test]
+    async fn chat_reply_without_an_outbox_is_not_offered_and_refused() {
+        let dir = testing::tempdir();
+        let tools = BuiltinTools::new(BuiltinToolsConfig {
+            cwd: dir,
+            ..Default::default()
+        })
+        .expect("tools");
+        assert!(!tools.specs().iter().any(|s| s.name == "chat_reply"), "not offered");
+        let out = tools
+            .execute(&batch_call(
+                "chat_reply",
+                serde_json::json!({"message_id": 7, "text": "привет"}),
+            ))
+            .await;
+        assert!(out.is_error, "{}", out.content);
+        assert!(out.content.contains("not available"), "{}", out.content);
     }
     #[test]
     fn edit_file_approval_card_gets_a_diff() {

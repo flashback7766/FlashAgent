@@ -630,6 +630,7 @@ pub(crate) async fn run_serve(mut config: flashagent_core::AppConfig, opts: Serv
     let remote =
         flashagent_core::url_host(&endpoint.url).is_some_and(|host| !flashagent_core::is_local_host(&host));
     let model = config.active_profile().model.clone();
+    let state: SharedState = Arc::new(Mutex::new(ServeState::default()));
     let source = Arc::new(crate::backend::BackendSource(flashagent_llm::Client::new(endpoint.clone(), "")));
     source.0.set_max_retries(config.network_retries);
     source.0.set_session_id(crate::sessions::new_session_id());
@@ -682,10 +683,23 @@ pub(crate) async fn run_serve(mut config: flashagent_core::AppConfig, opts: Serv
         mcp_manager: mcp.clone(),
         disabled_tools: Some(config.disabled_tools.clone()),
         home: None,
+        // The bot's room is the chat this session serves: every `chat_reply`
+        // call lands in the feed as a `reply` event, and the bot posts it as
+        // a Telegram reply to that exact message.
+        reply_outbox: {
+            let state = state.clone();
+            Some(Arc::new(move |message_id: i64, text: &str| {
+                let mut st = state.lock().expect("serve state");
+                st.events.push(serde_json::json!({
+                    "type": "reply",
+                    "message_id": message_id,
+                    "text": text,
+                }));
+            }) as flashagent_tools::ReplyOutbox)
+        },
     })?);
     trace("serve: tools ready");
 
-    let state: SharedState = Arc::new(Mutex::new(ServeState::default()));
     let gate = Arc::new(ServeGate {
         state: state.clone(),
         responders: Mutex::new(Vec::new()),
@@ -927,6 +941,30 @@ mod tests {
             turn_path(&state, "го"),
             TurnPath::BusyWithoutChannel
         ));
+    }
+
+    #[test]
+    fn the_chat_reply_outbox_pushes_into_the_feed() {
+        let state: SharedState = Arc::new(Mutex::new(ServeState::default()));
+        // The closure run_serve hands BuiltinTools: one call, one feed entry
+        // the bot polls and turns into a Telegram reply.
+        let push = {
+            let state = state.clone();
+            Arc::new(move |message_id: i64, text: &str| {
+                let mut st = state.lock().expect("serve state");
+                st.events.push(serde_json::json!({
+                    "type": "reply",
+                    "message_id": message_id,
+                    "text": text,
+                }));
+            })
+        };
+        push(42, "держи");
+        let st = state.lock().unwrap();
+        assert_eq!(st.events.len(), 1);
+        assert_eq!(st.events[0]["type"], "reply");
+        assert_eq!(st.events[0]["message_id"], 42);
+        assert_eq!(st.events[0]["text"], "держи");
     }
 
     #[test]

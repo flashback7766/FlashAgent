@@ -25,16 +25,20 @@ class Journal:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._prune()
 
-    def append(self, who: str, text: str, kind: str = "msg") -> None:
-        line = json.dumps(
-            {
-                "ts": datetime.now(timezone.utc).isoformat(timespec="seconds"),
-                "who": who,
-                "text": text,
-                "kind": kind,
-            },
-            ensure_ascii=False,
-        )
+    def append(
+        self, who: str, text: str, kind: str = "msg", msg_id: int | None = None
+    ) -> None:
+        rec = {
+            "ts": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            "who": who,
+            "text": text,
+            "kind": kind,
+        }
+        if msg_id is not None:
+            # The msg:N the model answers with chat_reply; the journal is
+            # where the pulse finds its targets.
+            rec["id"] = msg_id
+        line = json.dumps(rec, ensure_ascii=False)
         with open(self.path, "a", encoding="utf-8") as f:
             f.write(line + "\n")
         self.count += 1

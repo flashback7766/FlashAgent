@@ -1690,10 +1690,14 @@ mod tests {
     #[test]
     fn the_parent_only_tools_are_not_offered_to_a_child() {
         let review = crate::registry::find("review_agent").expect("declared");
-        assert!(crate::registry::offered(review, true, true, true, true), "the parent has it");
-        assert!(!crate::registry::offered(review, true, true, true, false), "a child must not");
+        assert!(crate::registry::offered(review, true, true, true, true, false), "the parent has it");
+        assert!(!crate::registry::offered(review, true, true, true, false, false), "a child must not");
         let talk = crate::registry::find("send_message").expect("declared");
-        assert!(crate::registry::offered(talk, true, true, true, false), "a child has it too");
+        assert!(crate::registry::offered(talk, true, true, true, false, false), "a child has it too");
+        // The chat reply only exists when a chat is being served at all.
+        let reply = crate::registry::find("chat_reply").expect("declared");
+        assert!(!crate::registry::offered(reply, true, true, true, true, false), "no chat, no reply");
+        assert!(crate::registry::offered(reply, true, true, true, true, true), "serve has it");
     }
 
     /// A child whose own work panics never reaches the line that reports it. It

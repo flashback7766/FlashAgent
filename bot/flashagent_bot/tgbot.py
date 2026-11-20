@@ -203,7 +203,14 @@ class App:
         name = u.first_name or u.username or "member"
         full = f"{name} (@{u.username})" if u.username else name
         role = "admin" if self.is_admin(u.id) else "member"
-        return f"[{role}] {full}"
+        # The numeric id is what a tg://user?id= mention link is built from —
+        # the way the model tags a member who has no @username.
+        return f"[{role}] {full} (id:{u.id})"
+
+    def _msg(self, message: Message) -> str:
+        """The msg:N tag every turn prompt carries: the model's chat_reply
+        answers this exact message, and the journal stores the same id."""
+        return f"msg:{message.message_id} {self._who(message)}"
 
     def _addressed(self, st: RoomState, message: Message) -> bool:
         """A reply to the bot, an @mention, or a command that slipped here."""
@@ -275,16 +282,18 @@ class App:
         prompt: str,
         chat_id: int,
         reply_to: Message | None = None,
-    ) -> str | None:
+    ) -> tuple[str | None, int]:
         """One turn against the room's brain. The stage note is edited as
-        tools run, the finished answer goes out in chunks. Returns the
-        final text (the pulse greps it for SKIP) or None on failure.
+        tools run, `chat_reply` events go out as Telegram replies the moment
+        they arrive. Returns (final text, replies sent): the final text is
+        what the brain wrote at the end — when replies already covered the
+        turn, the caller keeps it for the log and the sentinel, not the room.
         When the brain is already thinking, the prompt flies into the
         running turn as a steer instead of queueing behind it."""
         assert self.bot is not None and self.http is not None and st.brain is not None
         if st.busy:
             await self._steer(st, prompt, chat_id, reply_to)
-            return None
+            return (None, 0)
         st.busy = True
         note = await self.bot.send_message(
             chat_id,
@@ -295,15 +304,15 @@ class App:
         )
         answer: list[str] = []
         tokens = [0, 0]
+        replies = 0
         last_edit = 0.0
         typing_at = 0.0
         poll_errors = 0
-        result: str | None = None
         try:
             err = await st.brain.start_turn(self.http, prompt)
             if err:
                 await note.edit_text(f"⚠️ {escape_html(err)}")
-                return None
+                return (None, replies)
             retries = 0
             while True:
                 await asyncio.sleep(POLL_SECONDS)
@@ -325,6 +334,11 @@ class App:
                 for ev in events:
                     if ev.type == "text":
                         answer.append(ev.text)
+                    elif ev.type == "reply":
+                        # Live: the room sees each answer as the model calls
+                        # it, not one wall of text at the end.
+                        replies += 1
+                        await self._send_reply(chat_id, ev.message_id, ev.text)
                     elif ev.type == "tool":
                         now = time.monotonic()
                         if now - last_edit > EDIT_THROTTLE:
@@ -351,13 +365,13 @@ class App:
                             err = await st.brain.start_turn(self.http, prompt)
                             if err:
                                 await note.edit_text(f"⚠️ повтор не вышел: {escape_html(err)}")
-                                return None
+                                return (None, replies)
                             break
                         try:
                             await note.edit_text(f"⚠️ ход не удался: {escape_html(ev.text)}")
                         except Exception:
                             pass
-                        return None
+                        return (None, replies)
                 else:
                     if any(ev.type == "done" for ev in events):
                         break
@@ -373,7 +387,31 @@ class App:
                 pass
         result = "".join(answer).strip()
         self._maybe_warn_budget(chat_id)
-        return result or None
+        if replies and result:
+            # The replies covered the turn; the final text is for the log
+            # and the sentinel parser, not another wall in the room.
+            log.info("turn covered by %d reply(ies); final kept: %s", replies, result[:200])
+            return (None, replies)
+        return (result or None, replies)
+
+    async def _send_reply(self, chat_id: int, message_id: int, text: str) -> None:
+        assert self.bot is not None
+        for i, part in enumerate(split_reply(text)):
+            try:
+                await self.bot.send_message(
+                    chat_id,
+                    part,
+                    reply_parameters=ReplyParameters(message_id=message_id)
+                    if i == 0
+                    else None,
+                )
+            except Exception:
+                # The member's message may be gone, or the brain's HTML did
+                # not pass the parser: the answer still lands, unformatted.
+                try:
+                    await self.bot.send_message(chat_id, escape_html(part))
+                except Exception:
+                    log.exception("reply to msg:%s failed", message_id)
 
     async def _steer(
         self, st: RoomState, prompt: str, chat_id: int, reply_to: Message | None
@@ -413,10 +451,10 @@ class App:
         if not question:
             await message.answer("как пользоваться: /ask <вопрос>")
             return
-        prompt = f"{self._who(message)} спрашивает в группе: {question}{lang_hint(question)}{BREVITY}"
-        text = await self._run_turn(st, prompt, message.chat.id, reply_to=message)
+        prompt = f"{self._msg(message)} спрашивает в группе: {question}{lang_hint(question)}{BREVITY}"
+        text, replies = await self._run_turn(st, prompt, message.chat.id, reply_to=message)
         if text:
-            await self._say(message.chat.id, text, reply_to=message)
+            await self._answer_room(st, text, message.chat.id, message, replies)
 
     async def cmd_remember(self, message: Message, command: CommandObject) -> None:
         st = self.state_by_chat(message.chat.id)
@@ -426,10 +464,10 @@ class App:
         if not fact:
             await message.answer("как пользоваться: /remember <факт>")
             return
-        prompt = f"Запиши в валт памяти проекта: {fact}"
-        text = await self._run_turn(st, prompt, message.chat.id, reply_to=message)
+        prompt = f"{self._msg(message)} просит: запиши в валт памяти проекта: {fact}"
+        text, replies = await self._run_turn(st, prompt, message.chat.id, reply_to=message)
         if text:
-            await self._say(message.chat.id, text, reply_to=message)
+            await self._answer_room(st, text, message.chat.id, message, replies)
 
     async def cmd_post(self, message: Message, command: CommandObject) -> None:
         st = self.state_by_chat(message.chat.id)
@@ -442,13 +480,15 @@ class App:
             await message.answer("как пользоваться: /post <о чём пост>")
             return
         prompt = self._post_prompt(st, f"Тема поста: {topic}")
-        text = await self._run_turn(st, prompt, message.chat.id, reply_to=message)
+        text, _ = await self._run_turn(st, prompt, message.chat.id, reply_to=message)
         if text:
             await self._show_draft(st, text)
 
     def _post_prompt(self, st: RoomState, what: str) -> str:
         return (
-            f"{what}. Напиши готовый пост в Telegram-канал проекта. Контекст —"
+            "Не используй тул chat_reply — пост уходит по своему пайплайну,"
+            " ответь готовым текстом."
+            f" {what}. Напиши готовый пост в Telegram-канал проекта. Контекст —"
             f" журнал дев-комнаты {st.room.journal} (свежие строки). Живой"
             " разговорный тон, уместные эмодзи, HTML-разметка (<b>жирный</b>,"
             " <a href=\"...\">ссылки</a>). Кратко: до 3500 символов. В ответе"
@@ -616,7 +656,7 @@ class App:
             return
         who = self._who(message)
         if st.journal is not None:
-            st.journal.append(who, report, kind="report")
+            st.journal.append(who, report, kind="report", msg_id=message.message_id)
         if not self.is_admin(message.from_user.id if message.from_user else None):
             verdict, secs = self.limiter.check(
                 message.from_user.id,
@@ -629,15 +669,17 @@ class App:
                 await message.answer(f"⏳ лимит {self.cfg.requests_per_hour}/час, репорт приму через {int(secs // 60) + 1} мин")
                 return
         prompt = (
-            f"Пришёл репорт от {who}: «{report}». Разберись: задай уточняющие"
-            " вопросы, если что-то неясно (шаги, логи, скриншоты). Когда"
-            " картина ясна — проблема понятна, детали собраны — закончи ответ"
-            " строкой ровно вида ISSUE: <короткий заголовок>, и issue будет"
-            " заведён. Отвечай кратко."
+            f"msg:{message.message_id} Пришёл репорт от {who}: «{report}»."
+            " Разберись: задай уточняющие вопросы, если что-то неясно (шаги,"
+            " логи, скриншоты) — каждый свой ответ посылай тула chat_reply"
+            " на это сообщение. Когда картина ясна — проблема понятна, детали"
+            " собраны — закончи ответ строкой ровно вида"
+            " ISSUE: <короткий заголовок>, и issue будет заведён. Отвечай"
+            " кратко."
         )
-        text = await self._run_turn(st, prompt, message.chat.id, reply_to=message)
+        text, replies = await self._run_turn(st, prompt, message.chat.id, reply_to=message)
         if text:
-            await self._answer_room(st, text, message.chat.id, reply_to=message)
+            await self._answer_room(st, text, message.chat.id, message, replies)
 
     async def cmd_digest(self, message: Message) -> None:
         st = self.state_by_chat(message.chat.id)
@@ -655,14 +697,15 @@ class App:
             return
         path = Path(users.room.serve.dir) / users.room.journal
         prompt = (
-            f"Сделай сводку репортов юзеров: прочитай {path} (свежие строки),"
-            " собери баги и идеи по темам, отметь, что стоит завести в issues."
-            " Кратко, без воды."
+            "Не используй тул chat_reply — это внутренняя сводка, ответь"
+            f" обычным текстом. Сделай сводку репортов юзеров: прочитай {path}"
+            " (свежие строки), собери баги и идеи по темам, отметь, что стоит"
+            " завести в issues. Кратко, без воды."
         )
         dev = self.dev_state()
         if dev is None or dev.brain is None:
             return
-        text = await self._run_turn(dev, prompt, chat_id)
+        text, _ = await self._run_turn(dev, prompt, chat_id)
         if text:
             await self._say(chat_id, text)
 
@@ -686,7 +729,7 @@ class App:
             return
         who = self._who(message)
         if st.journal is not None:
-            st.journal.append(who, text)
+            st.journal.append(who, text, msg_id=message.message_id)
 
         user_id = message.from_user.id if message.from_user else None
         if room.kind == "users" and not self.is_admin(user_id):
@@ -723,26 +766,37 @@ class App:
                     " ответе — только сам пост."
                 )
                 await message.answer("✏️ переделываю…")
-                new_text = await self._run_turn(st, prompt, room.chat_id)
+                new_text, _ = await self._run_turn(st, prompt, room.chat_id)
                 if new_text:
                     await self._show_draft(st, new_text)
                 return
 
         if room.kind == "dev" and not self._addressed(st, message):
             return  # background chatter: journalled, not answered
-        prompt = f"{who}: {text}{lang_hint(text)}{BREVITY}"
-        text_out = await self._run_turn(st, prompt, message.chat.id, reply_to=message)
+        prompt = f"{self._msg(message)}: {text}{lang_hint(text)}{BREVITY}"
+        text_out, replies = await self._run_turn(st, prompt, message.chat.id, reply_to=message)
         if text_out:
-            await self._answer_room(st, text_out, message.chat.id, reply_to=message)
+            await self._answer_room(st, text_out, message.chat.id, message, replies)
 
     async def _answer_room(
-        self, st: RoomState, text: str, chat_id: int, reply_to: Message | None
+        self,
+        st: RoomState,
+        text: str,
+        chat_id: int,
+        reply_to: Message | None,
+        replies: int = 0,
     ) -> None:
         """Post a turn's answer and act on its sentinel. The `ISSUE:` line
-        is the brain's order to file, not something the room reads."""
+        is the brain's order to file, not something the room reads. When
+        the turn already spoke through chat_reply, the final text stays in
+        the log — the room got its per-message answers — but the sentinel
+        is still read from it."""
         assert self.bot is not None
         clean, issue_title = parse_issue_sentinel(text)
-        if clean:
+        if replies:
+            if clean:
+                log.info("final covered by replies, kept: %s", clean[:200])
+        elif clean:
             await self._say(chat_id, clean, reply_to=reply_to)
         if issue_title:
             if self.gh is None:
@@ -779,25 +833,27 @@ class App:
                     for c in candidates
                 )
                 prompt = (
-                    f"Юзер прислал проблему: «{title}». В репо есть открытые"
-                    f" issues:\n{listing}\nЕсли одно из них уже про то же"
-                    " самое — ответь ровно REPLY: <номер>. Если проблема"
-                    " новая — ответь ровно NEW."
+                    "Не используй тул chat_reply — это внутреннее решение,"
+                    " ответь обычным текстом. Юзер прислал проблему:"
+                    f" «{title}». В репо есть открытые issues:\n{listing}\n"
+                    "Если одно из них уже про то же самое — ответь ровно"
+                    " REPLY: <номер>. Если проблема новая — ответь ровно NEW."
                 )
-                decision = await self._run_turn(dev, prompt, dev.room.chat_id)
+                decision, _ = await self._run_turn(dev, prompt, dev.room.chat_id)
                 if decision:
                     target = parse_dedup_decision(decision)
             body_prompt = (
-                f"Напиши тело issue для GitHub по заголовку «{title}»."
-                " Контекст — последние сообщения юзер-комнаты:\n"
+                "Не используй тул chat_reply — это внутренний черновик,"
+                " ответь обычным текстом. Напиши тело issue для GitHub по"
+                f" заголовку «{title}». Контекст — последние сообщения"
+                " юзер-комнаты:\n"
                 + self._journal_tail(st, 30)
                 + "\nФормат: что происходит, шаги воспроизведения, ожидаемое"
                 " поведение, окружение (версия приложения, устройство, если"
                 " известно). Пиши по-русски, кратко и по делу."
             )
-            body = (
-                await self._run_turn(dev, body_prompt, dev.room.chat_id) or title
-            )
+            body, _ = await self._run_turn(dev, body_prompt, dev.room.chat_id)
+            body = body or title
             if target is not None:
                 url = await self.gh.comment(
                     self.http, target, f"{body}\n\n— дополнение из чата юзеров"
@@ -826,7 +882,9 @@ class App:
         rel = f"shots/{name}"
         who = self._who(message)
         if st.journal is not None:
-            st.journal.append(who, f"📷 скриншот: {rel}", kind="photo")
+            st.journal.append(
+                who, f"📷 скриншот: {rel}", kind="photo", msg_id=message.message_id
+            )
         await message.answer("📷 скрин сохранил — опиши словами, что не так")
 
     # ---------- callbacks ----------
@@ -880,13 +938,15 @@ class App:
         assert st.room.journal and st.brain is not None
         prompt = (
             "Периодический пульс: в группе прошла болтовня. Прочитай журнал"
-            f" {st.room.journal} (свежие строки) и реши, есть ли что сказать"
-            " по делу — незаданный вопрос, подсказка, предложение. Если есть,"
-            " скажи в 1–3 предложениях. Если сказать нечего — ответь ровно"
-            " одним словом SKIP."
+            f" {st.room.journal} (свежие строки; в каждой есть id сообщения)"
+            " и реши, есть ли что сказать по делу — незаданный вопрос,"
+            " подсказка, предложение. Если есть — ответь тула chat_reply на"
+            " конкретные сообщения (можно несколько вызовов). Если сказать"
+            " нечего — ответь ровно одним словом SKIP обычным текстом, без"
+            " тула."
         )
-        text = await self._run_turn(st, prompt, st.room.chat_id)
-        if text and text.strip().upper() != "SKIP":
+        text, replies = await self._run_turn(st, prompt, st.room.chat_id)
+        if not replies and text and text.strip().upper() != "SKIP":
             await self._say(st.room.chat_id, text.strip())
 
     async def _digest_loop(self) -> None:
@@ -946,7 +1006,7 @@ class App:
                         "Собери девлог за последнюю неделю: что делали (из"
                         " журнала дев-комнаты), что выкатили, что дальше.",
                     )
-                    text = await self._run_turn(st, prompt, st.room.chat_id)
+                    text, _ = await self._run_turn(st, prompt, st.room.chat_id)
                     if text:
                         await self._show_draft(st, text)
             except Exception:

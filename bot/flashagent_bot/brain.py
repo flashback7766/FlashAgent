@@ -21,6 +21,7 @@ class Event:
     prompt: int = 0
     completion: int = 0
     saved: int = 0
+    message_id: int = 0  # the msg:N a `reply` event answers
 
 
 class ServeClient:
@@ -82,6 +83,14 @@ class ServeClient:
             kind = str(ev.get("type", ""))
             if kind == "tool_start":
                 out.append(Event("tool", name=str(ev.get("name", ""))))
+            elif kind == "reply":
+                out.append(
+                    Event(
+                        "reply",
+                        text=str(ev.get("text", "")),
+                        message_id=int(ev.get("message_id", 0) or 0),
+                    )
+                )
             elif kind == "approval":
                 args = ev.get("args_json")
                 shown = args if isinstance(args, str) else ""

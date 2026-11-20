@@ -1256,7 +1256,7 @@ impl App {
                 name: def.name.to_string(),
                 description: first_sentence(def.description),
                 on: !off.iter().any(|n| n == def.name),
-                available: flashagent_core::registry::offered(def, core, vision, web, true),
+                available: flashagent_core::registry::offered(def, core, vision, web, true, false),
             })
             .collect();
         self.open_overlay(Overlay::Tools(ToolsView::new(rows)));

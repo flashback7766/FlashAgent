@@ -11,11 +11,13 @@ from flashagent_bot.journal import Journal
 def test_append_and_tail(tmp_path):
     j = Journal(tmp_path / "room.jsonl")
     j.append("alice", "привет")
-    j.append("bob", "привет, бот", kind="report")
+    j.append("bob", "привет, бот", kind="report", msg_id=42)
     recs = j.tail(10)
     assert [r["who"] for r in recs] == ["alice", "bob"]
     assert recs[1]["kind"] == "report"
     assert recs[1]["text"] == "привет, бот"
+    assert recs[1]["id"] == 42  # the msg:N the model answers with chat_reply
+    assert "id" not in recs[0]  # no message, no id
     assert j.count == 2
 
 

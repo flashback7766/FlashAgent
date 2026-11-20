@@ -720,6 +720,8 @@ async fn main() -> Result<()> {
         disabled_tools: Some(disabled_tools.clone()),
         // The real home: this is the app, not a test.
         home: None,
+        // The terminal has no chat to reply into; only `--serve` wires one.
+        reply_outbox: None,
     })?);
     trace("main: tools built");
     // A closed terminal window (SIGHUP) or a kill (SIGTERM) skips the normal
