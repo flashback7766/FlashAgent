@@ -3,6 +3,7 @@
 
 use std::io::IsTerminal;
 use std::sync::atomic::{AtomicBool, Ordering};
+use futures::FutureExt;
 use std::sync::Arc;
 
 use anyhow::Result;
@@ -30,6 +31,7 @@ use flashagent_tui::{
 };
 
 mod render;
+mod serve;
 mod tokens;
 mod backend;
 mod menus;
@@ -556,10 +558,33 @@ fn install_crash_hook(reports_enabled: bool) {
 
 }
 
+/// Set `FLASHAGENT_TRACE=1`: every start-up phase appends a line to
+/// `<home>/.flashagent/startup-trace.log`, stamped with the seconds since the
+/// process began. A start-up that hangs on a machine nobody can sit at is
+/// otherwise a blank screen with nothing to report. Off by default, and the
+/// check costs a getenv.
+pub(crate) fn trace(phase: &str) {
+    use std::io::Write as _;
+    use std::sync::OnceLock;
+    static START: OnceLock<std::time::Instant> = OnceLock::new();
+    if std::env::var_os("FLASHAGENT_TRACE").is_none() {
+        return;
+    }
+    let start = START.get_or_init(std::time::Instant::now);
+    let home = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")).unwrap_or_default();
+    let dir = std::path::PathBuf::from(home).join(".flashagent");
+    let _ = std::fs::create_dir_all(&dir);
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(dir.join("startup-trace.log")) {
+        let _ = writeln!(f, "{:>8.3}s  {phase}", start.elapsed().as_secs_f64());
+    }
+}
+
 #[tokio::main(flavor = "multi_thread", worker_threads = 4)]
 async fn main() -> Result<()> {
     flashagent_svc::updater::remove_stale_backups_beside_exe();
+    trace("main: start");
     let mut config = AppConfig::load();
+    trace("main: config loaded");
     // What the models were measured to be, from the runs before this one. A
     // model that was measured is not measured again: the server's own count
     // of its own words is what the counter learns from, and it is the same
@@ -567,11 +592,57 @@ async fn main() -> Result<()> {
     if let Some(path) = flashagent_llm::measurements_path() {
         flashagent_llm::load_measurements(&path);
     }
+    if std::env::args().any(|a| a == "--serve") {
+        let mut port = 8081u16;
+        let mut dir = None;
+        let mut prompt = None;
+        let mut mode = None;
+        let mut effort = None;
+        let mut context_cap = None;
+        let mut compact_at = None;
+        let mut args = std::env::args().skip(1).peekable();
+        while let Some(a) = args.next() {
+            match a.as_str() {
+                "--port" => port = args.next().and_then(|v| v.parse().ok()).unwrap_or(port),
+                "--dir" => dir = args.next().map(std::path::PathBuf::from),
+                // One server per deployment: the dev room gets the whole
+                // prompt, a report room runs on the compact one; the
+                // reasoning effort is the room's, not the config's.
+                "--prompt" => prompt = args.next(),
+                "--mode" => mode = args.next(),
+                "--effort" => effort = args.next(),
+                // A room's window can be smaller than the model's: the users'
+                // room runs 65k with compaction at 55k, so a long community
+                // day cannot blow the budget.
+                "--context-cap" => context_cap = args.next().and_then(|v| v.parse().ok()),
+                "--compact-at" => compact_at = args.next().and_then(|v| v.parse().ok()),
+                _ => {}
+            }
+        }
+        return crate::serve::run_serve(
+            config,
+            crate::serve::ServeOpts {
+                port,
+                dir,
+                prompt,
+                mode,
+                effort,
+                context_cap,
+                compact_at,
+            },
+        )
+        .await
+        .map(|_| ());
+    }
     let Some((force_setup, skip_trust, session_start)) = cli_start(&mut config).await? else { return Ok(()) };
+    trace("main: command line read");
 
     let Some(ran_setup) = startup_screens(&mut config, force_setup).await else { return Ok(()) };
+    trace("main: startup screens done");
+    trace("main: preparing the backend");
     let Some(BackendStartup { source, model, context_display, context_capacity, cwd_display, cwd, cwd_missing, initial_effort, available_models, first_run_verdict, pending_discovery }) =
         prepare_backend(&mut config, skip_trust, ran_setup).await? else { return Ok(()) };
+    trace("main: backend ready");
 
     // The interface language before anything renders; the system prompt is
     // not part of it. Set before the questions about MCP servers, which the
@@ -580,11 +651,33 @@ async fn main() -> Result<()> {
 
     let gate = TuiGate::new();
     let question_gate = TuiQuestionGate::new();
-    let mcp_manager = flashagent_tools::mcp::McpManager::new(cwd.clone());
+    trace("main: mcp manager");
+    // Reading a project's `.mcp.json` is two lookups in the working folder,
+    // and a folder can answer them for minutes (a backup dump of millions of
+    // entries, a disk that is failing). The lookups run behind a clock; a
+    // folder that cannot answer in two seconds answers with no MCP servers
+    // this session rather than with a blank screen.
+    let mcp_manager = {
+        let cwd = cwd.clone();
+        match tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            tokio::task::spawn_blocking(move || flashagent_tools::mcp::McpManager::new(cwd)),
+        )
+        .await
+        {
+            Ok(Ok(manager)) => manager,
+            _ => {
+                trace("main: the project folder did not answer; no mcp servers this session");
+                flashagent_tools::mcp::McpManager::new(std::env::temp_dir())
+            }
+        }
+    };
+    trace("main: mcp manager ready");
     // A project's `.mcp.json` can start a program, so the owner is asked
     // before it runs. The answer is remembered, unless the safe mode is on:
     // there, nothing runs without a question every time.
     let allowed = approve_project_mcp_servers(&mut config, &mcp_manager, &cwd).await;
+    trace("main: mcp servers answered");
     mcp_manager.set_allowed(allowed.iter().cloned().collect());
     let mcp_bg = mcp_manager.clone();
     tokio::spawn(async move {
@@ -599,6 +692,7 @@ async fn main() -> Result<()> {
     let state = Arc::new(PermissionState::new(config.permission_mode, gate.clone()));
     // Files outside this folder are never read or written on a mode's say alone.
     state.set_project_root(cwd.clone());
+    trace("main: project root set");
     // Only the MCP config (`read_only`, `read_only_tools`) marks external tools as reads.
     let hint_mgr = mcp_manager.clone();
     state.set_read_only_hint(Arc::new(move |tool: &str| hint_mgr.is_tool_read_only(tool)));
@@ -627,6 +721,7 @@ async fn main() -> Result<()> {
         // The real home: this is the app, not a test.
         home: None,
     })?);
+    trace("main: tools built");
     // A closed terminal window (SIGHUP) or a kill (SIGTERM) skips the normal
     // exit; the background tasks run in their own process groups and would
     // outlive FlashAgent, holding their ports.
@@ -655,6 +750,7 @@ async fn main() -> Result<()> {
     let (agent_tx, agent_events) = tokio::sync::mpsc::unbounded_channel();
     let (composite, agent_finished, agent_control) =
         flashagent_tools::agent_tools(tools_arc.clone(), source.clone(), state.clone(), Some(agent_tx));
+    trace("main: agent tools built");
     let perm: &'static PermissionedTools =
         Box::leak(Box::new(PermissionedTools::new(Arc::new(composite), Some(tools_arc.clone()), state.clone())));
     // The three tools only the top has are not the built-in ones, so the
@@ -668,12 +764,36 @@ async fn main() -> Result<()> {
     let home = std::env::var("HOME").or_else(|_| std::env::var("USERPROFILE")).map(std::path::PathBuf::from).unwrap_or_default();
     // The indexes come from the two stores; the user's rules are read the
     // same way. The budget is in the tokens of the model that will read it.
-    let (memory_block, memory_docs) = flashagent_core::memory_context(&model, &cwd, &home, config.token_budget);
+    // The project's rules are lookups in the working folder, and a folder can
+    // take minutes to answer one — a backup dump of millions of entries did,
+    // holding the whole start-up in the kernel with a blank screen. Behind a
+    // clock, a folder that cannot answer costs its rules, not the interface.
+    trace("main: reading memory");
+    let (memory_block, memory_docs) = {
+        let (m, c, h) = (model.clone(), cwd.clone(), home.clone());
+        let budget = config.token_budget;
+        match tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            tokio::task::spawn_blocking(move || flashagent_core::memory_context(&m, &c, &h, budget)),
+        )
+        .await
+        {
+            Ok(Ok(found)) => found,
+            _ => {
+                trace("main: the project folder did not answer; global memory only this session");
+                // The global vault lives under the home folder and still counts;
+                // the walk of the project's rules is what the wait drops.
+                flashagent_core::memory_context(&model, &std::env::temp_dir(), &home, config.token_budget)
+            }
+        }
+    };
+    trace("main: memory read");
 
     // The interface language before anything renders; the system prompt is
     // not part of it.
     install_crash_hook(config.crash_reports);
 
+    trace("main: entering the terminal");
     run_terminal(AppContext {
         config,
         source,
@@ -701,6 +821,7 @@ async fn main() -> Result<()> {
 }
 
 async fn run_terminal(ctx: AppContext) -> Result<()> {
+    trace("run_terminal: raw mode");
     enable_raw_mode()?;
     let _ = crossterm::execute!(
         std::io::stdout(),
@@ -709,7 +830,15 @@ async fn run_terminal(ctx: AppContext) -> Result<()> {
         EnableMouseCapture,
     );
     enable_enhanced_keys();
-    let result = run_app(ctx).await;
+    trace("run_terminal: alternate screen");
+    // A panic must not leave the terminal in the alternate screen. The restore
+    // below waits after an await that an unwind never reaches, and a process
+    // dying inside the alt screen leaves the person a blank terminal with no
+    // message, no shell and no way to tell a crash from a hang. The unwind is
+    // caught, the screen is put back, and the panic goes on to print its own
+    // message on the normal screen.
+    let result = std::panic::AssertUnwindSafe(run_app(ctx)).catch_unwind().await;
+    trace("run_terminal: app returned");
 
     flashagent_tui::screen::set_progress(flashagent_tui::screen::Progress::None);
     // Before the screen goes: the shell below must get plain Enter and Tab back.
@@ -723,6 +852,10 @@ async fn run_terminal(ctx: AppContext) -> Result<()> {
         LeaveAlternateScreen
     );
     disable_raw_mode()?;
+    let result = match result {
+        Ok(result) => result,
+        Err(payload) => std::panic::resume_unwind(payload),
+    };
     match result {
         Ok(Some(Ok(ref saved_id))) => {
             let (term_w, _) = crossterm::terminal::size().unwrap_or((80, 24));
@@ -854,6 +987,12 @@ pub(crate) enum HoverTarget {
     Gauge,
     /// The permission-mode label at the start of the status line.
     Mode,
+    /// The plan box's header in the screen's top-right corner.
+    Plan,
+    /// The provider's name on the status line.
+    Provider,
+    /// The model's name on the status line.
+    Model,
     /// The "more lines below" marker.
     Marker,
 }
@@ -961,6 +1100,9 @@ struct App {
     /// The model's own checklist for whatever it is doing, in any session and
     /// not only under /goal.
     plan: Vec<flashagent_tools::plan_tool::PlanStep>,
+    /// The plan box on screen was sent away (Esc, or a click on its header);
+    /// the next plan call brings it back.
+    plan_hidden: bool,
     context_request_tokens: usize,
     /// The arguments of the call now running, so a finished call can be read
     /// back without the loop having to carry them a second time.
@@ -1638,6 +1780,7 @@ fn initial_app(init: InitialApp) -> App {
             .unwrap_or_default(),
         usage_dirty: false,
         plan: Vec::new(),
+        plan_hidden: false,
         last_tool_args: String::new(),
         context_request_tokens: 0,
         prompt_config: system_prompt_config,
@@ -1811,6 +1954,7 @@ async fn run_app(ctx: AppContext) -> Result<SaveOutcome> {
             }
         });
     }
+    trace("run_app: channels ready");
     let (channel_probe_tx, channel_probes) = tokio::sync::mpsc::unbounded_channel::<ChannelTarget>();
     let (update_tx, updates) = tokio::sync::mpsc::unbounded_channel::<UpdateNotice>();
     let (channel_watch_tx, channel_watch_rx) = tokio::sync::watch::channel(ctx.config.update_channel);
@@ -1863,8 +2007,28 @@ async fn run_app(ctx: AppContext) -> Result<SaveOutcome> {
         // prompt and is rebuilt with it when the voice or model changes.
         .with_memory(&w.memory_block)
         // The plan of the project: what is where, so the model does not spend
-        // turns looking for the file it wants.
-        .with_plan(flashagent_core::plan::project_outline(&w.cwd, PLAN_CHARS));
+        // turns looking for the file it wants. The walk runs on a blocking
+        // thread behind a clock: a folder holding millions of entries, or a
+        // disk that answers slowly, once held the whole start-up in a kernel
+        // read for minutes with a blank screen. A project that cannot say
+        // what it holds in two seconds says nothing this session.
+        .with_plan({
+            trace("run_app: walking the project");
+            let outline = {
+                let cwd = w.cwd.clone();
+                match tokio::time::timeout(
+                    std::time::Duration::from_secs(2),
+                    tokio::task::spawn_blocking(move || flashagent_core::plan::project_outline(&cwd, PLAN_CHARS)),
+                )
+                .await
+                {
+                    Ok(Ok(outline)) => outline,
+                    _ => String::new(),
+                }
+            };
+            trace("run_app: project walked");
+            outline
+        });
     let system_prompt_text =
         build_system_prompt(&system_prompt_config.clone().with_personality(&ctx.config.personality));
     let (resume_session_id, open_session_picker, session_note) = resolve_session_start(ctx.session_start, &w.cwd_display);
@@ -1877,6 +2041,7 @@ async fn run_app(ctx: AppContext) -> Result<SaveOutcome> {
     let effort_memory = flashagent_core::EffortMemory::load();
     w.source.set_effort_bias(effort_memory.steps(&ctx.model));
     w.tools_arc.set_vision_supported(model_sees_images(&w.source, &ctx.model));
+    trace("run_app: building the app");
     let mut app = initial_app(InitialApp {
         app_config: ctx.config,
         model: ctx.model,
@@ -1983,6 +2148,12 @@ async fn event_loop(app: &mut App, w: &Wiring, mut inbox: Inbox, session_id: &mu
         // more than a frame late.
         app.tasks_tick(&w.cx(&mut inbox.events, session_id, mascot_mood, &tip_lines));
         if inbox.events.is_empty() || last_draw.elapsed() >= FRAME {
+            // The first frame is the moment the interface exists; a start-up
+            // that hangs before it is the one the trace is for.
+            static FIRST_FRAME: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+            if FIRST_FRAME.swap(false, Ordering::Relaxed) {
+                trace("run_app: first frame");
+            }
             app.draw(&w.cx(&mut inbox.events, session_id, mascot_mood, &tip_lines), autocomplete.as_ref());
             last_draw = std::time::Instant::now();
         }
@@ -2037,7 +2208,9 @@ async fn approve_project_mcp_servers(
     mcp: &flashagent_tools::mcp::McpManager,
     cwd: &std::path::Path,
 ) -> Vec<String> {
+    trace("main: reading the project's mcp servers");
     let servers = mcp.project_servers();
+    trace("main: project mcp servers read");
     if servers.is_empty() {
         return Vec::new();
     }

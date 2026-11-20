@@ -1,0 +1,52 @@
+# FlashAgent Telegram bot — one installation serves one project.
+# Copy to bot.toml and fill in. Rooms come in three kinds:
+#   dev     — the team group: full brain, active participant (pulse)
+#   users   — the community chat: sandboxed brain, rate limited, reports
+#   channel — broadcast only; posts are drafted in the dev room
+
+[bot]
+token = "123456789:AAExample"   # BotFather token
+admins = [111111111]            # user ids: owner + second developer
+data_dir = "./data"             # state: limits, usage, logs
+
+[github]
+# The issues account (issues + moderation rights). Filled in the phase
+# when /report starts talking to GitHub; remove the section until then.
+token = "ghp_example"
+repo = "rentalx-wifi/rx-playa"
+
+[limits]
+requests_per_hour = 30          # per user in the users' room
+ignore_hours = 12               # spam after the cooldown warning gets muted
+
+[budget]
+daily_tokens = 2000000          # soft cap: warn + economy mode after; 0 = off
+
+[serve.dev]
+url = "http://127.0.0.1:8093"
+token = "rx-dev-2026"
+dir = "/home/flashback/RXPlaya/brain"     # the bot drops the chat journal here
+
+[serve.users]
+url = "http://127.0.0.1:8094"
+token = "rx-users-2026"
+dir = "/home/flashback/RXPlaya/reports"
+
+[chat.dev]
+chat_id = -1001111111111        # real ids: forward a room message to @userinfobot
+kind = "dev"
+serve = "dev"
+journal = "chat/dev-room.jsonl" # relative to serve.dir; the brain reads it itself
+pulse_minutes = 12              # speak up only after this many minutes of quiet
+
+[chat.users]
+chat_id = -1002222222222
+kind = "users"
+serve = "users"
+journal = "chat/users-room.jsonl"
+morning_digest = "09:00"        # local time: yesterday's reports, posted to dev
+
+[channel.main]
+chat_id = -1003333333333
+kind = "channel"
+# devlog = "Mon 18:00"          # series posts; wired with the channel pipeline

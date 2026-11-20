@@ -1,0 +1,13 @@
+# ~/.config/systemd/user/flashagent-serve-dev.service
+[Unit]
+Description=FlashAgent serve — the developer room's brain
+After=network-online.target
+
+[Service]
+ExecStart=%h/.local/bin/flashagent --serve --dir %h/RXPlaya/brain --port 8093 --effort medium
+Environment=FLASHAGENT_SERVE_TOKEN=rx-dev-2026
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target

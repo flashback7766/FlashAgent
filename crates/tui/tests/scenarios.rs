@@ -235,9 +235,9 @@ fn a_provider_without_a_model_list_keeps_only_the_next_turn_separator() {
     term.wait_for(PROMPT, WAIT);
     term.type_text("/provider Gateway");
     term.send(ENTER);
-    term.wait_for("Gateway · saved-model", WAIT);
+    term.wait_for("Gateway · Saved Model", WAIT);
     ask(&term, "hello", "The saved model answered.");
-    let screen = term.wait_for("Provider: Gateway · saved-model · thinking effort:", WAIT);
+    let screen = term.wait_for("Provider: Gateway · Saved Model · thinking effort:", WAIT);
     assert!(!screen.contains("lists no models yet"), "a yellow duplicate remained:\n{screen}");
     assert!(!screen.contains("did not answer; its models"), "an unavailable list is not a failed chat:\n{screen}");
     assert_eq!(screen.lines().filter(|l| l.contains("Provider: Gateway")).count(), 1, "{screen}");
@@ -269,12 +269,12 @@ fn switching_provider_mid_session_sends_the_next_turn_to_the_other_server() {
     term.send(ENTER);
     // The server's own model, since none was saved for it. The footer names it
     // once discovery is back; the transcript must still say nothing.
-    term.wait_for("Lab \u{b7} lab-model", WAIT);
+    term.wait_for("Lab \u{b7} Lab Model", WAIT);
     let screen = term.screen();
     assert!(!screen.contains("Provider: Lab \u{b7}"), "the switch was written before a message used it:\n{screen}");
 
     ask(&term, "and now?", "Answer from the lab server.");
-    let screen = term.wait_for("Provider: Lab \u{b7} lab-model \u{b7} thinking effort:", WAIT);
+    let screen = term.wait_for("Provider: Lab \u{b7} Lab Model \u{b7} thinking effort:", WAIT);
     assert_eq!(
         screen.lines().filter(|line| line.contains("Provider: Lab \u{b7}")).count(),
         1,
@@ -298,7 +298,7 @@ fn switching_provider_mid_session_sends_the_next_turn_to_the_other_server() {
     // And back, by name: the rule waits for the next message here too.
     term.type_text("/provider desk");
     term.send(ENTER);
-    term.wait_for(&format!("Desk \u{b7} {MODEL}"), WAIT);
+    term.wait_for("Desk · Mock Model", WAIT);
     let screen = term.screen();
     assert!(!screen.contains("Provider: Desk \u{b7}"), "the switch back was written before a message used it:\n{screen}");
     ask(&term, "back?", "Back at the desk.");
@@ -329,12 +329,12 @@ fn a_provider_switch_waits_for_the_running_answer() {
     // Still typed, it switches once the answer is done. The footer names the
     // new model at once; the rule waits for the next message.
     term.send(ENTER);
-    term.wait_for("Lab \u{b7} lab-model", WAIT);
+    term.wait_for("Lab \u{b7} Lab Model", WAIT);
     let screen = term.screen();
     assert!(!screen.contains("Provider: Lab \u{b7}"), "the switch was written before a message used it:\n{screen}");
 
     ask(&term, "now", "Answer from the lab server.");
-    term.wait_for("Provider: Lab \u{b7} lab-model", WAIT);
+    term.wait_for("Provider: Lab \u{b7} Lab Model", WAIT);
 }
 
 #[test]
@@ -369,11 +369,11 @@ fn a_model_and_thinking_change_are_rules_in_the_chat() {
     term.send(ENTER);
     std::thread::sleep(Duration::from_millis(200));
     let screen = term.screen();
-    assert!(!screen.contains("Model: other-model"), "the model rule appeared before a message used it:\n{screen}");
+    assert!(!screen.contains("Model: Other Model"), "the model rule appeared before a message used it:\n{screen}");
 
     ask(&term, "after model", "After model.");
-    let screen = term.wait_for("Model: other-model", WAIT);
-    assert!(screen.find("Model: other-model") < screen.find("after model"), "the rule is not above its message:\n{screen}");
+    let screen = term.wait_for("Model: Other Model", WAIT);
+    assert!(screen.find("Model: Other Model") < screen.find("after model"), "the rule is not above its message:\n{screen}");
     quit(&mut term);
 }
 
@@ -396,7 +396,7 @@ fn the_card_at_the_top_says_the_model_that_runs_now() {
     // conversation starts, so the live state is the one place that answers.
     let screen = term.screen();
     assert!(
-        screen.lines().any(|l| l.contains("other-model") && l.contains("Accept Edits")),
+        screen.lines().any(|l| l.contains("Other Model") && l.contains("Accept Edits")),
         "the status still shows the old model:\n{screen}"
     );
 }
@@ -1864,7 +1864,8 @@ fn the_command_palette_and_model_menu_fit_an_80_by_24_terminal() {
     term.send(ESC);
     term.send(F3);
     let screen = term.wait_for("Select model", WAIT);
-    assert!(screen.contains(&server.model), "{screen}");
+    // The menu names the model in prose; the raw id rides in its description.
+    assert!(screen.contains("Mock Model"), "{screen}");
     term.send(ESC);
 }
 
@@ -2144,7 +2145,7 @@ fn a_misspelled_model_is_offered_the_closest_one() {
     term.send(ENTER);
     let screen = term.wait_for("Not listed", WAIT);
     assert!(screen.contains("did you mean"), "no suggestion for the closest model:\n{screen}");
-    assert!(screen.contains(MODEL), "the closest model is not named:\n{screen}");
+    assert!(screen.contains("Mock Model"), "the closest model is not named:\n{screen}");
     // The menu is still open: Esc closes it, then Ctrl+D quits.
     term.send(ESC);
     std::thread::sleep(Duration::from_millis(200));
@@ -2677,16 +2678,25 @@ fn a_goal_shows_its_live_plan_and_updates_it_in_place() {
     term.type_text("/goal fix the failing test");
     term.send(ENTER);
     term.wait_for("Done.", WAIT);
-    // A repaint can be caught half-written; check the finished frame.
-    let screen = term.wait_for("▸ fix it", WAIT);
+    // A repaint can be caught half-written; check the finished frame. The
+    // plan lives in the box in the corner, and the transcript keeps the
+    // short line beside it.
+    let screen = term.wait_for("Plan · 1/2", WAIT);
 
-    assert!(screen.contains("plan: 1/2"), "{screen}");
     assert!(screen.contains("√ read the failing test"), "{screen}");
     assert!(screen.contains("▸ fix it"), "{screen}");
-    assert_eq!(screen.matches("plan:").count(), 1, "the plan updates in place, it does not pile up:\n{screen}");
+    assert!(screen.contains("plan: 2 step(s) · 1 done · 1 in progress"), "{screen}");
+    assert!(screen.contains("▸ fix it"), "{screen}");
+    let pile = screen.matches("plan: 2 step(s)").count();
+    assert_eq!(pile, 1, "count={pile} the plan updates in place, it does not pile up");
     // Only the text answer carries a usage chunk in the mock: four tokens.
     let report = term.wait_for("generated tokens", WAIT);
-    assert!(report.contains("· 4 generated tokens"), "{report}");
+    assert!(
+        report.contains("· 4 generated tokens"),
+        "turns={} last={:?} {report}",
+        server.turns().len(),
+        server.turns().last().map(|t| t.body["messages"].as_array().map(|m| m.iter().map(|m| m["role"].as_str().unwrap_or("?")).collect::<Vec<_>>().join(",")).unwrap_or_default())
+    );
 }
 
 #[test]
@@ -5612,4 +5622,118 @@ fn usage_opens_as_tabs_with_the_session_numbers_and_provider_limits() {
 
     term.send(ESC);
     term.wait_for(PROMPT, WAIT);
+}
+
+/// The plan the model keeps lives in a box in the screen's top-right corner,
+/// updated live; the transcript holds one short line; a click on the header
+/// sends it away until the next call; and when every step is done the box
+/// goes away.
+#[test]
+fn the_plan_shows_as_a_box_in_the_corner_and_leaves_when_it_is_done() {
+    let server = MockServer::start(vec![
+        Reply::ToolCall {
+            name: "plan".into(),
+            arguments: serde_json::json!({"action":"create","items":[{"text":"read the notes"},{"text":"fix the bug"}]}),
+        },
+        Reply::ToolCall { name: "plan".into(), arguments: serde_json::json!({"action":"done","steps":["read the notes"]}) },
+        Reply::ToolCall { name: "plan".into(), arguments: serde_json::json!({"action":"done","steps":["fix the bug"]}) },
+        Reply::Text("All done.".into()),
+    ]);
+    // A pause between replies: the box has a moment on screen before the next
+    // call changes it, long enough for the scenario to act on it.
+    server.delay_turns(Duration::from_millis(1200));
+    let home = Home::new();
+    let mut term = ready(&home, &server);
+    term.type_text("please plan this");
+    term.send(ENTER);
+    term.wait_for("Plan · 0/2", WAIT);
+    let screen = term.screen();
+    assert!(screen.contains("read the notes") && screen.contains("fix the bug"), "the checklist is in the box:\n{screen}");
+    // The card keeps the top of the screen: the box stands under it.
+    let (card_row, _) = term.find_on_screen("the coding agent for local models").expect("the welcome card is on screen");
+    let (box_row, _) = term.find_on_screen("Plan · 0/2").expect("the box header is on screen");
+    assert!(box_row > card_row, "the box covers the welcome card:\n{screen}");
+    assert!(screen.contains("plan:"), "the transcript names the plan:\n{screen}");
+    assert!(screen.contains("2 step(s)"), "the transcript keeps a short line while the box shows:\n{screen}");
+
+    // A click sends the box away; the next call brings it back. The wait is a
+    // clock, not a fixed pause: a loaded runner may take its time to process
+    // the press while the turn keeps streaming.
+    let (row, col) = term.find_on_screen("Plan · 0/2").expect("the box header is on screen");
+    term.click(row, col);
+    term.wait_gone("Plan · 0/2", WAIT);
+    term.wait_for("Plan · 1/2", WAIT);
+
+    // Everything done: the box goes, the short line stays with the count.
+    term.wait_for("All done.", WAIT);
+    std::thread::sleep(std::time::Duration::from_millis(400));
+    let screen = term.screen();
+    assert!(!screen.contains("Plan · 1/2"), "a finished plan does not keep the box:\n{screen}");
+    assert!(screen.contains("plan: 2 step(s) · 2 done"), "the short line says what the plan reached:\n{screen}");
+    quit(&mut term);
+}
+
+/// Esc sends the plan box away while the model goes on working, and the next
+/// plan call brings it back.
+#[test]
+fn esc_sends_the_plan_box_away_and_the_next_call_brings_it_back() {
+    let server = MockServer::start(vec![
+        Reply::ToolCall {
+            name: "plan".into(),
+            arguments: serde_json::json!({"action":"create","items":[{"text":"read"},{"text":"fix"}]}),
+        },
+        // The plan ends half done, so the box stays after the turn.
+        Reply::ToolCall {
+            name: "plan".into(),
+            arguments: serde_json::json!({"action":"change","items":[{"text":"read","status":"done"},{"text":"fix"}]}),
+        },
+        Reply::Text("Half done for now.".into()),
+        Reply::ToolCall {
+            name: "plan".into(),
+            arguments: serde_json::json!({"action":"in_progress","steps":["fix"]}),
+        },
+        Reply::Text("On it.".into()),
+    ]);
+    server.delay_turns(Duration::from_millis(1200));
+    let home = Home::new();
+    let mut term = ready(&home, &server);
+    term.type_text("plan it");
+    term.send(ENTER);
+    term.wait_for("Plan · 0/2", WAIT);
+    term.wait_for("Half done for now.", WAIT);
+    std::thread::sleep(std::time::Duration::from_millis(400));
+    // The turn is over and the plan is unfinished: the box stands, and Esc —
+    // with the hand free — sends it away.
+    assert!(term.screen().contains("Plan · 1/2"), "an unfinished plan keeps its box:\n{}", term.screen());
+    term.send(ESC);
+    std::thread::sleep(std::time::Duration::from_millis(400));
+    assert!(!term.screen().contains("Plan · 1/2"), "Esc sent the box away:\n{}", term.screen());
+    // The next plan call brings it back.
+    term.type_text("keep going");
+    term.send(ENTER);
+    term.wait_for("Plan · 1/2", WAIT);
+    term.wait_for("On it.", WAIT);
+    quit(&mut term);
+}
+
+/// The status row's provider and model names are buttons: one opens the
+/// provider menu, the other the model menu.
+#[test]
+fn a_click_on_the_status_names_opens_their_menus() {
+    let server = MockServer::start(Vec::new());
+    let home = Home::new();
+    let mut term = ready(&home, &server);
+    // The welcome card names both too; the status row's copies sit between
+    // the mode and the gauge, which only the row's own text matches.
+    let (row, col) = term.find_on_screen("· Default ·").expect("the provider is on the status row");
+    // The needle starts at the separator; the name begins three cells in.
+    term.click(row, col + 3);
+    term.wait_for("Switch provider", WAIT);
+    term.send(ESC);
+    term.wait_for("Ask FlashAgent", WAIT);
+    let (row, col) = term.find_on_screen("· Mock Model").expect("the model's pretty name is on the status row");
+    term.click(row, col + 3);
+    term.wait_for("Select model", WAIT);
+    term.send(ESC);
+    quit(&mut term);
 }

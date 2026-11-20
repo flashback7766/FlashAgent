@@ -217,10 +217,11 @@ impl GoalLedger {
                         let why = first_line(result.as_deref().unwrap_or(""));
                         self.shell_failed.push(format!("{} — {why}", call.subject));
                     }
-                    ("update_plan", false) => {
-                        if let Some(steps) = flashagent_tools::plan_tool::parse_plan(&call.args_json) {
-                            self.plan = steps;
-                            return true;
+                    ("plan" | "update_plan", false) => {
+                        // The old name answers through the new tool; the plan
+                        // the ledger keeps applies the same call either way.
+                        if let Some(action) = flashagent_tools::plan_tool::parse_plan_args(&call.args_json) {
+                            return flashagent_tools::plan_tool::apply_plan_action(&mut self.plan, action);
                         }
                     }
                     (_, true) => {
@@ -676,6 +677,32 @@ mod tests {
         let changed = l.on_event(&ev_finished("2", true, "error: update_plan needs `steps`"));
         assert!(!changed);
         assert_eq!(l.plan().len(), 1, "the earlier plan must survive a rejected call");
+    }
+
+    #[test]
+    fn the_plan_tool_creates_marks_and_clears_by_action() {
+        use flashagent_tools::plan_tool::{PlanStatus, PlanStep};
+        let mut l = GoalLedger::new("t".into(), GoalBudgets::default());
+
+        // create starts the list.
+        l.on_event(&ev_started("1", "plan", r#"{"action":"create","items":[{"text":"read"},{"text":"fix"}]}"#));
+        assert!(l.on_event(&ev_finished("1", false, "Plan created: 2 step(s)")));
+        assert_eq!(l.plan().len(), 2);
+
+        // in_progress moves one step without sending the list again.
+        l.on_event(&ev_started("2", "plan", r#"{"action":"in_progress","steps":["fix"]}"#));
+        assert!(l.on_event(&ev_finished("2", false, "Marked 1 step(s) in progress")));
+        assert_eq!(l.plan()[1], PlanStep { text: "fix".into(), status: PlanStatus::InProgress });
+
+        // done takes an index too, and a text that matches nothing moves nothing.
+        l.on_event(&ev_started("3", "plan", r#"{"action":"done","steps":[0,"gone"]}"#));
+        assert!(l.on_event(&ev_finished("3", false, "Marked 1 step(s) done")));
+        assert_eq!(l.plan()[0].status, PlanStatus::Completed);
+
+        // clear empties the plan; the screen's box goes with it.
+        l.on_event(&ev_started("4", "plan", r#"{"action":"clear"}"#));
+        assert!(l.on_event(&ev_finished("4", false, "Plan cleared")));
+        assert!(l.plan().is_empty());
     }
 
     #[test]

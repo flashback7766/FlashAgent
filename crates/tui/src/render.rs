@@ -85,6 +85,12 @@ pub(crate) struct Renderer {
     /// The permission-mode label's columns on the status row, when it is a
     /// control (not during a goal, whose mode is fixed).
     status_mode_cols: Option<(u16, u16)>,
+    /// The provider's name on the status row: a press opens the provider menu.
+    status_provider_cols: Option<(u16, u16)>,
+    status_provider: Option<(u16, u16, u16)>,
+    /// The model's name: a press opens the model menu.
+    status_model_cols: Option<(u16, u16)>,
+    status_model: Option<(u16, u16, u16)>,
     /// (row, from column, to column) of that label on screen.
     status_mode: Option<(u16, u16, u16)>,
     /// Where the pointer was last seen: the scrollbar shows itself only to a
@@ -101,6 +107,10 @@ pub(crate) struct Renderer {
     overlay_close: Option<(usize, u16)>,
     /// The command popup's place on the last frame, when one was open.
     pub(crate) popup_rows: Option<PopupRows>,
+    /// The plan box on screen: (first row, one past the last row, from
+    /// column, to column). Any press inside the box sends it away; the header
+    /// row is the one that lights on a hover.
+    pub(crate) plan_zone: Option<(usize, usize, usize, usize)>,
 }
 
 /// Where the command popup sat on the last frame. A press on one of its rows
@@ -231,6 +241,14 @@ pub(crate) struct FrameState<'a> {
     pub(crate) hover_mode: bool,
     /// The pointer is on the "more lines below" marker.
     pub(crate) hover_marker: bool,
+    /// The pointer is on the plan box's header, when one is drawn.
+    pub(crate) hover_plan: bool,
+    /// The pointer is on the status line's provider or model name.
+    pub(crate) hover_provider: bool,
+    pub(crate) hover_model: bool,
+    /// The live plan, when the box may draw it. `None` while it is empty,
+    /// finished, or the hand sent it away.
+    pub(crate) plan: Option<&'a [flashagent_tools::plan_tool::PlanStep]>,
     /// A click on a welcome-card button, the gauge or the marker: those cells
     /// keep a pressed look for a moment.
     pub(crate) zone_flash: Option<(u16, usize, usize)>,
@@ -647,11 +665,16 @@ impl Renderer {
             status_gauge: None,
             status_mode_cols: None,
             status_mode: None,
+            status_provider_cols: None,
+            status_provider: None,
+            status_model_cols: None,
+            status_model: None,
             mouse_at: None,
             scroll_marker: None,
             overlay_close_col: None,
             overlay_close: None,
             popup_rows: None,
+            plan_zone: None,
         }
     }
 
@@ -1005,7 +1028,7 @@ fn footer_status(
     context_usage: &ContextUsage,
     st: &FrameState<'_>,
     awaiting_user: bool,
-) -> (String, usize, Option<(usize, usize)>) {
+) -> (String, usize, Zone, Zone, Zone) {
     // The safe mode is said where the permission mode is: both say what the
     // session may do, and one of them can change what the other allows.
     // The mode and the safe marker are the interface's own words.
@@ -1054,9 +1077,38 @@ fn footer_status(
     // to Accept All, so a press there would promise something it cannot do.
     let mode_end = 2 + visible_width(&mode_label) + 2;
     let mode_cols = (!st.is_goal_active && width > mode_end).then_some((2, mode_end));
-    let (row, gauge) = fit_status_row(width, &left_telemetry, &format_provider(st.provider.0, st.provider.1), &gauge_str);
-    (row, gauge, mode_cols)
+    let provider_str = format_provider(st.provider.0, st.provider.1);
+    let (row, gauge) = fit_status_row(width, &left_telemetry, &provider_str, &gauge_str);
+    // The provider and the model are buttons on the same row: a click on one
+    // opens what /provider opens, on the other what F3 opens. Their cells are
+    // named only when the row did not have to clip — a clipped name is half a
+    // name, and a click on the half that stands would open a menu for a word
+    // the screen cut off.
+    let (provider_cols, model_cols) = status_name_zones(width, &left_telemetry, st.provider.0, st.provider.1, gauge);
+    (row, gauge, mode_cols, provider_cols, model_cols)
 }
+
+/// The cells the provider's and the model's names take on the status row,
+/// when the row did not have to clip anything: a clipped name is half a
+/// name, and a click on the half that stands would open a menu for a word
+/// the screen cut off.
+fn status_name_zones(width: usize, left: &str, provider: &str, model: &str, gauge_vis: usize) -> (Zone, Zone) {
+    let provider_str = format_provider(provider, model);
+    let fits = visible_width(left) + visible_width(&provider_str) + gauge_vis + 3 <= width;
+    if !fits {
+        return (None, None);
+    }
+    let prov_vis = visible_width(provider);
+    let model_vis = visible_width(model);
+    let left_vis = visible_width(left);
+    let dot = 3usize; // " · "
+    let provider_cols = (!provider.is_empty()).then_some((left_vis + dot, left_vis + dot + prov_vis));
+    let model_cols = (!model.is_empty()).then_some((left_vis + dot + prov_vis + dot, left_vis + dot + prov_vis + dot + model_vis));
+    (provider_cols, model_cols)
+}
+
+/// A click target's cells on one row.
+type Zone = Option<(usize, usize)>;
 
 /// The row, right-aligned gauge last, and the gauge's width: the cells a click
 /// on the status row's end lands in.
@@ -1588,6 +1640,16 @@ struct LayoutInputs<'a> {
     zone_flash: Option<(u16, usize, usize)>,
     /// Rows the command popup takes under the card, when it is open.
     popup_lines: usize,
+    /// The live plan for the corner box, when it may draw.
+    plan: Option<&'a [flashagent_tools::plan_tool::PlanStep]>,
+    /// The welcome card's rows at the top of the conversation: the box
+    /// stands under it rather than over it.
+    welcome_lines: usize,
+    /// The pointer is on the plan box's header.
+    hover_plan: bool,
+    /// The pointer is on the status line's provider or model name.
+    hover_provider: bool,
+    hover_model: bool,
 }
 
 impl Renderer {
@@ -1786,9 +1848,11 @@ impl Renderer {
         tail.push((LineKind::System, footer_hint(shown, &st, width, t)));
         append_tip_rows(&mut tail, &st, width);
         let awaiting_user = gate.pending().is_some() || question_gate.pending().is_some();
-        let (status_row, gauge_vis, mode_cols) = footer_status(width, context_usage, &st, awaiting_user);
+        let (status_row, gauge_vis, mode_cols, provider_cols, model_cols) = footer_status(width, context_usage, &st, awaiting_user);
         tail.push((LineKind::System, status_row));
         self.status_mode_cols = mode_cols.map(|(from, to)| (from as u16, to as u16));
+        self.status_provider_cols = provider_cols.map(|(from, to)| (from as u16, to as u16));
+        self.status_model_cols = model_cols.map(|(from, to)| (from as u16, to as u16));
         // The gauge is the status row's last cells; which screen row that is
         // paint_layout knows, after the frame has been cut to the terminal.
         self.status_gauge_cols = (gauge_vis > 0).then(|| (width.saturating_sub(gauge_vis + 1) as u16, width as u16));
@@ -1806,14 +1870,19 @@ impl Renderer {
             hover_gauge: st.hover_gauge,
             hover_mode: st.hover_mode,
             hover_marker: st.hover_marker,
+            hover_plan: st.hover_plan,
+            hover_provider: st.hover_provider,
+            hover_model: st.hover_model,
             zone_flash: st.zone_flash,
             popup_lines,
+            plan: st.plan,
+            welcome_lines: chat.welcome_len(),
         });
     }
     fn paint_layout(&mut self, settled: &[RenderLine], tail: &mut Vec<RenderLine>, layout: LayoutInputs<'_>) {
         let LayoutInputs {
             width, height, card_key, card_start, paint_start, mut input_line_idx, text_cursor, border_color, selection, owner_at, zone_at, hover_chat,
-            hover_gauge, hover_mode, hover_marker, zone_flash, mut card_lines, popup_lines,
+            hover_gauge, hover_mode, hover_marker, zone_flash, mut card_lines, popup_lines, plan, welcome_lines, hover_plan, hover_provider, hover_model,
         } = layout;
     // The conversation scrolls; the composer and the footer under it stay where
     // they are, so a reply can be written while reading back.
@@ -1975,6 +2044,16 @@ impl Renderer {
             }
         }
     }
+    // The provider and the model carry the same quiet light: both are buttons.
+    for (hovered, zone) in [(hover_provider, self.status_provider_zone()), (hover_model, self.status_model_zone())] {
+        if hovered {
+            if let Some((row, from, to)) = zone {
+                if (row as usize) < rows.len() {
+                    rows[row as usize] = flashagent_tui::style_span(&rows[row as usize], from, to, "\x1b[48;2;38;36;33m", "\x1b[49m");
+                }
+            }
+        }
+    }
     // The gauge and the marker carry the same quiet light while the pointer
     // is on them.
     if hover_mode {
@@ -2060,10 +2139,84 @@ impl Renderer {
         let row = (chat_rows + input_line_idx.checked_sub(card_start)?).checked_sub(cut).map(|row| row + pad)?;
         Some((row as u16, col))
     });
+    // The plan's box rides the screen's top-right corner when the room
+    // allows: the transcript underneath keeps only a short line, so the
+    // checklist lives where the eye goes while a long job runs. Its rows are
+    // drawn over whatever the transcript had there, one column clear of the
+    // scrollbar; the header answers a hover and a press.
+    self.plan_zone = None;
+    if let Some(plan) = plan.filter(|p| !p.is_empty()) {
+        if let Some((box_w, box_h)) = plan_box_size(width, height, plan) {
+            use flashagent_tools::plan_tool::PlanStatus;
+            let border = "\x1b[38;2;95;90;85m";
+            let dim = "\x1b[38;2;130;128;135m";
+            let reset = "\x1b[0m";
+            let content_w = box_w - 2;
+            let from = width.saturating_sub(box_w + 2);
+            // The welcome card keeps the top of the screen while it shows: the
+            // box stands under it instead of over it, and when the card is
+            // scrolled away the box returns to the very top.
+            let welcome_bottom = welcome_lines.saturating_sub(self.chat_view.0);
+            let top = welcome_bottom.min(rows.len());
+            if top + box_h <= self.chat_rows_on_screen && top + box_h <= rows.len() {
+                let done = plan.iter().filter(|s| s.status == PlanStatus::Completed).count();
+                let title = format!(" Plan · {done}/{} ", plan.len());
+                // The borders and the interior add up to one width: the header
+                // gives its line its dashes, every step row pads its text, and
+                // the bottom closes at the same cell. Three parts measured
+                // apart was how the frame came out crooked. A long step wraps
+                // onto the next rows at the same text column instead of
+                // pushing its text past the border.
+                let mut lines = Vec::with_capacity(box_h);
+                lines.push(format!(
+                    "{border}╭─\x1b[1;38;2;225;175;95m{title}{border}{}╮{reset}",
+                    "─".repeat(content_w.saturating_sub(title.chars().count() + 1))
+                ));
+                let budget = content_w.saturating_sub(4).max(8);
+                for step in plan {
+                    let (glyph_color, glyph_text) = match step.status {
+                        PlanStatus::Completed => ("\x1b[38;2;145;205;140m", step.status.glyph().to_string()),
+                        PlanStatus::InProgress => ("\x1b[1;38;2;225;175;95m", step.status.glyph().to_string()),
+                        PlanStatus::Pending => (dim, step.status.glyph().to_string()),
+                    };
+                    let text_color = if step.status == PlanStatus::Completed { "\x1b[2m" } else { "\x1b[38;2;225;230;240m" };
+                    for (i, line) in flashagent_tui::wrap_styled(&step.text, budget).iter().enumerate() {
+                        // │ + space + glyph + space + text + pad + space + │:
+                        // the prefix is three cells on the first row and three
+                        // spaces under it, so wrapped lines align with the text.
+                        let (cell, color) = if i == 0 { (glyph_text.as_str(), glyph_color) } else { (" ", dim) };
+                        let pad = " ".repeat(content_w.saturating_sub(4 + visible_width(line)));
+                        lines.push(format!(
+                            "{border}│{reset} {color}{cell}{reset} {text_color}{line}{pad}{reset} {border}│{reset}"
+                        ));
+                    }
+                }
+                lines.push(format!("{border}╰{}╯{reset}", "─".repeat(content_w)));
+                for (i, seg) in lines.into_iter().enumerate().take(box_h) {
+                    let row = top + i;
+                    let left = clip_ansi(&rows[row], from);
+                    let pad = " ".repeat(from.saturating_sub(visible_width(&left)));
+                    rows[row] = format!("{left}{pad}{seg}");
+                }
+                self.plan_zone = Some((top, top + box_h, from + 1, width.saturating_sub(2)));
+            }
+        }
+    }
+    // The plan header carries the same quiet light as the other buttons while
+    // the pointer is on it.
+    if hover_plan {
+        if let Some((row, _, from, to)) = self.plan_zone {
+            if row < rows.len() {
+                rows[row] = flashagent_tui::style_span(&rows[row], from, to, "\x1b[48;2;38;36;33m", "\x1b[49m");
+            }
+        }
+    }
     // The status row is the last one painted, however much the screen cut from
     // the top; the gauge's columns were measured when the frame was built.
     self.status_gauge = self.status_gauge_cols.map(|(from, to)| (rows.len().saturating_sub(1) as u16, from, to));
     self.status_mode = self.status_mode_cols.map(|(from, to)| (rows.len().saturating_sub(1) as u16, from, to));
+    self.status_provider = self.status_provider_cols.map(|(from, to)| (rows.len().saturating_sub(1) as u16, from, to));
+    self.status_model = self.status_model_cols.map(|(from, to)| (rows.len().saturating_sub(1) as u16, from, to));
     self.screen.paint(&rows, cursor);
     }
 
@@ -2074,6 +2227,32 @@ impl Renderer {
             Some((mode_row, from, to)) => row == mode_row && (from..to).contains(&column),
             None => false,
         }
+    }
+
+    /// A press on the provider's name: it opens the provider menu.
+    pub(crate) fn status_provider_press(&self, row: u16, column: u16) -> bool {
+        match self.status_provider {
+            Some((r, from, to)) => r == row && (from..to).contains(&column),
+            None => false,
+        }
+    }
+
+    /// A press on the model's name: it opens the model menu.
+    pub(crate) fn status_model_press(&self, row: u16, column: u16) -> bool {
+        match self.status_model {
+            Some((r, from, to)) => r == row && (from..to).contains(&column),
+            None => false,
+        }
+    }
+
+    /// The provider's cells, for the pressed look.
+    pub(crate) fn status_provider_zone(&self) -> Option<(u16, usize, usize)> {
+        self.status_provider.map(|(row, from, to)| (row, from as usize, to as usize))
+    }
+
+    /// The model's cells, for the pressed look.
+    pub(crate) fn status_model_zone(&self) -> Option<(u16, usize, usize)> {
+        self.status_model.map(|(row, from, to)| (row, from as usize, to as usize))
     }
 
     /// The label's cells, for the pressed look.
@@ -2264,6 +2443,12 @@ impl App {
                 let hover_chat = self
                     .mouse_at
                     .filter(|(row, _)| (*row as usize) < self.renderer.chat_rows_on_screen);
+                // The corner box holds the plan while it is alive: something
+                // still to do, and not sent away by hand.
+                let plan = (!self.plan.is_empty()
+                    && !self.plan_hidden
+                    && self.plan.iter().any(|s| s.status != flashagent_tools::plan_tool::PlanStatus::Completed))
+                .then_some(self.plan.as_slice());
                 FrameState {
                     selection,
                     hover_chat,
@@ -2273,9 +2458,13 @@ impl App {
                     zone_flash: self.zone_flash.map(|(row, from, to, _)| (row, from, to)),
                     overlay_hover,
                     overlay_flash: self.click_flash.map(|(line, _)| line),
+                    hover_plan: self.hovered.as_ref().is_some_and(|h| matches!(h, crate::HoverTarget::Plan)),
+                    hover_provider: self.hovered.as_ref().is_some_and(|h| matches!(h, crate::HoverTarget::Provider)),
+                    hover_model: self.hovered.as_ref().is_some_and(|h| matches!(h, crate::HoverTarget::Model)),
+                    plan,
                 cost_display: cost_display.as_deref(),
                 input: &self.input,
-                provider: (self.config.active_profile().name.as_str(), self.current_model.as_str()),
+                provider: (self.config.active_profile().name.as_str(), self.model_display(cx.source, &self.current_model).as_str()),
                 history_search: self
                     .history_search
                     .as_ref()
@@ -2423,6 +2612,28 @@ fn with_right_cell(line: &str, width: usize, cell: &str) -> String {
     let clipped = clip_ansi(line, room);
     let pad = " ".repeat(room.saturating_sub(visible_width(&clipped)));
     format!("{clipped}{pad}{cell}\x1b[0m")
+}
+
+/// The plan box's size on a terminal this wide and tall, when it fits at all:
+/// `None` says the transcript keeps its short line and the plan is read
+/// nowhere else until the window grows or the plan changes.
+pub(crate) fn plan_box_size(width: usize, height: usize, plan: &[flashagent_tools::plan_tool::PlanStep]) -> Option<(usize, usize)> {
+    if plan.is_empty() {
+        return None;
+    }
+    let content_w = (width / 3).clamp(20, 38);
+    let box_w = content_w + 2;
+    // A step longer than its column wraps instead of pushing the border out:
+    // the box grows downward, and the fit below is measured on the wrapped
+    // height, not on the number of steps.
+    let budget = content_w.saturating_sub(4).max(8);
+    let rows = plan.iter().map(|s| flashagent_tui::wrap_styled(&s.text, budget).len().max(1)).sum::<usize>();
+    // A transcript narrow enough to feel the box is not a transcript the box
+    // may cover; six rows under it keep the box clear of the footer.
+    if width.saturating_sub(box_w) < 46 || rows + 2 > height.saturating_sub(6) {
+        return None;
+    }
+    Some((box_w, rows + 2))
 }
 
 /// How long a clicked card row keeps its pressed look.
@@ -2642,6 +2853,24 @@ mod footer_tests {
             let (row, _) = fit_status_row(width, &left, &provider, "");
             assert!(visible_width(&row) <= width, "width {width}: {row:?}");
         }
+    }
+
+    #[test]
+    fn the_provider_and_the_model_name_exactly_their_own_cells() {
+        let left = format_status_left(false, false, false, None, "Accept Edits", false, None, "");
+        let width = 120;
+        let gauge = "free · \u{2588}\u{2588}\u{2588}\u{2588} 7% · 73k/1M";
+        let (provider_cols, model_cols) = status_name_zones(width, &left, "Default", "mock-model", visible_width(gauge));
+        let (row, _) = fit_status_row(width, &left, &format_provider("Default", "mock-model"), gauge);
+        // Zones count cells; the plain row is sliced the same way (the · in
+        // the separators is two bytes).
+        let plain: Vec<char> = flashagent_tui::strip_ansi(&row).chars().collect();
+        let cells = |(from, to): (usize, usize)| plain[from..to].iter().collect::<String>();
+        assert_eq!(cells(provider_cols.expect("the provider names its cells on a wide row")), "Default", "{plain:?}");
+        assert_eq!(cells(model_cols.expect("the model names its cells")), "mock-model", "{plain:?}");
+        // A row that had to clip names no cells: a half name is no button.
+        let (provider_cols, model_cols) = status_name_zones(60, &left, "Default", "mock-model", visible_width(gauge));
+        assert!(provider_cols.is_none() && model_cols.is_none());
     }
 
     #[test]

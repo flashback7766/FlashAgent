@@ -19,8 +19,9 @@ impl App {
     fn welcome_lines(&self, source: &BackendSource, mood: MascotMood, width: Option<usize>) -> flashagent_tui::WelcomeRender {
         let (w, h) = crossterm::terminal::size().unwrap_or((100, 24));
         let th_sum = thinking_summary_str(source, &self.current_effort);
+        let model_display = self.model_display(source, &self.current_model);
         welcome_card(&WelcomeCard {
-            model: &self.current_model,
+            model: &model_display,
             provider: Some(&self.config.active_profile().name),
             cwd: &self.cwd_display,
             memory_docs: self.memory_docs,

@@ -1,0 +1,14 @@
+# ~/.config/systemd/user/flashagent-serve.service
+[Unit]
+Description=FlashAgent serve (RX Playa brain)
+After=network-online.target
+
+[Service]
+ExecStart=%h/.local/bin/flashagent --serve --dir %h/RXPlaya/brain --port 8081
+Environment=FLASHAGENT_SERVE_TOKEN=change-me
+Environment=FLASHAGENT_TRACE=0
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target

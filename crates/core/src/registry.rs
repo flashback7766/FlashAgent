@@ -125,7 +125,7 @@ pub enum Handler {
     Skill,
     Task,
     UserInteraction,
-    UpdatePlan,
+    Plan,
     Memory,
     Agent,
     /// The old three names are kept for the subagent internals, which still
@@ -151,7 +151,7 @@ impl Handler {
             Handler::Skill => "skill",
             Handler::Task => "task",
             Handler::UserInteraction => "user_interaction",
-            Handler::UpdatePlan => "update_plan",
+            Handler::Plan => "plan",
             Handler::Memory => "memory",
             Handler::Agent => "agent",
             Handler::SpawnAgent => "spawn_agent",
@@ -325,6 +325,11 @@ const SKILL_NAME: Param = opt_str("name", "For action run: the skill name, witho
 
 const TASK_ACTION: Param = one_of("action", "list background tasks, read one's output, or stop one.", &["list", "output", "stop"]);
 const TASK_ID: Param = opt_int("task_id", "The id run_shell returned when it started the task.");
+const PLAN_ACTION: Param = one_of(
+    "action",
+    "create starts a plan and change edits the list (send `items`); done and in_progress move named steps' status (send `steps`); clear empties the plan.",
+    &["create", "change", "done", "in_progress", "clear"],
+);
 
 const AGENT_ACTION: Param = one_of(
     "action",
@@ -486,29 +491,37 @@ pub static TOOLS: &[ToolDef] = &[
         availability: Availability::Core,
     },
     ToolDef {
-        name: "update_plan",
+        name: "plan",
         // Offered always: the tool list is part of the cached prompt, and adding
         // a tool when a goal started made the first goal step re-read the whole
         // conversation. The plan is drawn in ordinary chat too, and a model told
         // it was a no-op here kept planning in prose instead of calling this.
-        description: "Record the whole step-by-step plan, again each time a step finishes or the plan changes. Available in any session, not only an autonomous run.",
-        params: &[list(
-            "steps",
-            "The whole plan, in order",
-            &[
-                s("text", "One step, in a few words"),
-                Param {
-                    name: "status",
-                    kind: Kind::Str,
-                    description: "Where the step stands",
-                    choices: &["pending", "in_progress", "completed"],
-                    optional: true,
-                },
-            ],
-        )],
-        required: &["steps"],
+        description: "Keep the step-by-step plan for a long task. `create` starts it and `change` edits the list; `done` and `in_progress` move named steps' status without touching their texts. Available in any session, not only an autonomous run.",
+        params: &[
+            PLAN_ACTION,
+            list(
+                "items",
+                "The whole plan, in order (for create and change)",
+                &[
+                    s("text", "One step, in a few words"),
+                    Param {
+                        name: "status",
+                        kind: Kind::Str,
+                        description: "Where the step stands",
+                        choices: &["pending", "in_progress", "completed"],
+                        optional: true,
+                    },
+                ],
+            ),
+            list(
+                "steps",
+                "Which steps to mark, for done and in_progress: a 0-based index or the step's exact text",
+                &[s("step", "An index or the step's exact text")],
+            ),
+        ],
+        required: &["action"],
         has_header: false,
-        handler: Handler::UpdatePlan,
+        handler: Handler::Plan,
         category: Category::Read,
         touches: Touches::Nothing,
         preview: Preview::None,
@@ -659,6 +672,17 @@ pub static TOOLS: &[ToolDef] = &[
         availability: Availability::Parent,
     },
 ];
+
+/// The name a tool call answers through, whatever a prompt from before a
+/// rename taught the model. The executor remaps it, and so does every check
+/// that counts which tools the model has called: a renamed tool the model
+/// still calls by its old name is not a tool it never called.
+pub fn canonical_name(name: &str) -> &str {
+    match name {
+        "update_plan" => "plan",
+        other => other,
+    }
+}
 
 pub fn find(name: &str) -> Option<&'static ToolDef> {
     TOOLS.iter().find(|t| t.name == name)

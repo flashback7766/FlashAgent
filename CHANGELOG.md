@@ -1,5 +1,78 @@
 # Changelog
 
+## b731 — The bot gets rebuilt, and serve learns to be steered mid-turn
+
+- **A prompt into a running turn steers by itself.** `POST /turn` while a
+  turn is already running is no longer a busy-error for the client to
+  route around: serve flies the words into the running answer (`steered:
+  true`), and the loop drains them at the top of its next step — so a
+  steered prompt lands in the same request as the tool results that just
+  came back, and the model answers the new words with those results in
+  front of it, not a step later. The explicit `POST /steer` stays for
+  clients that want to say what they mean.
+- **The serve lives in a bounded window.** `--context-cap` narrows a
+  room's window below what the model reports, `--compact-at` sets the
+  compaction trigger as an absolute token count, and the TUI's
+  TurnCompactor is wired into the serve loop: a long session summarizes
+  itself mid-turn instead of blowing the window. Built for the bot's
+  users' room — 65k with compaction at 55k.
+- **The Telegram bot is rebuilt as a package** (`bot/flashagent_bot`):
+  rooms are dev / users / channel, the config validates itself at
+  startup, the rate limiter mutes spammers for real hours and survives
+  restarts, token usage is accounted per room per day behind a soft
+  daily cap, and the dev room gained the active-participant pulse that
+  reads the room's chatter only after it has gone quiet. The report
+  pipeline talks to GitHub — discuss first, dedup against open issues,
+  then file or amend under the configured account — and the channel
+  pipeline drafts posts with publish/redo/cancel buttons, with the
+  weekly devlog series on a schedule. The chat journal replaces the
+  in-memory collector: every room message lands in a file the brains
+  read themselves, for zero tokens.
+
+## b730 — A plan the person watches, and names the model goes by
+
+- **`update_plan` became `plan`, with actions.** `create` starts the list,
+  `change` edits it, `done` and `in_progress` move named steps' status
+  without sending the list again — a step is named by its place or its exact
+  text — and `clear` empties it. A model trained on the old name keeps
+  working: its calls answer through the new tool, and a call still wrapped
+  under the old name opens too.
+- **The plan shows in a box in the screen's top-right corner while it runs**,
+  live on every call: the checklist the person watches, wherever the
+  transcript has scrolled. The box stands under the welcome card instead of
+  over it, and comes back to the top once the card has scrolled away; a long
+  step wraps inside the box instead of pushing its text past the border. The
+  transcript keeps one short line (`plan: 3 step(s) · 1 done · 1 in
+  progress`) instead of the whole list; when the box has no room, the
+  transcript keeps the full checklist as before. A click on the box's header
+  — or Esc, while nothing runs — sends it away until the next plan call, and
+  a plan with every step done takes the box down.
+- **The status row's provider and model names are buttons.** A click on the
+  provider opens what `/provider` opens; a click on the model opens what F3
+  opens; both carry the quiet hover light the other buttons have.
+- **A working folder that answers slowly cannot freeze the start-up.** The
+  first look at a project reads three things inside it — its `.mcp.json`, its
+  rule files, and the file outline for the prompt — and each one now runs on
+  a blocking thread behind a two-second clock, and the outline walk stops at
+  a fixed number of entries per folder. A folder holding millions of entries
+  (a backup dump was the one found) held the whole start-up in a kernel read
+  with a blank screen; it now costs its rules and its outline, and the
+  interface still comes up.
+- **A hung start-up can say where it hung, and a crash no longer eats the
+  terminal.** `FLASHAGENT_TRACE=1 flashagent` appends every start-up phase to
+  `~/.flashagent/startup-trace.log`, so a start that hangs on a machine
+  nobody can sit at reports the phase it stopped in; the first-run tool check
+  also no longer holds the prompt for more than five seconds. And a panic
+  inside the alternate screen now puts the terminal back before the panic
+  prints: a crash used to leave the person a blank screen with no message,
+  indistinguishable from a hang.
+- **Model names read as their makers write them.** A server that names its
+  models (`DeepSeek V4.1 Flash 1017`) is shown everywhere the model is — the
+  status row, the model menu, `/usage`, the welcome card; an id with no name
+  from the server is prettified (`qwen3.6-35b-a3b-mtp@iq3_xxs` reads as
+  "Qwen3.6 35B A3B MTP @ IQ3_XXS"). Every API call keeps the raw id, and the
+  model menu keeps it beside the name.
+
 ## b725 — Memory you can walk through, tools that are one thing, and a prefix that never moves
 
 - **Memory is a vault, not four tools.** The old one-fact-per-file store with
