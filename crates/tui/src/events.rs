@@ -663,7 +663,7 @@ impl App {
                         if flashagent_tools::plan_tool::apply_plan_action(&mut self.plan, action) {
                             self.plan_hidden = false;
                             let (w, h) = self.last_term_size;
-                            let block = if crate::render::plan_box_size(w as usize, h as usize, self.plan.len()).is_some() {
+                            let block = if crate::render::plan_box_size(w as usize, h as usize, &self.plan).is_some() {
                                 flashagent_tools::plan_tool::format_plan_summary(&self.plan)
                             } else {
                                 format_plan(&self.plan)
@@ -756,7 +756,7 @@ impl App {
             self.plan = ledger.plan().to_vec();
             self.plan_hidden = false;
             let (w, h) = self.last_term_size;
-            let block = if crate::render::plan_box_size(w as usize, h as usize, ledger.plan().len()).is_some() {
+            let block = if crate::render::plan_box_size(w as usize, h as usize, ledger.plan()).is_some() {
                 flashagent_tools::plan_tool::format_plan_summary(ledger.plan())
             } else {
                 format_plan(ledger.plan())

@@ -556,10 +556,33 @@ fn install_crash_hook(reports_enabled: bool) {
 
 }
 
+/// Set `FLASHAGENT_TRACE=1`: every start-up phase appends a line to
+/// `<home>/.flashagent/startup-trace.log`, stamped with the seconds since the
+/// process began. A start-up that hangs on a machine nobody can sit at is
+/// otherwise a blank screen with nothing to report. Off by default, and the
+/// check costs a getenv.
+pub(crate) fn trace(phase: &str) {
+    use std::io::Write as _;
+    use std::sync::OnceLock;
+    static START: OnceLock<std::time::Instant> = OnceLock::new();
+    if std::env::var_os("FLASHAGENT_TRACE").is_none() {
+        return;
+    }
+    let start = START.get_or_init(std::time::Instant::now);
+    let home = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")).unwrap_or_default();
+    let dir = std::path::PathBuf::from(home).join(".flashagent");
+    let _ = std::fs::create_dir_all(&dir);
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(dir.join("startup-trace.log")) {
+        let _ = writeln!(f, "{:>8.3}s  {phase}", start.elapsed().as_secs_f64());
+    }
+}
+
 #[tokio::main(flavor = "multi_thread", worker_threads = 4)]
 async fn main() -> Result<()> {
     flashagent_svc::updater::remove_stale_backups_beside_exe();
+    trace("main: start");
     let mut config = AppConfig::load();
+    trace("main: config loaded");
     // What the models were measured to be, from the runs before this one. A
     // model that was measured is not measured again: the server's own count
     // of its own words is what the counter learns from, and it is the same
@@ -568,10 +591,14 @@ async fn main() -> Result<()> {
         flashagent_llm::load_measurements(&path);
     }
     let Some((force_setup, skip_trust, session_start)) = cli_start(&mut config).await? else { return Ok(()) };
+    trace("main: command line read");
 
     let Some(ran_setup) = startup_screens(&mut config, force_setup).await else { return Ok(()) };
+    trace("main: startup screens done");
+    trace("main: preparing the backend");
     let Some(BackendStartup { source, model, context_display, context_capacity, cwd_display, cwd, cwd_missing, initial_effort, available_models, first_run_verdict, pending_discovery }) =
         prepare_backend(&mut config, skip_trust, ran_setup).await? else { return Ok(()) };
+    trace("main: backend ready");
 
     // The interface language before anything renders; the system prompt is
     // not part of it. Set before the questions about MCP servers, which the
@@ -585,6 +612,7 @@ async fn main() -> Result<()> {
     // before it runs. The answer is remembered, unless the safe mode is on:
     // there, nothing runs without a question every time.
     let allowed = approve_project_mcp_servers(&mut config, &mcp_manager, &cwd).await;
+    trace("main: mcp servers answered");
     mcp_manager.set_allowed(allowed.iter().cloned().collect());
     let mcp_bg = mcp_manager.clone();
     tokio::spawn(async move {
@@ -701,6 +729,7 @@ async fn main() -> Result<()> {
 }
 
 async fn run_terminal(ctx: AppContext) -> Result<()> {
+    trace("run_terminal: raw mode");
     enable_raw_mode()?;
     let _ = crossterm::execute!(
         std::io::stdout(),
@@ -709,7 +738,9 @@ async fn run_terminal(ctx: AppContext) -> Result<()> {
         EnableMouseCapture,
     );
     enable_enhanced_keys();
+    trace("run_terminal: alternate screen");
     let result = run_app(ctx).await;
+    trace("run_terminal: app returned");
 
     flashagent_tui::screen::set_progress(flashagent_tui::screen::Progress::None);
     // Before the screen goes: the shell below must get plain Enter and Tab back.
@@ -1821,6 +1852,7 @@ async fn run_app(ctx: AppContext) -> Result<SaveOutcome> {
             }
         });
     }
+    trace("run_app: channels ready");
     let (channel_probe_tx, channel_probes) = tokio::sync::mpsc::unbounded_channel::<ChannelTarget>();
     let (update_tx, updates) = tokio::sync::mpsc::unbounded_channel::<UpdateNotice>();
     let (channel_watch_tx, channel_watch_rx) = tokio::sync::watch::channel(ctx.config.update_channel);
@@ -1874,7 +1906,12 @@ async fn run_app(ctx: AppContext) -> Result<SaveOutcome> {
         .with_memory(&w.memory_block)
         // The plan of the project: what is where, so the model does not spend
         // turns looking for the file it wants.
-        .with_plan(flashagent_core::plan::project_outline(&w.cwd, PLAN_CHARS));
+        .with_plan({
+            trace("run_app: walking the project");
+            let outline = flashagent_core::plan::project_outline(&w.cwd, PLAN_CHARS);
+            trace("run_app: project walked");
+            outline
+        });
     let system_prompt_text =
         build_system_prompt(&system_prompt_config.clone().with_personality(&ctx.config.personality));
     let (resume_session_id, open_session_picker, session_note) = resolve_session_start(ctx.session_start, &w.cwd_display);
@@ -1887,6 +1924,7 @@ async fn run_app(ctx: AppContext) -> Result<SaveOutcome> {
     let effort_memory = flashagent_core::EffortMemory::load();
     w.source.set_effort_bias(effort_memory.steps(&ctx.model));
     w.tools_arc.set_vision_supported(model_sees_images(&w.source, &ctx.model));
+    trace("run_app: building the app");
     let mut app = initial_app(InitialApp {
         app_config: ctx.config,
         model: ctx.model,
@@ -1993,6 +2031,12 @@ async fn event_loop(app: &mut App, w: &Wiring, mut inbox: Inbox, session_id: &mu
         // more than a frame late.
         app.tasks_tick(&w.cx(&mut inbox.events, session_id, mascot_mood, &tip_lines));
         if inbox.events.is_empty() || last_draw.elapsed() >= FRAME {
+            // The first frame is the moment the interface exists; a start-up
+            // that hangs before it is the one the trace is for.
+            static FIRST_FRAME: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+            if FIRST_FRAME.swap(false, Ordering::Relaxed) {
+                trace("run_app: first frame");
+            }
             app.draw(&w.cx(&mut inbox.events, session_id, mascot_mood, &tip_lines), autocomplete.as_ref());
             last_draw = std::time::Instant::now();
         }

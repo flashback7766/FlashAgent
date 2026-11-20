@@ -5634,10 +5634,10 @@ fn the_plan_shows_as_a_box_in_the_corner_and_leaves_when_it_is_done() {
     let server = MockServer::start(vec![
         Reply::ToolCall {
             name: "plan".into(),
-            arguments: serde_json::json!({"action":"create","items":[{"text":"read the notes"},{"text":"fix the bug"},{"text":"run the tests"}]}),
+            arguments: serde_json::json!({"action":"create","items":[{"text":"read the notes"},{"text":"fix the bug"}]}),
         },
         Reply::ToolCall { name: "plan".into(), arguments: serde_json::json!({"action":"done","steps":["read the notes"]}) },
-        Reply::ToolCall { name: "plan".into(), arguments: serde_json::json!({"action":"done","steps":["fix the bug","run the tests"]}) },
+        Reply::ToolCall { name: "plan".into(), arguments: serde_json::json!({"action":"done","steps":["fix the bug"]}) },
         Reply::Text("All done.".into()),
     ]);
     // A pause between replies: the box has a moment on screen before the next
@@ -5647,25 +5647,29 @@ fn the_plan_shows_as_a_box_in_the_corner_and_leaves_when_it_is_done() {
     let mut term = ready(&home, &server);
     term.type_text("please plan this");
     term.send(ENTER);
-    term.wait_for("Plan · 0/3", WAIT);
+    term.wait_for("Plan · 0/2", WAIT);
     let screen = term.screen();
-    assert!(screen.contains("read the notes") && screen.contains("fix the bug") && screen.contains("run the tests"), "the checklist is in the box:\n{screen}");
+    assert!(screen.contains("read the notes") && screen.contains("fix the bug"), "the checklist is in the box:\n{screen}");
+    // The card keeps the top of the screen: the box stands under it.
+    let (card_row, _) = term.find_on_screen("the coding agent for local models").expect("the welcome card is on screen");
+    let (box_row, _) = term.find_on_screen("Plan · 0/2").expect("the box header is on screen");
+    assert!(box_row > card_row, "the box covers the welcome card:\n{screen}");
     assert!(screen.contains("plan:"), "the transcript names the plan:\n{screen}");
-    assert!(screen.contains("3 step(s)"), "the transcript keeps a short line while the box shows:\n{screen}");
+    assert!(screen.contains("2 step(s)"), "the transcript keeps a short line while the box shows:\n{screen}");
 
     // A click on the header sends the box away; the next call brings it back.
-    let (row, col) = term.find_on_screen("Plan · 0/3").expect("the box header is on screen");
+    let (row, col) = term.find_on_screen("Plan · 0/2").expect("the box header is on screen");
     term.click(row, col);
     std::thread::sleep(std::time::Duration::from_millis(400));
-    assert!(!term.screen().contains("Plan · 0/3"), "the click hid the box:\n{}", term.screen());
-    term.wait_for("Plan · 1/3", WAIT);
+    assert!(!term.screen().contains("Plan · 0/2"), "the click hid the box:\n{}", term.screen());
+    term.wait_for("Plan · 1/2", WAIT);
 
     // Everything done: the box goes, the short line stays with the count.
     term.wait_for("All done.", WAIT);
     std::thread::sleep(std::time::Duration::from_millis(400));
     let screen = term.screen();
-    assert!(!screen.contains("Plan · 1/3"), "a finished plan does not keep the box:\n{screen}");
-    assert!(screen.contains("plan: 3 step(s) · 3 done"), "the short line says what the plan reached:\n{screen}");
+    assert!(!screen.contains("Plan · 1/2"), "a finished plan does not keep the box:\n{screen}");
+    assert!(screen.contains("plan: 2 step(s) · 2 done"), "the short line says what the plan reached:\n{screen}");
     quit(&mut term);
 }
 

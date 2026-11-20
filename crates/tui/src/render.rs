@@ -1641,6 +1641,9 @@ struct LayoutInputs<'a> {
     popup_lines: usize,
     /// The live plan for the corner box, when it may draw.
     plan: Option<&'a [flashagent_tools::plan_tool::PlanStep]>,
+    /// The welcome card's rows at the top of the conversation: the box
+    /// stands under it rather than over it.
+    welcome_lines: usize,
     /// The pointer is on the plan box's header.
     hover_plan: bool,
     /// The pointer is on the status line's provider or model name.
@@ -1872,12 +1875,13 @@ impl Renderer {
             zone_flash: st.zone_flash,
             popup_lines,
             plan: st.plan,
+            welcome_lines: chat.welcome_len(),
         });
     }
     fn paint_layout(&mut self, settled: &[RenderLine], tail: &mut Vec<RenderLine>, layout: LayoutInputs<'_>) {
         let LayoutInputs {
             width, height, card_key, card_start, paint_start, mut input_line_idx, text_cursor, border_color, selection, owner_at, zone_at, hover_chat,
-            hover_gauge, hover_mode, hover_marker, zone_flash, mut card_lines, popup_lines, plan, hover_plan, hover_provider, hover_model,
+            hover_gauge, hover_mode, hover_marker, zone_flash, mut card_lines, popup_lines, plan, welcome_lines, hover_plan, hover_provider, hover_model,
         } = layout;
     // The conversation scrolls; the composer and the footer under it stay where
     // they are, so a reply can be written while reading back.
@@ -2141,40 +2145,60 @@ impl Renderer {
     // scrollbar; the header answers a hover and a press.
     self.plan_zone = None;
     if let Some(plan) = plan.filter(|p| !p.is_empty()) {
-        if let Some((box_w, box_h)) = plan_box_size(width, height, plan.len()) {
+        if let Some((box_w, box_h)) = plan_box_size(width, height, plan) {
             use flashagent_tools::plan_tool::PlanStatus;
             let border = "\x1b[38;2;95;90;85m";
             let dim = "\x1b[38;2;130;128;135m";
             let reset = "\x1b[0m";
-            let content_w = box_w - 4;
+            let content_w = box_w - 2;
             let from = width.saturating_sub(box_w + 2);
-            let done = plan.iter().filter(|s| s.status == PlanStatus::Completed).count();
-            let title = format!(" Plan · {done}/{} ", plan.len());
-            let mut lines = Vec::with_capacity(box_h);
-            lines.push(format!(
-                "{border}╭─\x1b[1;38;2;225;175;95m{title}{border}{}╮{reset}",
-                "─".repeat(content_w.saturating_sub(title.chars().count() + 1))
-            ));
-            for step in plan {
-                let (glyph_color, glyph_text) = match step.status {
-                    PlanStatus::Completed => ("\x1b[38;2;145;205;140m", format!("\x1b[2m{}\x1b[0m", step.status.glyph())),
-                    PlanStatus::InProgress => ("\x1b[1;38;2;225;175;95m", step.status.glyph().to_string()),
-                    PlanStatus::Pending => (dim, step.status.glyph().to_string()),
-                };
-                let clipped = clip_ansi(&step.text, content_w.saturating_sub(3));
-                let pad = " ".repeat(content_w.saturating_sub(3 + visible_width(&clipped)));
+            // The welcome card keeps the top of the screen while it shows: the
+            // box stands under it instead of over it, and when the card is
+            // scrolled away the box returns to the very top.
+            let welcome_bottom = welcome_lines.saturating_sub(self.chat_view.0);
+            let top = welcome_bottom.min(rows.len());
+            if top + box_h <= self.chat_rows_on_screen && top + box_h <= rows.len() {
+                let done = plan.iter().filter(|s| s.status == PlanStatus::Completed).count();
+                let title = format!(" Plan · {done}/{} ", plan.len());
+                // The borders and the interior add up to one width: the header
+                // gives its line its dashes, every step row pads its text, and
+                // the bottom closes at the same cell. Three parts measured
+                // apart was how the frame came out crooked. A long step wraps
+                // onto the next rows at the same text column instead of
+                // pushing its text past the border.
+                let mut lines = Vec::with_capacity(box_h);
                 lines.push(format!(
-                    "{border}│{reset} {glyph_color}{}{reset} \x1b[38;2;225;230;240m{clipped}{pad}{reset} {border}│{reset}",
-                    glyph_text
+                    "{border}╭─\x1b[1;38;2;225;175;95m{title}{border}{}╮{reset}",
+                    "─".repeat(content_w.saturating_sub(title.chars().count() + 1))
                 ));
+                let budget = content_w.saturating_sub(4).max(8);
+                for step in plan {
+                    let (glyph_color, glyph_text) = match step.status {
+                        PlanStatus::Completed => ("\x1b[38;2;145;205;140m", step.status.glyph().to_string()),
+                        PlanStatus::InProgress => ("\x1b[1;38;2;225;175;95m", step.status.glyph().to_string()),
+                        PlanStatus::Pending => (dim, step.status.glyph().to_string()),
+                    };
+                    let text_color = if step.status == PlanStatus::Completed { "\x1b[2m" } else { "\x1b[38;2;225;230;240m" };
+                    for (i, line) in flashagent_tui::wrap_styled(&step.text, budget).iter().enumerate() {
+                        // │ + space + glyph + space + text + pad + space + │:
+                        // the prefix is three cells on the first row and three
+                        // spaces under it, so wrapped lines align with the text.
+                        let (cell, color) = if i == 0 { (glyph_text.as_str(), glyph_color) } else { (" ", dim) };
+                        let pad = " ".repeat(content_w.saturating_sub(4 + visible_width(line)));
+                        lines.push(format!(
+                            "{border}│{reset} {color}{cell}{reset} {text_color}{line}{pad}{reset} {border}│{reset}"
+                        ));
+                    }
+                }
+                lines.push(format!("{border}╰{}╯{reset}", "─".repeat(content_w)));
+                for (i, seg) in lines.into_iter().enumerate().take(box_h) {
+                    let row = top + i;
+                    let left = clip_ansi(&rows[row], from);
+                    let pad = " ".repeat(from.saturating_sub(visible_width(&left)));
+                    rows[row] = format!("{left}{pad}{seg}");
+                }
+                self.plan_zone = Some((top, from + 1, width.saturating_sub(2)));
             }
-            lines.push(format!("{border}╰{}╯{reset}", "─".repeat(content_w + 2)));
-            for (i, seg) in lines.into_iter().enumerate().take(box_h) {
-                let left = clip_ansi(&rows[i], from);
-                let pad = " ".repeat(from.saturating_sub(visible_width(&left)));
-                rows[i] = format!("{left}{pad}{seg}");
-            }
-            self.plan_zone = Some((0, from + 1, width.saturating_sub(2)));
         }
     }
     // The plan header carries the same quiet light as the other buttons while
@@ -2592,18 +2616,23 @@ fn with_right_cell(line: &str, width: usize, cell: &str) -> String {
 /// The plan box's size on a terminal this wide and tall, when it fits at all:
 /// `None` says the transcript keeps its short line and the plan is read
 /// nowhere else until the window grows or the plan changes.
-pub(crate) fn plan_box_size(width: usize, height: usize, steps: usize) -> Option<(usize, usize)> {
-    if steps == 0 {
+pub(crate) fn plan_box_size(width: usize, height: usize, plan: &[flashagent_tools::plan_tool::PlanStep]) -> Option<(usize, usize)> {
+    if plan.is_empty() {
         return None;
     }
     let content_w = (width / 3).clamp(20, 38);
-    let box_w = content_w + 4;
+    let box_w = content_w + 2;
+    // A step longer than its column wraps instead of pushing the border out:
+    // the box grows downward, and the fit below is measured on the wrapped
+    // height, not on the number of steps.
+    let budget = content_w.saturating_sub(4).max(8);
+    let rows = plan.iter().map(|s| flashagent_tui::wrap_styled(&s.text, budget).len().max(1)).sum::<usize>();
     // A transcript narrow enough to feel the box is not a transcript the box
     // may cover; six rows under it keep the box clear of the footer.
-    if width.saturating_sub(box_w) < 46 || steps + 2 > height.saturating_sub(6) {
+    if width.saturating_sub(box_w) < 46 || rows + 2 > height.saturating_sub(6) {
         return None;
     }
-    Some((box_w, steps + 2))
+    Some((box_w, rows + 2))
 }
 
 /// How long a clicked card row keeps its pressed look.
