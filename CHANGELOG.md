@@ -1,5 +1,34 @@
 # Changelog
 
+## b731 — The bot gets rebuilt, and serve learns to be steered mid-turn
+
+- **A prompt into a running turn steers by itself.** `POST /turn` while a
+  turn is already running is no longer a busy-error for the client to
+  route around: serve flies the words into the running answer (`steered:
+  true`), and the loop drains them at the top of its next step — so a
+  steered prompt lands in the same request as the tool results that just
+  came back, and the model answers the new words with those results in
+  front of it, not a step later. The explicit `POST /steer` stays for
+  clients that want to say what they mean.
+- **The serve lives in a bounded window.** `--context-cap` narrows a
+  room's window below what the model reports, `--compact-at` sets the
+  compaction trigger as an absolute token count, and the TUI's
+  TurnCompactor is wired into the serve loop: a long session summarizes
+  itself mid-turn instead of blowing the window. Built for the bot's
+  users' room — 65k with compaction at 55k.
+- **The Telegram bot is rebuilt as a package** (`bot/flashagent_bot`):
+  rooms are dev / users / channel, the config validates itself at
+  startup, the rate limiter mutes spammers for real hours and survives
+  restarts, token usage is accounted per room per day behind a soft
+  daily cap, and the dev room gained the active-participant pulse that
+  reads the room's chatter only after it has gone quiet. The report
+  pipeline talks to GitHub — discuss first, dedup against open issues,
+  then file or amend under the configured account — and the channel
+  pipeline drafts posts with publish/redo/cancel buttons, with the
+  weekly devlog series on a schedule. The chat journal replaces the
+  in-memory collector: every room message lands in a file the brains
+  read themselves, for zero tokens.
+
 ## b730 — A plan the person watches, and names the model goes by
 
 - **`update_plan` became `plan`, with actions.** `create` starts the list,
