@@ -1,5 +1,29 @@
 # Changelog
 
+## b732 — The brain answers each message with its own chat_reply
+
+- **`chat_reply(message_id, text)` — the per-message answer.** The room's
+  brain stops dumping one wall of text over everything it was asked: each
+  member's message gets its own reply, sent the moment the model calls the
+  tool — the room watches the answers arrive while the brain still works.
+  The tool exists only where a chat is being served (`Availability::Serve`:
+  `--serve` wires an outbox into the event feed, the terminal never shows
+  it) and is `Category::Read`, so a room's brain never asks permission to
+  talk. Turn prompts carry `msg:N` tags and member ids; the journal stores
+  the same ids, so the pulse answers specific messages instead of speaking
+  into the air. Several members asking the same thing get one answer that
+  tags the rest with `tg://user?id=` mention links.
+- **The final text of a turn that already spoke through replies is kept for
+  the log and the `ISSUE:` sentinel but not posted** — a brain that never
+  called the tool still gets its answer through as before. Service turns
+  (the dedup verdict, the issue body, the digest, the channel posts) are
+  told to answer in plain text.
+- **The bot starts while the issues token is still on its way**: an empty
+  `[github].token` means the report pipeline says it is not configured
+  instead of refusing to run. The bot also logs the id of every chat it
+  does not know — the discovery path for a room whose real id is not in
+  the config yet.
+
 ## b731 — The bot gets rebuilt, and serve learns to be steered mid-turn
 
 - **A prompt into a running turn steers by itself.** `POST /turn` while a
