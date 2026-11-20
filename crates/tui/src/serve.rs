@@ -485,12 +485,37 @@ async fn handle(
 pub(crate) struct ServeOpts {
     pub port: u16,
     pub dir: Option<PathBuf>,
+    /// Overrides `config.prompt_detail` for this instance: a room that runs
+    /// often runs on the compact tier.
+    pub prompt: Option<String>,
+    /// Overrides `config.permission_mode`: a room's brain may be more or
+    /// less trusted than the TUI's.
+    pub mode: Option<String>,
+}
+
+/// The permission mode a `--mode` flag names, or None when it names nothing.
+fn parse_mode(raw: &str) -> Option<flashagent_core::PermissionMode> {
+    use flashagent_core::PermissionMode;
+    match raw.to_lowercase().as_str() {
+        "planning" => Some(PermissionMode::Planning),
+        "manual" => Some(PermissionMode::Manual),
+        "accept" | "acceptedits" | "accept_edits" => Some(PermissionMode::AcceptEdits),
+        "bypass" | "acceptall" | "accept_all" => Some(PermissionMode::Bypass),
+        _ => None,
+    }
 }
 
 /// `--serve`: no screens, no terminal, one session and one HTTP API. The
 /// config must already be set up (`flashagent --setup`); a missing model is
 /// an error, because a server with no brain is a blank screen with a port.
-pub(crate) async fn run_serve(config: flashagent_core::AppConfig, opts: ServeOpts) -> Result<()> {
+pub(crate) async fn run_serve(mut config: flashagent_core::AppConfig, opts: ServeOpts) -> Result<()> {
+    if let Some(detail) = &opts.prompt {
+        config.prompt_detail = detail.clone();
+    }
+    if let Some(mode) = &opts.mode {
+        config.permission_mode = parse_mode(mode)
+            .unwrap_or(flashagent_core::PermissionMode::AcceptEdits);
+    }
     flashagent_tui::i18n::set(flashagent_tui::i18n::Lang::from_code(&config.interface_language));
     trace("serve: start");
     if config.active_profile().model.trim().is_empty() {
