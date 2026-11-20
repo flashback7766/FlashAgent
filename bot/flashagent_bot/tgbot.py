@@ -36,6 +36,7 @@ from .config import Config, Room
 from .issues import GithubClient, GithubError
 from .journal import Journal
 from .limits import ALLOW, COOLDOWN, MUTED, RateLimiter
+from .posts import parse_series
 from .usage import UsageStore
 from .util import (
     escape_html,
@@ -81,6 +82,15 @@ class RoomState:
     pulse_mark: int = 0  # journal.count at the last pulse
 
 
+@dataclass
+class Draft:
+    """A channel post waiting for the buttons. One per dev room: the new
+    draft replaces the old, whose buttons then answer «уже нет»."""
+
+    message_id: int
+    text: str  # the brain's HTML, sent to the channel as-is
+
+
 class App:
     def __init__(self, cfg: Config):
         self.cfg = cfg
@@ -113,6 +123,10 @@ class App:
         # Fire-and-forget coroutines need a held reference, or the event loop
         # may collect them mid-flight.
         self._tasks: set[asyncio.Task] = set()
+        self.drafts: dict[int, Draft] = {}
+        self.redo_awaited: set[int] = set()
+        self.series_done: set[str] = set()
+        self.series_warned: set[int] = set()
 
     def _spawn(self, coro) -> None:
         task = asyncio.create_task(coro)
@@ -138,6 +152,7 @@ class App:
         background = [
             asyncio.create_task(self._pulse_loop()),
             asyncio.create_task(self._digest_loop()),
+            asyncio.create_task(self._series_loop()),
         ]
         log.info("bot up as @%s, %d rooms", self.me_username, len(self.rooms))
         try:
@@ -161,6 +176,7 @@ class App:
         router.message.register(self.cmd_report, Command("report"))
         router.message.register(self.cmd_digest, Command("digest"))
         router.callback_query.register(self.on_approve, F.data.startswith("appr:"))
+        router.callback_query.register(self.on_post_callback, F.data.startswith("post:"))
         router.message.register(self.on_room_message)
 
     # ---------- helpers ----------
@@ -422,11 +438,112 @@ class App:
         if not topic:
             await message.answer("как пользоваться: /post <о чём пост>")
             return
-        # The draft-and-buttons pipeline lands with the channel phase; until
-        # then the command says so instead of silently doing nothing.
-        await message.answer(
-            "📝 пайплайн канала ещё пишется — черновики с кнопками появятся в следующей фазе"
+        prompt = self._post_prompt(st, f"Тема поста: {topic}")
+        text = await self._run_turn(st, prompt, message.chat.id, reply_to=message)
+        if text:
+            await self._show_draft(st, text)
+
+    def _post_prompt(self, st: RoomState, what: str) -> str:
+        return (
+            f"{what}. Напиши готовый пост в Telegram-канал проекта. Контекст —"
+            f" журнал дев-комнаты {st.room.journal} (свежие строки). Живой"
+            " разговорный тон, уместные эмодзи, HTML-разметка (<b>жирный</b>,"
+            " <a href=\"...\">ссылки</a>). Кратко: до 3500 символов. В ответе"
+            " — только сам пост, без преамбулы."
         )
+
+    async def _show_draft(self, st: RoomState, text: str) -> None:
+        """Put the draft in the dev room with the three buttons. The draft
+        is shown as the brain wrote it (HTML); Telegram rejects malformed
+        markup, so the display falls back to plain text rather than dying."""
+        assert self.bot is not None
+        keyboard = InlineKeyboardMarkup(
+            inline_keyboard=[
+                [
+                    InlineKeyboardButton(text="✅ Публиковать", callback_data="post:pub"),
+                    InlineKeyboardButton(text="✏️ Переделать", callback_data="post:red"),
+                    InlineKeyboardButton(text="❌ Отмена", callback_data="post:can"),
+                ]
+            ]
+        )
+        try:
+            msg = await self.bot.send_message(
+                st.room.chat_id, f"📝 черновик:\n\n{text}", reply_markup=keyboard
+            )
+        except Exception:
+            msg = await self.bot.send_message(
+                st.room.chat_id,
+                f"📝 черновик:\n\n{escape_html(text)}",
+                reply_markup=keyboard,
+            )
+        old = self.drafts.get(st.room.chat_id)
+        if old is not None and old.message_id != msg.message_id:
+            try:
+                await self.bot.edit_message_text(
+                    "↩️ черновик заменён — свежий ниже",
+                    chat_id=st.room.chat_id,
+                    message_id=old.message_id,
+                )
+            except Exception:
+                pass
+        self.drafts[st.room.chat_id] = Draft(message_id=msg.message_id, text=text)
+
+    async def on_post_callback(self, query: CallbackQuery) -> None:
+        assert self.bot is not None and self.http is not None
+        if not self.is_admin(query.from_user.id):
+            await query.answer("решают админы", show_alert=True)
+            return
+        if query.message is None:
+            return
+        st = self.state_by_chat(query.message.chat.id)
+        if st is None or st.room.kind != "dev":
+            return
+        action = (query.data or "").split(":")[1]
+        draft = self.drafts.get(st.room.chat_id)
+        if draft is None:
+            await query.answer("черновика уже нет")
+            return
+        if action == "can":
+            self.drafts.pop(st.room.chat_id, None)
+            try:
+                await query.message.edit_text("❌ черновик отменён")
+            except Exception:
+                pass
+            await query.answer("отменено")
+            return
+        if action == "pub":
+            channel = next(
+                (s for s in self.rooms.values() if s.room.kind == "channel"), None
+            )
+            if channel is None:
+                await query.answer("в конфиге нет канала", show_alert=True)
+                return
+            try:
+                await self.bot.send_message(channel.room.chat_id, draft.text)
+            except Exception:
+                # The brain's HTML did not pass Telegram's parser — the post
+                # still goes out, just without the markup.
+                try:
+                    await self.bot.send_message(
+                        channel.room.chat_id, escape_html(draft.text)
+                    )
+                except Exception:
+                    await query.answer("канал не принял пост", show_alert=True)
+                    return
+            self.drafts.pop(st.room.chat_id, None)
+            try:
+                await query.message.edit_text("✅ опубликовано в канал")
+            except Exception:
+                pass
+            await query.answer("опубликовано")
+            return
+        if action == "red":
+            self.redo_awaited.add(st.room.chat_id)
+            await self.bot.send_message(
+                st.room.chat_id,
+                "✏️ напиши, что поменять, reply-ем на сообщение черновика",
+            )
+            await query.answer("жду замечания")
 
     async def cmd_status(self, message: Message) -> None:
         st = self.state_by_chat(message.chat.id)
@@ -584,6 +701,28 @@ class App:
                     f"⏳ лимит {self.cfg.requests_per_hour}/час,"
                     f" отвечу через {int(secs // 60) + 1} мин"
                 )
+                return
+
+        if room.kind == "dev" and room.chat_id in self.redo_awaited:
+            reply = message.reply_to_message
+            draft = self.drafts.get(room.chat_id)
+            if (
+                draft is not None
+                and reply is not None
+                and reply.message_id == draft.message_id
+            ):
+                # The critique rides on the draft itself: the next draft
+                # replaces the old one, buttons and all.
+                self.redo_awaited.discard(room.chat_id)
+                prompt = (
+                    f"Вот черновик поста:\n\n{draft.text}\n\nЗамечания от"
+                    f" {who}: {text}\nПерепиши пост с учётом замечаний. В"
+                    " ответе — только сам пост."
+                )
+                await message.answer("✏️ переделываю…")
+                new_text = await self._run_turn(st, prompt, room.chat_id)
+                if new_text:
+                    await self._show_draft(st, new_text)
                 return
 
         if room.kind == "dev" and not self._addressed(st, message):
@@ -771,3 +910,41 @@ class App:
                     await self._digest(dev.room.chat_id)
             except Exception:
                 log.exception("digest loop hiccup")
+
+    async def _series_loop(self) -> None:
+        """The channel series (the devlog): at the configured weekday and
+        time the dev brain gathers the week from the journal and posts a
+        draft into the dev room — the buttons decide, never the schedule."""
+        while True:
+            await asyncio.sleep(60)
+            try:
+                now = time.localtime()
+                for st in self.rooms.values():
+                    spec = st.room.devlog
+                    if not spec:
+                        continue
+                    parsed = parse_series(spec)
+                    if parsed is None:
+                        if st.room.chat_id not in self.series_warned:
+                            self.series_warned.add(st.room.chat_id)
+                            log.warning(
+                                "devlog %r is unreadable: want 'Mon 18:00'", spec
+                            )
+                        continue
+                    day, (hh, mm) = parsed
+                    if now.tm_wday != day or now.tm_hour != hh or now.tm_min != mm:
+                        continue
+                    key = f"{st.room.chat_id}-{time.strftime('%Y-%m-%d')}"
+                    if key in self.series_done:
+                        continue
+                    self.series_done.add(key)
+                    prompt = self._post_prompt(
+                        st,
+                        "Собери девлог за последнюю неделю: что делали (из"
+                        " журнала дев-комнаты), что выкатили, что дальше.",
+                    )
+                    text = await self._run_turn(st, prompt, st.room.chat_id)
+                    if text:
+                        await self._show_draft(st, text)
+            except Exception:
+                log.exception("series loop hiccup")
