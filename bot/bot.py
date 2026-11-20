@@ -1,10 +1,12 @@
 """FlashAgent, the Telegram face.
 
-The bot sits in a group, listens to what people say, and is the one who talks
-to the FlashAgent backend (`flashagent --serve`): asks it questions with the
-chat as context, brings back answers, drafts channel posts for approval, and
-puts facts into the memory vault. The brain does the work; this process only
-carries messages and buttons.
+One bot process, many rooms. Every room in the config is one deployment: its
+own backend (`flashagent --serve`), its own session and vault, and its own
+mode. The developer room gets the whole brain — plans, tools, approvals,
+channel posts. The users' room collects reports and answers questions on the
+compact tier, and speaks only when addressed: nobody's tokens burn on
+silence. The brain does the work; this process only carries messages and
+buttons.
 """
 
 import asyncio
@@ -52,11 +54,10 @@ def load_config(path: pathlib.Path) -> dict:
         )
     with open(path, "rb") as f:
         cfg = tomllib.load(f)
-    for section in ("telegram", "serve"):
-        if section not in cfg:
-            raise ConfigError(f"config {path} has no [{section}] section")
-    if not cfg["telegram"].get("token"):
+    if not cfg.get("telegram", {}).get("token"):
         raise ConfigError("config [telegram].token is empty: the BotFather token goes there")
+    if not cfg.get("chats"):
+        raise ConfigError("config has no [[chats]] rooms: every room names its backend")
     return cfg
 
 
@@ -75,7 +76,7 @@ def split_reply(text: str, limit: int = 3800) -> list[str]:
 
 
 class Brain:
-    """The HTTP client for `flashagent --serve`. Polls, does not stream: a
+    """The HTTP client for one `flashagent --serve`. Polls, does not stream: a
     turn is minutes, a poll a second."""
 
     def __init__(self, url: str, token: str):
@@ -111,7 +112,7 @@ class Brain:
         async with session.post(f"{self.url}/reset", headers=self._headers()) as r:
             await r.read()
 
-    async def poll(self, session, poll_interval: float) -> list[ServeEvent]:
+    async def poll(self, session) -> list[ServeEvent]:
         """New events since the last poll, oldest first."""
         async with session.get(
             f"{self.url}/events", params={"since": self.since}, headers=self._headers()
@@ -140,8 +141,27 @@ class Brain:
         return out
 
 
+class Room:
+    """One chat of the config: its backend, its context, its rules. The dev
+    room gets the whole brain; the users' room collects reports on the
+    compact tier and answers only when addressed."""
+
+    def __init__(self, name: str, room_cfg: dict, serve: dict):
+        self.name = name
+        self.mode = room_cfg.get("mode", "dev")
+        self.chat_id = int(room_cfg["chat_id"])
+        self.brain = Brain(serve["url"], serve.get("token", ""))
+        self.poll_interval = float(room_cfg.get("poll_interval", 1.0))
+        self.collector = ChatCollector(int(room_cfg.get("context_messages", 20)))
+        self.reports_path = pathlib.Path(room_cfg.get("reports_file", ""))
+        self.pending_post: dict[int, str] = {}
+
+    def is_admin(self, cfg: dict, user_id: int | None) -> bool:
+        return user_id in set(cfg["telegram"].get("admin_ids", []))
+
+
 class ChatCollector:
-    """The last messages of the group, the context every ask rides on."""
+    """The last messages of the room, the context every ask rides on."""
 
     def __init__(self, limit: int):
         self.limit = limit
@@ -155,33 +175,52 @@ class ChatCollector:
 
     def context(self) -> str:
         if not self.lines:
-            return "(the group has been quiet)"
+            return "(the room has been quiet)"
         return "\n".join(self.lines)
 
 
-class RxPlaya:
-    """The bot for one deployment: a group, a channel and one backend."""
+def escape(text: str) -> str:
+    return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+
+def split_reply(text: str, limit: int = 3800) -> list[str]:
+    if len(text) <= limit:
+        return [text]
+    parts = []
+    while text:
+        parts.append(text[:limit])
+        text = text[limit:]
+    return parts
+
+
+class BotApp:
+    """The bot over all rooms: one Telegram bot, per-room backends."""
 
     def __init__(self, cfg: dict):
         tg = cfg["telegram"]
+        self.cfg = cfg
         self.bot = Bot(tg["token"], default=DefaultBotProperties(parse_mode=ParseMode.HTML))
-        self.group_id = int(tg["group_id"])
         self.channel_id = int(tg["channel_id"])
-        self.admin_ids = set(tg.get("admin_ids", []))
-        serve = cfg["serve"]
-        self.brain = Brain(serve["url"], serve.get("token", ""))
-        self.poll_interval = float(cfg.get("brain", {}).get("poll_interval", 1.0))
-        self.collector = ChatCollector(int(cfg.get("brain", {}).get("context_messages", 30)))
-        self.pending_post: dict[int, str] = {}
+        self.rooms: dict[int, Room] = {}
+        for name, room_cfg in cfg.get("chats", {}).items():
+            serve_name = room_cfg.get("serve", name)
+            serve = cfg.get("serve", {}).get(serve_name)
+            if not serve:
+                raise ConfigError(f"room {name} names backend {serve_name!r} which is not in [serve]")
+            self.rooms[int(room_cfg["chat_id"])] = Room(name, room_cfg, serve)
+        self.pending_post: dict[int, tuple[int, str]] = {}
 
-    def is_admin(self, user_id: int | None) -> bool:
-        return user_id in self.admin_ids
+    def room_by_chat(self, chat_id: int) -> Room | None:
+        return self.rooms.get(int(chat_id))
 
-    async def run_turn(self, message: Message, prompt: str) -> None:
-        """One turn against the backend, with the chat as context. The live
-        line is edited as tools run; the finished answer is sent in chunks."""
+    def is_admin(self, chat_id: int, user_id: int | None) -> bool:
+        return user_id in set(self.cfg["telegram"].get("admin_ids", []))
+
+    async def run_turn(self, message: Message, room: Room, prompt: str) -> None:
+        """One turn against the room's backend. The live line is edited as
+        tools run; the finished answer is sent in chunks."""
         note = await message.answer("💭 думаю…")
-        ok, why = await self.brain.start_turn(self.bot.session, prompt)
+        ok, why = await room.brain.start_turn(self.bot.session, prompt)
         if not ok:
             await note.edit_text(f"⚠️ {why}")
             return
@@ -189,8 +228,8 @@ class RxPlaya:
         last_edit = 0.0
         failed = None
         while True:
-            await asyncio.sleep(self.poll_interval)
-            events = await self.brain.poll(self.bot.session)
+            await asyncio.sleep(room.poll_interval)
+            events = await room.brain.poll(self.bot.session)
             for ev in events:
                 if ev.type == "text":
                     answer.append(ev.text)
@@ -228,60 +267,47 @@ class RxPlaya:
         await message.answer(f"🔒 the backend asks to run <b>{escape(what)}</b>", reply_markup=keyboard)
 
     async def handle_approve(self, query: CallbackQuery) -> None:
-        if not self.is_admin(query.from_user.id):
+        if not self.is_admin(query.message.chat.id, query.from_user.id):
             await query.answer("only the admins answer this", show_alert=True)
             return
+        room = self.room_by_chat(query.message.chat.id)
+        if not room:
+            return
         allow = query.data.endswith("1")
-        await self.brain.approve(self.bot.session, allow)
+        await room.brain.approve(self.bot.session, allow)
         await query.answer("allowed" if allow else "denied")
 
-    async def handle_post_callback(self, query: CallbackQuery) -> None:
-        if not self.is_admin(query.from_user.id):
-            await query.answer("only the admins publish", show_alert=True)
-            return
-        action = query.data
-        draft = self.pending_post.pop(query.message.message_id, None)
-        if action == "post_cancel" or not draft:
-            await query.message.edit_text("🚫 the draft is dropped")
-            await query.answer()
-            return
-        await self.bot.send_message(self.channel_id, draft)
-        await query.message.edit_text("📮 published to the channel")
-        await query.answer()
-
-    async def cmd_ask(self, message: Message, command: CommandObject) -> None:
-        question = (command.args or "").strip()
+    async def cmd_ask(self, message: Message, room: Room, question: str) -> None:
         if not question:
             await message.answer("usage: /ask <question>")
             return
         prompt = (
             "You are FlashAgent, sitting in a group chat. The recent chat:\n\n"
-            f"{self.collector.context()}\n\n"
+            f"{room.collector.context()}\n\n"
             f"A member asked: {question}\nAnswer them directly."
         )
-        await self.run_turn(message, prompt)
+        await self.run_turn(message, room, prompt)
 
-    async def cmd_post(self, message: Message, command: CommandObject) -> None:
-        topic = (command.args or "").strip()
+    async def cmd_post(self, message: Message, room: Room, topic: str) -> None:
         if not topic:
             await message.answer("usage: /post <what the post is about>")
             return
         prompt = (
             "Draft a Telegram channel post. The recent group chat:\n\n"
-            f"{self.collector.context()}\n\n"
+            f"{room.collector.context()}\n\n"
             f"The post is about: {topic}\n"
             "Write the post itself, ready to publish, in the chat's language. No preamble."
         )
         note = await message.answer("📝 черновик пишется…")
-        ok, why = await self.brain.start_turn(self.bot.session, prompt)
+        ok, why = await room.brain.start_turn(self.bot.session, prompt)
         if not ok:
             await note.edit_text(f"⚠️ {why}")
             return
         answer = []
         failed = None
         while True:
-            await asyncio.sleep(self.poll_interval)
-            events = await self.brain.poll(self.bot.session)
+            await asyncio.sleep(room.poll_interval)
+            events = await room.brain.poll(self.bot.session)
             for ev in events:
                 if ev.type == "text":
                     answer.append(ev.text)
@@ -308,74 +334,150 @@ class RxPlaya:
             ]
         )
         sent = await message.answer(f"<b>Черновик поста:</b>\n\n{escape(draft)}", reply_markup=keyboard)
-        self.pending_post[sent.message_id] = draft
+        self.pending_post[sent.message_id] = (self.channel_id, draft)
 
-    async def cmd_remember(self, message: Message, command: CommandObject) -> None:
-        fact = (command.args or "").strip()
+    async def cmd_remember(self, message: Message, room: Room, fact: str) -> None:
         if not fact:
             await message.answer("usage: /remember <what to keep>")
             return
         await self.run_turn(
             message,
+            room,
             f"Remember this fact in the memory vault, exactly as it was said, under a fitting name: {fact}",
         )
 
-    async def cmd_status(self, message: Message) -> None:
-        st = await self.brain.status(self.bot.session)
+    async def cmd_report(self, message: Message, room: Room, report: str) -> None:
+        """A user's problem report: the bot keeps it itself — no tokens burn
+        on storing a report — and the room's backend only turns a batch into
+        a digest when the admins ask for one."""
+        if not report:
+            await message.answer("usage: /report <what went wrong>")
+            return
+        who = message.from_user.full_name if message.from_user else "?"
+        stamp = time.strftime("%Y-%m-%d %H:%M")
+        if room.reports_path and str(room.reports_path):
+            room.reports_path.parent.mkdir(parents=True, exist_ok=True)
+            with open(room.reports_path, "a", encoding="utf-8") as f:
+                f.write(f"\n## {stamp} — {who}\n{report}\n")
+            await message.answer(
+                "✅ the report is kept — thank you. The developers read these; "
+                "a GitHub issue is still the fastest way to get a fix."
+            )
+        else:
+            await message.answer("✅ the report is noted (the room keeps no report file — tell the developers)")
+
+    async def cmd_digest(self, message: Message, room: Room) -> None:
+        """The admins' look at the reports: the backend reads the report file
+        and answers with what it saw. One turn, on the room's tier."""
+        if not room.reports_path or not room.reports_path.exists():
+            await message.answer("no reports yet")
+            return
+        content = room.reports_path.read_text(encoding="utf-8")[-16_000:]
+        prompt = (
+            "These are the problem reports users of the project sent without GitHub. "
+            "Group them by what broke, count the repeats, name the worst first, and "
+            "say in one line what a fixer should look at first. Be terse.\n\n" + content
+        )
+        await self.run_turn(message, room, prompt)
+
+    async def handle_post_callback(self, query: CallbackQuery) -> None:
+        if not self.is_admin(query.message.chat.id, query.from_user.id):
+            await query.answer("only the admins publish", show_alert=True)
+            return
+        action = query.data
+        entry = self.pending_post.pop(query.message.message_id, None)
+        if action == "post_cancel" or not entry:
+            await query.message.edit_text("🚫 the draft is dropped")
+            await query.answer()
+            return
+        channel_id, draft = entry
+        await self.bot.send_message(channel_id, draft)
+        await query.message.edit_text("📮 published to the channel")
+        await query.answer()
+
+    async def cmd_status(self, message: Message, room: Room) -> None:
+        st = await room.brain.status(self.bot.session)
         state = "running" if st.get("running") else "idle"
         await message.answer(f"🧠 backend {st.get('model', '?')} · {state} · turns {st.get('turns_done', 0)}")
 
 
-def is_admin_of(app: RxPlaya):
+def is_admin_of(app: BotApp, chat_id: int):
     def inner(message: Message) -> bool:
-        return message.chat.id == app.group_id and app.is_admin(message.from_user.id)
+        return message.chat.id == chat_id and app.is_admin(chat_id, message.from_user.id)
 
     return inner
 
 
 async def async_main(cfg: dict) -> None:
-    app = RxPlaya(cfg)
+    app = BotApp(cfg)
     dp = Dispatcher()
     bot = app.bot
 
-    admin_here = is_admin_of(app)
+    # Every room's handlers are registered against its own chat id, so two
+    # rooms cannot reach into each other's backends by accident.
+    for chat_id, room in app.rooms.items():
+        admin_here = lambda message, chat_id=chat_id: message.chat.id == chat_id and app.is_admin(
+            chat_id, message.from_user.id
+        )
+        in_room = F.chat.id == chat_id
 
-    @dp.message(F.chat.id == app.group_id, F.text)
-    async def on_group_message(message: Message) -> None:
-        who = message.from_user.full_name if message.from_user else "?"
-        app.collector.add(who, message.text)
-        if message.text.startswith("/"):
-            return
-        # The bot answers only when addressed: a reply to its own message.
-        if message.reply_to_message and message.reply_to_message.from_user.id == bot.id:
-            command = CommandObject(command="ask", args=message.text)
-            await app.cmd_ask(message, command)
+        @dp.message(in_room, F.text)
+        async def on_room_message(message: Message, room: Room = room) -> None:
+            who = message.from_user.full_name if message.from_user else "?"
+            room.collector.add(who, message.text)
+            if message.text.startswith("/"):
+                return
+            # Both rooms answer only when addressed: a reply to one of the
+            # bot's messages. The users' room turns a reply into a report; the
+            # dev room treats it as a question with the chat as context.
+            if message.reply_to_message and message.reply_to_message.from_user.id == bot.id:
+                if room.mode == "users":
+                    await app.cmd_report(message, room, message.text)
+                else:
+                    await app.cmd_ask(message, room, message.text)
 
-    @dp.message(Command("ask"), F.chat.id == app.group_id, admin_here)
-    async def on_ask(message: Message, command: CommandObject) -> None:
-        await app.cmd_ask(message, command)
+        @dp.message(Command("ask"), in_room, admin_here)
+        async def on_ask(message: Message, command: CommandObject, room: Room = room) -> None:
+            await app.cmd_ask(message, room, command.args or "")
 
-    @dp.message(Command("post"), F.chat.id == app.group_id, admin_here)
-    async def on_post(message: Message, command: CommandObject) -> None:
-        await app.cmd_post(message, command)
+        @dp.message(Command("post"), in_room, admin_here)
+        async def on_post(message: Message, command: CommandObject, room: Room = room) -> None:
+            if room.mode != "dev":
+                await message.answer("the channel posts go through the developer room")
+                return
+            await app.cmd_post(message, room, command.args or "")
 
-    @dp.message(Command("remember"), F.chat.id == app.group_id, admin_here)
-    async def on_remember(message: Message, command: CommandObject) -> None:
-        await app.cmd_remember(message, command)
+        @dp.message(Command("remember"), in_room, admin_here)
+        async def on_remember(message: Message, command: CommandObject, room: Room = room) -> None:
+            if room.mode != "dev":
+                await message.answer("the vault is written in the developer room")
+                return
+            await app.cmd_remember(message, room, command.args or "")
 
-    @dp.message(Command("status"), F.chat.id == app.group_id, admin_here)
-    async def on_status(message: Message) -> None:
-        await app.cmd_status(message)
+        @dp.message(Command("status"), in_room, admin_here)
+        async def on_status(message: Message, room: Room = room) -> None:
+            await app.cmd_status(message, room)
 
-    @dp.message(Command("cancel"), F.chat.id == app.group_id, admin_here)
-    async def on_cancel(message: Message) -> None:
-        await app.brain.cancel(bot.session)
-        await message.answer("the turn is being stopped")
+        @dp.message(Command("cancel"), in_room, admin_here)
+        async def on_cancel(message: Message, room: Room = room) -> None:
+            await room.brain.cancel(bot.session)
+            await message.answer("the turn is being stopped")
 
-    @dp.message(Command("newsession"), F.chat.id == app.group_id, admin_here)
-    async def on_newsession(message: Message) -> None:
-        await app.brain.reset(bot.session)
-        await message.answer("🧹 fresh session")
+        @dp.message(Command("newsession"), in_room, admin_here)
+        async def on_newsession(message: Message, room: Room = room) -> None:
+            await room.brain.reset(bot.session)
+            await message.answer("🧹 fresh session")
+
+        @dp.message(Command("report"), in_room)
+        async def on_report(message: Message, command: CommandObject, room: Room = room) -> None:
+            if room.mode != "users":
+                await message.answer("the reports are collected in the users' room")
+                return
+            await app.cmd_report(message, room, command.args or "")
+
+        @dp.message(Command("digest"), in_room, admin_here)
+        async def on_digest(message: Message, room: Room = room) -> None:
+            await app.cmd_digest(message, room)
 
     @dp.callback_query(F.data.startswith("approve:"))
     async def on_approve(query: CallbackQuery) -> None:
@@ -386,7 +488,7 @@ async def async_main(cfg: dict) -> None:
         await app.handle_post_callback(query)
 
     me = await bot.get_me()
-    log.info("FlashAgent bot @%s is up, group %s", me.username, app.group_id)
+    log.info("FlashAgent bot @%s is up over rooms: %s", me.username, ", ".join(f"{n}={r.chat_id}" for n, r in app.rooms.items()))
     await bot.delete_webhook(drop_pending_updates=True)
     await dp.start_polling(bot)
 

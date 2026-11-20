@@ -1,25 +1,32 @@
-# FlashAgent Telegram bot — config for one deployment (a project group).
+# FlashAgent Telegram bot — config for one deployment.
 # Copy to bot.toml next to the bot and fill in.
 
 [telegram]
 # The token BotFather gave the bot.
 token = "123456:ABC..."
-# The group the bot sits in and listens to (the supergroup's -100... id).
-group_id = -1000000000000
-# The channel posts go to when the draft is approved (may equal group_id).
+# The channel posts go to when a draft is approved.
 channel_id = -1000000000000
 # Telegram user ids allowed to run commands (the owner and the second developer).
-admin_ids = [111111111]
+admin_ids = [111111111, 222222222]
 
-[serve]
-# flashagent --serve on the same machine.
-url = "http://127.0.0.1:8081"
-# The same value FLASHAGENT_SERVE_TOKEN gave the server; empty when the
-# server runs without a token.
-token = ""
+# One backend per room: its own session, its own vault, its own tier.
+[serve.dev]
+url = "http://127.0.0.1:8093"
+token = "change-me"
 
-[brain]
-# How many last group messages ride along as context with every ask.
+[serve.users]
+url = "http://127.0.0.1:8094"
+token = "change-me"
+
+# The developer room: the whole brain — plans, tools, memory, approvals.
+[chat.dev]
+chat_id = -1000000000001
+serve = "dev"
 context_messages = 30
-# Polling cadence while a turn runs, seconds.
-poll_interval = 1.0
+
+# The users' room: reports and questions, on the compact tier, and the bot
+# speaks only when addressed — nobody's tokens burn on silence.
+[chat.users]
+chat_id = -1000000000002
+serve = "users"
+context_messages = 10

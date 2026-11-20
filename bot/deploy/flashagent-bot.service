@@ -1,7 +1,7 @@
 # ~/.config/systemd/user/flashagent-bot.service
 [Unit]
-Description=FlashAgent Telegram bot (RX Playa)
-After=flashagent-serve.service
+Description=FlashAgent Telegram bot (all rooms)
+After=flashagent-serve-dev.service flashagent-serve-users.service
 
 [Service]
 WorkingDirectory=%h/RXPlaya/bot

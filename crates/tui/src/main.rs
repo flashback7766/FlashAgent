@@ -595,15 +595,26 @@ async fn main() -> Result<()> {
     if std::env::args().any(|a| a == "--serve") {
         let mut port = 8081u16;
         let mut dir = None;
+        let mut prompt = None;
+        let mut mode = None;
         let mut args = std::env::args().skip(1).peekable();
         while let Some(a) = args.next() {
             match a.as_str() {
                 "--port" => port = args.next().and_then(|v| v.parse().ok()).unwrap_or(port),
                 "--dir" => dir = args.next().map(std::path::PathBuf::from),
+                // One server per deployment: the dev room gets the whole
+                // prompt, a report room runs on the compact one.
+                "--prompt" => prompt = args.next(),
+                "--mode" => mode = args.next(),
                 _ => {}
             }
         }
-        return crate::serve::run_serve(config, crate::serve::ServeOpts { port, dir }).await.map(|_| ());
+        return crate::serve::run_serve(
+            config,
+            crate::serve::ServeOpts { port, dir, prompt, mode },
+        )
+        .await
+        .map(|_| ());
     }
     let Some((force_setup, skip_trust, session_start)) = cli_start(&mut config).await? else { return Ok(()) };
     trace("main: command line read");
