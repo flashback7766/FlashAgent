@@ -46,7 +46,7 @@ serve = "users"
 journal = "chat/users-room.jsonl"
 morning_digest = "09:00"        # local time: yesterday's reports, posted to dev
 
-[channel.main]
+[chat.channel]
 chat_id = -1003333333333
 kind = "channel"
 # devlog = "Mon 18:00"          # series posts; wired with the channel pipeline
