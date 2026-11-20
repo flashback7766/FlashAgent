@@ -608,7 +608,7 @@ pub static TOOLS: &[ToolDef] = &[
     },
     ToolDef {
         name: "chat_reply",
-        description: "Send a reply to ONE message of the chat this session is serving. Answer every member's message with its own call: message_id is the msg:N number the message carries (the journal uses the same ids). Several members asked the same thing: send one reply and mention the rest with <a href=\"tg://user?id=...\">Name</a> links instead of repeating yourself. The text may use Telegram HTML (<b>, <a href>, <i>). Do not use this tool when the task asked for a plain-text answer (an internal decision, a summary, a digest).",
+        description: "Send a reply to ONE message of the chat this session is serving. Answer every member's message with its own call: message_id is the msg:N number the message carries (the journal uses the same ids). Several members asked the same thing: send one reply and mention the rest with <a href=\"tg://user?id=...\">Name</a> links instead of repeating yourself. The text may use Telegram HTML (<b>, <a href>, <i>). No preamble and no recap of what you did in earlier turns: the text is the answer itself. Do not use this tool when the task asked for a plain-text answer (an internal decision, a summary, a digest).",
         params: &[
             int("message_id", "The msg:N id of the message this reply answers"),
             s("text", "The reply text; Telegram HTML is allowed"),

@@ -769,10 +769,13 @@ pub(crate) async fn run_serve(mut config: flashagent_core::AppConfig, opts: Serv
     trace("serve: prompt ready");
 
     // Mid-turn compaction for rooms with a bounded window: the TUI's
-    // TurnCompactor over the same session archive. `--compact-at` turns the
-    // trigger into an absolute token count; the fixed estimate covers the
-    // system prompt (memory included), the schemas ride within the room.
-    let compactor = if capacity > 0 && config.auto_compact_context {
+    // TurnCompactor over the same session archive. Off unless the operator
+    // asked for it with `--compact-at` — a serve the owner did not cap keeps
+    // its whole history and never summarizes it behind his back.
+    // `--compact-at` turns the trigger into an absolute token count; the
+    // fixed estimate covers the system prompt (memory included), the schemas
+    // ride within the room.
+    let compactor = if capacity > 0 && config.auto_compact_context && opts.compact_at.is_some() {
         let source_dyn: Arc<dyn flashagent_core::LlmSource> = source.clone();
         let fixed = flashagent_llm::count_tokens(&model, &system_prompt) + 4;
         let threshold_pct =
