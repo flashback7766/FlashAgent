@@ -56,8 +56,8 @@ def load_config(path: pathlib.Path) -> dict:
         cfg = tomllib.load(f)
     if not cfg.get("telegram", {}).get("token"):
         raise ConfigError("config [telegram].token is empty: the BotFather token goes there")
-    if not cfg.get("chats"):
-        raise ConfigError("config has no [[chats]] rooms: every room names its backend")
+    if not cfg.get("chat"):
+        raise ConfigError("config has no [chat.<name>] rooms: every room names its backend")
     return cfg
 
 
@@ -202,7 +202,7 @@ class BotApp:
         self.bot = Bot(tg["token"], default=DefaultBotProperties(parse_mode=ParseMode.HTML))
         self.channel_id = int(tg["channel_id"])
         self.rooms: dict[int, Room] = {}
-        for name, room_cfg in cfg.get("chats", {}).items():
+        for name, room_cfg in cfg.get("chat", {}).items():
             serve_name = room_cfg.get("serve", name)
             serve = cfg.get("serve", {}).get(serve_name)
             if not serve:
