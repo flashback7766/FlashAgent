@@ -592,8 +592,6 @@ async fn main() -> Result<()> {
     if let Some(path) = flashagent_llm::measurements_path() {
         flashagent_llm::load_measurements(&path);
     }
-    let Some((force_setup, skip_trust, session_start)) = cli_start(&mut config).await? else { return Ok(()) };
-    trace("main: command line read");
     if std::env::args().any(|a| a == "--serve") {
         let mut port = 8081u16;
         let mut dir = None;
@@ -607,6 +605,8 @@ async fn main() -> Result<()> {
         }
         return crate::serve::run_serve(config, crate::serve::ServeOpts { port, dir }).await.map(|_| ());
     }
+    let Some((force_setup, skip_trust, session_start)) = cli_start(&mut config).await? else { return Ok(()) };
+    trace("main: command line read");
 
     let Some(ran_setup) = startup_screens(&mut config, force_setup).await else { return Ok(()) };
     trace("main: startup screens done");
