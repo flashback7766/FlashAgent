@@ -80,6 +80,10 @@ class RoomState:
     journal: Journal | None = None
     busy: bool = False
     pulse_mark: int = 0  # journal.count at the last pulse
+    # One evolving message per target prompt: target msg id → the bot's
+    # message that started as 💭 and becomes that prompt's answer. Lives for
+    # one turn; steered prompts get theirs from the steer ack.
+    slots: dict[int, int] = field(default_factory=dict)
 
 
 @dataclass
@@ -282,26 +286,21 @@ class App:
         prompt: str,
         chat_id: int,
         reply_to: Message | None = None,
+        deliver: bool = True,
     ) -> tuple[str | None, int]:
-        """One turn against the room's brain. The stage note is edited as
-        tools run, `chat_reply` events go out as Telegram replies the moment
-        they arrive. Returns (final text, replies sent): the final text is
-        what the brain wrote at the end — when replies already covered the
-        turn, the caller keeps it for the log and the sentinel, not the room.
-        When the brain is already thinking, the prompt flies into the
-        running turn as a steer instead of queueing behind it."""
+        """One turn against the room's brain. ONE message per prompt: the
+        message that starts as 💭 and shows 🔧 as tools run is the slot the
+        answer lands in — edited in place, never deleted and re-sent.
+        `chat_reply` events go out the moment they arrive, and each target
+        message keeps exactly one evolving reply. Returns (final text,
+        replies sent); the caller only handles the sentinel. `deliver=False`
+        for service turns whose result the caller handles (drafts, pulse)."""
         assert self.bot is not None and self.http is not None and st.brain is not None
         if st.busy:
             await self._steer(st, prompt, chat_id, reply_to)
             return (None, 0)
         st.busy = True
-        note = await self.bot.send_message(
-            chat_id,
-            "💭 думаю…",
-            reply_parameters=(
-                ReplyParameters(message_id=reply_to.message_id) if reply_to else None
-            ),
-        )
+        status: Message | None = None
         answer: list[str] = []
         tokens = [0, 0]
         replies = 0
@@ -309,9 +308,27 @@ class App:
         typing_at = 0.0
         poll_errors = 0
         try:
+            status = await self.bot.send_message(
+                chat_id,
+                "💭 думаю…",
+                reply_parameters=(
+                    ReplyParameters(message_id=reply_to.message_id) if reply_to else None
+                ),
+            )
+            if reply_to is not None:
+                st.slots[reply_to.message_id] = status.message_id
+
+            async def stage(text: str) -> None:
+                if status is not None:
+                    try:
+                        await status.edit_text(text)
+                    except Exception:
+                        pass
+
             err = await st.brain.start_turn(self.http, prompt)
             if err:
-                await note.edit_text(f"⚠️ {escape_html(err)}")
+                await stage(f"⚠️ {escape_html(err)}")
+                status = None  # the error stays; the finally must not eat it
                 return (None, replies)
             retries = 0
             while True:
@@ -336,17 +353,14 @@ class App:
                         answer.append(ev.text)
                     elif ev.type == "reply":
                         # Live: the room sees each answer as the model calls
-                        # it, not one wall of text at the end.
+                        # it; the slot morphs from 💭 into the answer.
                         replies += 1
-                        await self._send_reply(chat_id, ev.message_id, ev.text)
+                        await self._deliver_reply(st, chat_id, ev.message_id, ev.text)
                     elif ev.type == "tool":
                         now = time.monotonic()
                         if now - last_edit > EDIT_THROTTLE:
                             last_edit = now
-                            try:
-                                await note.edit_text(f"🔧 {escape_html(ev.name)}")
-                            except Exception:
-                                pass
+                            await stage(f"🔧 {escape_html(ev.name)}")
                     elif ev.type == "approval":
                         await self._ask_approval(chat_id, ev.name)
                     elif ev.type == "usage":
@@ -355,70 +369,120 @@ class App:
                     elif ev.type == "failed":
                         if retries < RETRIES:
                             retries += 1
-                            try:
-                                await note.edit_text(
-                                    f"⚠️ {escape_html(ev.text)}"
-                                    f"\nповторяю ({retries}/{RETRIES})…"
-                                )
-                            except Exception:
-                                pass
+                            await stage(
+                                f"⚠️ {escape_html(ev.text)}"
+                                f"\nповторяю ({retries}/{RETRIES})…"
+                            )
                             err = await st.brain.start_turn(self.http, prompt)
                             if err:
-                                await note.edit_text(f"⚠️ повтор не вышел: {escape_html(err)}")
+                                await stage(f"⚠️ повтор не вышел: {escape_html(err)}")
+                                status = None
                                 return (None, replies)
                             break
-                        try:
-                            await note.edit_text(f"⚠️ ход не удался: {escape_html(ev.text)}")
-                        except Exception:
-                            pass
+                        await stage(f"⚠️ ход не удался: {escape_html(ev.text)}")
+                        status = None
                         return (None, replies)
                 else:
                     if any(ev.type == "done" for ev in events):
                         break
                     continue
                 break
+
+            result = "".join(answer).strip()
+            self._maybe_warn_budget(chat_id)
+            if replies == 0 and deliver and result:
+                # The slot becomes the answer: the room watched one message
+                # go 💭 → 🔧 → text, no delete-and-resent.
+                await self._deliver_text(chat_id, status, result)
+                status = None
+                return (result, replies)
+            if replies and result:
+                log.info(
+                    "turn covered by %d reply(ies); final kept: %s",
+                    replies,
+                    result[:200],
+                )
+            return (result or None, replies)
         finally:
             st.busy = False
+            st.slots.clear()
             if tokens[0] or tokens[1]:
                 self.usage.add(st.room.name, tokens[0], tokens[1])
-            try:
-                await note.delete()
-            except Exception:
-                pass
-        result = "".join(answer).strip()
-        self._maybe_warn_budget(chat_id)
-        if replies and result:
-            # The replies covered the turn; the final text is for the log
-            # and the sentinel parser, not another wall in the room.
-            log.info("turn covered by %d reply(ies); final kept: %s", replies, result[:200])
-            return (None, replies)
-        return (result or None, replies)
+            if status is not None:
+                try:
+                    await status.delete()
+                except Exception:
+                    pass
 
-    async def _send_reply(self, chat_id: int, message_id: int, text: str) -> None:
+    async def _deliver_reply(
+        self, st: RoomState, chat_id: int, target: int, text: str
+    ) -> None:
+        """One message per target prompt: the first chat_reply creates it
+        as a reply to the member's message, the next ones edit it."""
         assert self.bot is not None
-        for i, part in enumerate(split_reply(text)):
+        parts = split_reply(text)
+        slot_id = st.slots.get(target)
+        if slot_id is None:
             try:
-                await self.bot.send_message(
+                msg = await self.bot.send_message(
                     chat_id,
-                    part,
-                    reply_parameters=ReplyParameters(message_id=message_id)
-                    if i == 0
-                    else None,
+                    parts[0],
+                    reply_parameters=ReplyParameters(message_id=target),
                 )
             except Exception:
-                # The member's message may be gone, or the brain's HTML did
-                # not pass the parser: the answer still lands, unformatted.
+                # The member's message may be gone; the answer still lands.
                 try:
-                    await self.bot.send_message(chat_id, escape_html(part))
+                    msg = await self.bot.send_message(chat_id, escape_html(parts[0]))
                 except Exception:
-                    log.exception("reply to msg:%s failed", message_id)
+                    log.exception("reply to msg:%s failed", target)
+                    return
+            st.slots[target] = msg.message_id
+            slot_id = msg.message_id
+        else:
+            try:
+                await self.bot.edit_message_text(parts[0], chat_id=chat_id, message_id=slot_id)
+            except Exception:
+                # The brain's HTML did not pass the parser: unformatted, same place.
+                try:
+                    await self.bot.edit_message_text(
+                        escape_html(parts[0]), chat_id=chat_id, message_id=slot_id
+                    )
+                except Exception:
+                    log.exception("edit reply to msg:%s failed", target)
+                    return
+        for part in parts[1:]:
+            try:
+                await self.bot.send_message(chat_id, part)
+            except Exception:
+                await self.bot.send_message(chat_id, escape_html(part))
+
+    async def _deliver_text(self, chat_id: int, status: Message, text: str) -> None:
+        """Morph the status message into the final answer; a too-long answer
+        keeps going as follow-up messages."""
+        assert self.bot is not None
+        parts = split_reply(text)
+        try:
+            await status.edit_text(parts[0])
+        except Exception:
+            try:
+                await status.edit_text(escape_html(parts[0]))
+            except Exception:
+                log.exception("final edit failed")
+                return
+        for part in parts[1:]:
+            try:
+                await self.bot.send_message(chat_id, part)
+            except Exception:
+                await self.bot.send_message(chat_id, escape_html(part))
 
     async def _steer(
         self, st: RoomState, prompt: str, chat_id: int, reply_to: Message | None
     ) -> None:
         """A prompt while the brain answers is a steer by itself: the bot
         just posts /turn, serve flies it into the running answer, and the
-        loop rides it in the same request as the next tool results."""
+        loop rides it in the same request as the next tool results. The ack
+        message is the prompt's slot — it morphs into the answer when the
+        running brain gets to it."""
         assert self.bot is not None and self.http is not None and st.brain is not None
         try:
             err = await st.brain.start_turn(self.http, prompt)
@@ -432,8 +496,17 @@ class App:
                     ReplyParameters(message_id=reply_to.message_id) if reply_to else None
                 ),
             )
-        else:
-            await self.bot.send_message(chat_id, "⚡ влетело в текущий ответ")
+            return
+        if reply_to is not None:
+            try:
+                ack = await self.bot.send_message(
+                    chat_id,
+                    "⚡ влетело в текущий ответ",
+                    reply_parameters=ReplyParameters(message_id=reply_to.message_id),
+                )
+                st.slots[reply_to.message_id] = ack.message_id
+            except Exception:
+                pass
 
     # ---------- commands ----------
 
@@ -480,7 +553,9 @@ class App:
             await message.answer("как пользоваться: /post <о чём пост>")
             return
         prompt = self._post_prompt(st, f"Тема поста: {topic}")
-        text, _ = await self._run_turn(st, prompt, message.chat.id, reply_to=message)
+        text, _ = await self._run_turn(
+            st, prompt, message.chat.id, reply_to=message, deliver=False
+        )
         if text:
             await self._show_draft(st, text)
 
@@ -705,9 +780,7 @@ class App:
         dev = self.dev_state()
         if dev is None or dev.brain is None:
             return
-        text, _ = await self._run_turn(dev, prompt, chat_id)
-        if text:
-            await self._say(chat_id, text)
+        await self._run_turn(dev, prompt, chat_id)
 
     # ---------- the catch-all ----------
 
@@ -773,7 +846,9 @@ class App:
                     " ответе — только сам пост."
                 )
                 await message.answer("✏️ переделываю…")
-                new_text, _ = await self._run_turn(st, prompt, room.chat_id)
+                new_text, _ = await self._run_turn(
+                    st, prompt, room.chat_id, deliver=False
+                )
                 if new_text:
                     await self._show_draft(st, new_text)
                 return
@@ -793,18 +868,14 @@ class App:
         reply_to: Message | None,
         replies: int = 0,
     ) -> None:
-        """Post a turn's answer and act on its sentinel. The `ISSUE:` line
-        is the brain's order to file, not something the room reads. When
-        the turn already spoke through chat_reply, the final text stays in
-        the log — the room got its per-message answers — but the sentinel
-        is still read from it."""
+        """The sentinel bookkeeping. The answer itself already went out —
+        through the reply slots (replies > 0) or as the status message
+        morphing into it (replies == 0). The `ISSUE:` line is the brain's
+        order to file, not something the room reads."""
         assert self.bot is not None
         clean, issue_title = parse_issue_sentinel(text)
-        if replies:
-            if clean:
-                log.info("final covered by replies, kept: %s", clean[:200])
-        elif clean:
-            await self._say(chat_id, clean, reply_to=reply_to)
+        if replies and clean:
+            log.info("final covered by replies, kept: %s", clean[:200])
         if issue_title:
             if self.gh is None:
                 await self.bot.send_message(
@@ -846,7 +917,9 @@ class App:
                     "Если одно из них уже про то же самое — ответь ровно"
                     " REPLY: <номер>. Если проблема новая — ответь ровно NEW."
                 )
-                decision, _ = await self._run_turn(dev, prompt, dev.room.chat_id)
+                decision, _ = await self._run_turn(
+                    dev, prompt, dev.room.chat_id, deliver=False
+                )
                 if decision:
                     target = parse_dedup_decision(decision)
             body_prompt = (
@@ -859,7 +932,9 @@ class App:
                 " поведение, окружение (версия приложения, устройство, если"
                 " известно). Пиши по-русски, кратко и по делу."
             )
-            body, _ = await self._run_turn(dev, body_prompt, dev.room.chat_id)
+            body, _ = await self._run_turn(
+                dev, body_prompt, dev.room.chat_id, deliver=False
+            )
             body = body or title
             if target is not None:
                 url = await self.gh.comment(
@@ -952,7 +1027,9 @@ class App:
             " нечего — ответь ровно одним словом SKIP обычным текстом, без"
             " тула."
         )
-        text, replies = await self._run_turn(st, prompt, st.room.chat_id)
+        text, replies = await self._run_turn(
+            st, prompt, st.room.chat_id, deliver=False
+        )
         if not replies and text and text.strip().upper() != "SKIP":
             await self._say(st.room.chat_id, text.strip())
 
@@ -1013,7 +1090,9 @@ class App:
                         "Собери девлог за последнюю неделю: что делали (из"
                         " журнала дев-комнаты), что выкатили, что дальше.",
                     )
-                    text, _ = await self._run_turn(st, prompt, st.room.chat_id)
+                    text, _ = await self._run_turn(
+                        st, prompt, st.room.chat_id, deliver=False
+                    )
                     if text:
                         await self._show_draft(st, text)
             except Exception:
