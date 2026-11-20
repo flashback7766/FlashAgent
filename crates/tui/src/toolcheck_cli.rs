@@ -62,10 +62,16 @@ pub(crate) async fn first_run_tool_check(config: &AppConfig) -> Option<String> {
         ));
     }
     // Without a server every probe fails, and the verdict would blame the model.
+    // The look is bounded: a first-run check must never hold the prompt on a
+    // server that answers slowly or not at all.
     let endpoint = config.endpoint();
     let url = endpoint.url.as_str();
     let probe = flashagent_llm::Client::new(endpoint.clone(), "");
-    if model.trim().is_empty() || probe.discover_server().await.is_none() {
+    let listed = tokio::time::timeout(std::time::Duration::from_secs(5), probe.discover_server())
+        .await
+        .ok()
+        .flatten();
+    if model.trim().is_empty() || listed.is_none() {
         return Some(format!(
             "Tool-calling check skipped: {url} did not list any models. Run `flashagent --tool-test` once it does."
         ));
