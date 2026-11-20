@@ -286,7 +286,8 @@ class BotApp:
         prompt = (
             "You are FlashAgent, sitting in a group chat. The recent chat:\n\n"
             f"{room.collector.context()}\n\n"
-            f"A member asked: {question}\nAnswer them directly."
+            f"A member asked: {question}\nAnswer them directly. The room is casual, "
+            "but you stay professional: no profanity, no insults — joking lightly is fine."
         )
         await self.run_turn(message, room, prompt)
 
@@ -298,7 +299,8 @@ class BotApp:
             "Draft a Telegram channel post. The recent group chat:\n\n"
             f"{room.collector.context()}\n\n"
             f"The post is about: {topic}\n"
-            "Write the post itself, ready to publish, in the chat's language. No preamble."
+            "Write the post itself, ready to publish, in the chat's language. "
+            "Clean and professional: no profanity. No preamble."
         )
         note = await message.answer("📝 черновик пишется…")
         ok, why = await room.brain.start_turn(self.http, prompt)
