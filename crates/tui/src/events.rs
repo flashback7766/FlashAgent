@@ -984,9 +984,9 @@ impl App {
         if self.renderer.scroll_marker_press(m.row) {
             return Some(HoverTarget::Marker);
         }
-        // The plan box's header: a press sends the box away until the plan
-        // changes again.
-        if let Some((row, from, to)) = self.renderer.plan_zone {
+        // The plan box's header lights under the pointer: a press anywhere on
+        // the box sends it away until the plan changes again.
+        if let Some((row, _, from, to)) = self.renderer.plan_zone {
             if (m.row as usize) == row && (from..to).contains(&(m.column as usize)) {
                 return Some(HoverTarget::Plan);
             }
@@ -1122,10 +1122,12 @@ impl App {
             self.renderer.request_reprint();
             return;
         }
-        // The plan box's header sends the box away; the next plan call brings
-        // it back.
-        if let Some((row, from, to)) = self.renderer.plan_zone {
-            if (m.row as usize) == row && (from..to).contains(&(m.column as usize)) {
+        // A press anywhere on the plan box sends it away; the next plan call
+        // brings it back. Every cell of it answers, so a press a row off the
+        // header is still a press on the box and not a reader's miss.
+        if let Some((rows_from, rows_to, from, to)) = self.renderer.plan_zone {
+            let row = m.row as usize;
+            if row >= rows_from && row < rows_to && (from..to).contains(&(m.column as usize)) {
                 self.plan_hidden = true;
                 self.renderer.request_reprint();
                 return;
