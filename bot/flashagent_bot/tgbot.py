@@ -714,6 +714,13 @@ class App:
     async def on_room_message(self, message: Message) -> None:
         st = self.state_by_chat(message.chat.id)
         if st is None:
+            # The id discovery path: add the bot to a room, send anything,
+            # read the id here, put it in bot.toml.
+            log.info(
+                "message in an unconfigured chat %s (%s) — add it to bot.toml",
+                message.chat.id,
+                message.chat.type,
+            )
             return
         room = st.room
         if room.kind == "channel":
