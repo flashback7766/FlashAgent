@@ -1,0 +1,13 @@
+# ~/.config/systemd/user/flashagent-bot.service
+[Unit]
+Description=FlashAgent Telegram bot (RX Playa)
+After=flashagent-serve.service
+
+[Service]
+WorkingDirectory=%h/RXPlaya/bot
+ExecStart=%h/RXPlaya/bot/venv/bin/python bot.py
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target
