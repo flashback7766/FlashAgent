@@ -598,6 +598,8 @@ async fn main() -> Result<()> {
         let mut prompt = None;
         let mut mode = None;
         let mut effort = None;
+        let mut context_cap = None;
+        let mut compact_at = None;
         let mut args = std::env::args().skip(1).peekable();
         while let Some(a) = args.next() {
             match a.as_str() {
@@ -609,12 +611,25 @@ async fn main() -> Result<()> {
                 "--prompt" => prompt = args.next(),
                 "--mode" => mode = args.next(),
                 "--effort" => effort = args.next(),
+                // A room's window can be smaller than the model's: the users'
+                // room runs 65k with compaction at 55k, so a long community
+                // day cannot blow the budget.
+                "--context-cap" => context_cap = args.next().and_then(|v| v.parse().ok()),
+                "--compact-at" => compact_at = args.next().and_then(|v| v.parse().ok()),
                 _ => {}
             }
         }
         return crate::serve::run_serve(
             config,
-            crate::serve::ServeOpts { port, dir, prompt, mode, effort },
+            crate::serve::ServeOpts {
+                port,
+                dir,
+                prompt,
+                mode,
+                effort,
+                context_cap,
+                compact_at,
+            },
         )
         .await
         .map(|_| ());

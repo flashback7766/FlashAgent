@@ -35,6 +35,9 @@ struct ServeState {
     history: Option<Vec<ChatMessage>>,
     last_error: Option<String>,
     turns_done: u64,
+    /// The live turn's steering channel. Gone between turns: a steer into an
+    /// idle brain is a 409 the bot shows the room, not a queue nobody drains.
+    steer_tx: Option<tokio::sync::mpsc::UnboundedSender<flashagent_core::Steer>>,
 }
 
 type SharedState = Arc<Mutex<ServeState>>;
@@ -167,6 +170,9 @@ struct ServeApp {
     /// The system prompt, built once at start-up: memory, outline, identity.
     /// The turn's history starts with it, like the TUI's does.
     system_prompt: String,
+    /// Mid-turn compaction for rooms with a bounded window (`--context-cap`):
+    /// the TUI's TurnCompactor, pointed at the same session archive.
+    compactor: Option<Arc<crate::compact::TurnCompactor>>,
 }
 
 impl ServeApp {
@@ -194,7 +200,12 @@ impl ServeApp {
         }
         let turn_opts = build_turn_options(&self.config, &self.effort);
         let (steer_tx, steer_rx) = tokio::sync::mpsc::unbounded_channel();
-        drop(steer_tx); // no steering in serve mode; the loop sees a closed channel
+        {
+            // The channel lives exactly as long as the turn: /steer finds it
+            // while `running`, the turn end clears it.
+            let mut st = self.state.lock().expect("serve state");
+            st.steer_tx = Some(steer_tx);
+        }
         let state = self.state.clone();
         let source = self.source.clone();
         let cancel = self.cancel.clone();
@@ -203,11 +214,15 @@ impl ServeApp {
         let cwd_display = self.cwd_display.clone();
         let model = self.model.clone();
         let perm = self.perm;
+        let compactor = self.compactor.clone();
         tokio::spawn(async move {
             let loop_config =
                 flashagent_core::loop_::LoopConfig { base_turn_options: turn_opts, ..Default::default() };
-            let loop_ =
+            let mut loop_ =
                 flashagent_core::loop_::AgentLoop::with_steering(loop_config, cancel, steer_rx);
+            if let Some(compactor) = compactor {
+                loop_ = loop_.with_compactor(compactor);
+            }
             let state_for_events = state.clone();
             let mut on_event = |event: flashagent_core::LoopEvent| {
                 let mut st = state_for_events.lock().expect("serve state");
@@ -219,6 +234,7 @@ impl ServeApp {
             let res = loop_.run(source.as_ref(), perm, shared, &mut on_event).await;
             let mut st = state.lock().expect("serve state");
             st.running = false;
+            st.steer_tx = None;
             st.turns_done += 1;
             match res {
                 Ok((shared, reason)) => {
@@ -373,6 +389,40 @@ fn since_of(query: &str) -> usize {
         .unwrap_or(0)
 }
 
+/// POST /steer: words into a turn that is already running — the "умный
+/// steering" the bot speaks. A steer into an idle brain is a 409, not a
+/// queue: the bot only steers what it saw while the brain was answering.
+fn steer_answer(state: &SharedState, body: &[u8]) -> (u16, serde_json::Value) {
+    let text = serde_json::from_slice::<serde_json::Value>(body)
+        .ok()
+        .and_then(|v| v.get("text").and_then(|t| t.as_str()).map(str::to_string))
+        .unwrap_or_default();
+    if text.trim().is_empty() {
+        return (
+            400u16,
+            serde_json::json!({"error": "body needs {\"text\": ...}"}),
+        );
+    }
+    let st = state.lock().expect("serve state");
+    match st.steer_tx.as_ref() {
+        Some(tx) => {
+            let _ = tx.send(flashagent_core::Steer::text(text));
+            (200u16, serde_json::json!({"ok": true}))
+        }
+        None => (409u16, serde_json::json!({"error": "no turn is running"})),
+    }
+}
+
+/// The compaction trigger as a percent of the window: an explicit
+/// `--compact-at` wins (the owner's "55k of 65k"), the config's value or
+/// the window's default follows.
+fn threshold_pct_of(compact_at: Option<usize>, configured: usize, capacity: usize) -> usize {
+    match compact_at {
+        Some(at) if capacity > 0 && at <= capacity => (at * 100 / capacity).max(1),
+        _ => flashagent_core::resolved_compact_threshold(configured, capacity),
+    }
+}
+
 /// The whole API: small on purpose. The bot polls `/events`, starts turns,
 /// answers approvals, and that is all a Telegram client needs.
 async fn handle(
@@ -475,6 +525,7 @@ async fn handle(
                         (409u16, serde_json::json!({"error": "a turn is running"}))
                     }
                 }
+                ("POST", "/steer") => steer_answer(state, &req.body),
                 _ => (404u16, serde_json::json!({"error": "no such route"})),
             }
         }
@@ -494,6 +545,12 @@ pub(crate) struct ServeOpts {
     /// Overrides `config.thinking_effort`: a bot answering a group chat
     /// reasons at the room's pace, not the owner's.
     pub effort: Option<String>,
+    /// Overrides the model's reported window: a room's budget can be smaller
+    /// than what the server allows (`--context-cap 65000`).
+    pub context_cap: Option<usize>,
+    /// The compaction trigger as an absolute token count (`--compact-at
+    /// 55000`); without it the config's or the window's percentage applies.
+    pub compact_at: Option<usize>,
 }
 
 /// The permission mode a `--mode` flag names, or None when it names nothing.
@@ -545,10 +602,14 @@ pub(crate) async fn run_serve(mut config: flashagent_core::AppConfig, opts: Serv
     let discovery =
         tokio::time::timeout(Duration::from_secs(10), source.0.discover_server()).await.ok().flatten();
     trace("serve: discovery done");
-    let capacity = discovery
-        .as_ref()
-        .and_then(|d| d.active_model.as_ref().and_then(|m| m.prompt_budget()))
-        .unwrap_or(0);
+    let capacity = opts
+        .context_cap
+        .unwrap_or(
+            discovery
+                .as_ref()
+                .and_then(|d| d.active_model.as_ref().and_then(|m| m.prompt_budget()))
+                .unwrap_or(0),
+        );
     let reasoning_supported = discovery
         .as_ref()
         .and_then(|d| d.active_model.as_ref().map(|m| m.thinking.supported))
@@ -653,6 +714,29 @@ pub(crate) async fn run_serve(mut config: flashagent_core::AppConfig, opts: Serv
     );
     trace("serve: prompt ready");
 
+    // Mid-turn compaction for rooms with a bounded window: the TUI's
+    // TurnCompactor over the same session archive. `--compact-at` turns the
+    // trigger into an absolute token count; the fixed estimate covers the
+    // system prompt (memory included), the schemas ride within the room.
+    let compactor = if capacity > 0 && config.auto_compact_context {
+        let source_dyn: Arc<dyn flashagent_core::LlmSource> = source.clone();
+        let fixed = flashagent_llm::count_tokens(&model, &system_prompt) + 4;
+        let threshold_pct =
+            threshold_pct_of(opts.compact_at, config.context_compact_threshold, capacity);
+        Some(Arc::new(crate::compact::TurnCompactor {
+            source: source_dyn,
+            archive: crate::sessions::session_path(&session_id),
+            capacity,
+            fixed,
+            threshold_pct,
+            report: Arc::new(Mutex::new(None)),
+            sink: None,
+            model: model.clone(),
+        }))
+    } else {
+        None
+    };
+
     let mut app = ServeApp {
         state: state.clone(),
         source,
@@ -664,6 +748,7 @@ pub(crate) async fn run_serve(mut config: flashagent_core::AppConfig, opts: Serv
         model: model.clone(),
         effort,
         system_prompt,
+        compactor,
     };
     let _ = &mut app;
 
@@ -758,6 +843,41 @@ mod tests {
         assert!(authorized(&token, &with));
         assert!(!authorized(&token, &without));
         assert!(authorized(&None, &without), "no token configured: the bind is local");
+    }
+
+    #[test]
+    fn a_steer_needs_a_running_turn() {
+        let state: SharedState = Arc::new(Mutex::new(ServeState::default()));
+        // Idle: the words have nowhere to land, and the bot says so to the room.
+        let (status, body) =
+            steer_answer(&state, r#"{"text":"стоп, не так"}"#.as_bytes());
+        assert_eq!(status, 409);
+        assert_eq!(body["error"], "no turn is running");
+        // With a live channel the steer reaches the loop's receiver.
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        state.lock().unwrap().steer_tx = Some(tx);
+        let (status, _) =
+            steer_answer(&state, r#"{"text":"стоп, не так"}"#.as_bytes());
+        assert_eq!(status, 200);
+        let steer = rx.try_recv().expect("the steer is delivered");
+        assert_eq!(steer.text, "стоп, не так");
+        // A body without text is a bad request, not a mystery.
+        let (status, _) = steer_answer(&state, b"{}");
+        assert_eq!(status, 400);
+    }
+
+    #[test]
+    fn the_compaction_trigger_becomes_a_percentage_of_the_cap() {
+        // 55k of 65k: the trigger sits just past 55k (84%).
+        assert_eq!(threshold_pct_of(Some(55_000), 0, 65_000), 84);
+        // An at beyond the cap falls back to the configured or default share.
+        assert_eq!(
+            threshold_pct_of(Some(70_000), 0, 65_000),
+            flashagent_core::default_compact_threshold(65_000)
+        );
+        // No --compact-at: the config value, or the window's default at 0.
+        assert_eq!(threshold_pct_of(None, 0, 65_000), 80);
+        assert_eq!(threshold_pct_of(None, 90, 65_000), 90);
     }
 
     #[test]
