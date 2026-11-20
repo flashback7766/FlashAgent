@@ -31,6 +31,7 @@ use flashagent_tui::{
 };
 
 mod render;
+mod serve;
 mod tokens;
 mod backend;
 mod menus;
@@ -593,6 +594,19 @@ async fn main() -> Result<()> {
     }
     let Some((force_setup, skip_trust, session_start)) = cli_start(&mut config).await? else { return Ok(()) };
     trace("main: command line read");
+    if std::env::args().any(|a| a == "--serve") {
+        let mut port = 8081u16;
+        let mut dir = None;
+        let mut args = std::env::args().skip(1).peekable();
+        while let Some(a) = args.next() {
+            match a.as_str() {
+                "--port" => port = args.next().and_then(|v| v.parse().ok()).unwrap_or(port),
+                "--dir" => dir = args.next().map(std::path::PathBuf::from),
+                _ => {}
+            }
+        }
+        return crate::serve::run_serve(config, crate::serve::ServeOpts { port, dir }).await.map(|_| ());
+    }
 
     let Some(ran_setup) = startup_screens(&mut config, force_setup).await else { return Ok(()) };
     trace("main: startup screens done");

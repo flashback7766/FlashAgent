@@ -38,6 +38,14 @@ use std::path::{Path, PathBuf};
 ///
 /// Each one says why, so that the list is a decision and not a dump.
 const ENGLISH_ON_PURPOSE: &[(&str, &str)] = &[
+    // The `--serve` HTTP answers are JSON a bot parses, not text a person reads.
+    ("Bad Request", "machine-readable"),
+    ("Internal Server Error", "machine-readable"),
+    ("Not Found", "machine-readable"),
+    ("Unauthorized", "machine-readable"),
+    ("Conflict", "machine-readable"),
+    ("OK", "machine-readable"),
+
     (
         "[The previous attempt stopped here because of a connection error. Continue from this point. Do not repeat a tool call whose result is already above; use that result. If the last step failed, correct it and continue. Do not start over.]",
         "the model reads it",
