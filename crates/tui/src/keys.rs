@@ -251,6 +251,11 @@ impl App {
                     self.attachments.clear();
                     self.say(BackgroundNotice::fading(tr("Attachments cleared").to_string(), 4));
                     self.renderer.request_reprint();
+                } else if self.renderer.plan_zone.is_some() && !self.plan_hidden {
+                    // The plan box is the next thing on the way out: a press
+                    // sends it away until the plan changes again.
+                    self.plan_hidden = true;
+                    self.renderer.request_reprint();
                 } else {
                     // Esc closes and cancels, and never quits: it is pressed twice to close a
                     // menu and then a card as often as to leave. Ctrl+D and Ctrl+C Ctrl+C quit.

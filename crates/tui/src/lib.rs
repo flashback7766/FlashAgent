@@ -838,6 +838,12 @@ impl ChatView {
 
     /// The cells a welcome-card button occupies under the pointer, for the
     /// hover to light exactly them.
+    /// The rows the welcome card takes at the top of the conversation, so a
+    /// corner overlay can stand under it instead of over it.
+    pub fn welcome_len(&self) -> usize {
+        self.card_len
+    }
+
     pub fn welcome_zone_at(&self, row: usize, col: usize) -> Option<(usize, usize)> {
         if row >= self.card_len {
             return None;

@@ -1247,7 +1247,10 @@ pub(crate) fn named_tool_nudge(history: &[ChatMessage], specs: &[ToolSpec], repl
         return None;
     }
     let start = history.iter().rposition(is_prompt)?;
-    let called: HashSet<&str> = history[start..].iter().flat_map(|m| m.tool_calls.iter().map(|c| c.name.as_str())).collect();
+    let called: HashSet<&str> = history[start..]
+        .iter()
+        .flat_map(|m| m.tool_calls.iter().map(|c| crate::registry::canonical_name(c.name.as_str())))
+        .collect();
     if called.is_empty() {
         return None;
     }
@@ -1269,7 +1272,10 @@ pub(crate) fn named_tool_nudge(history: &[ChatMessage], specs: &[ToolSpec], repl
 /// that it already has what it needs and which call is still missing.
 pub(crate) fn unreported_call_nudge(history: &[ChatMessage], specs: &[ToolSpec]) -> Option<String> {
     let start = history.iter().rposition(is_prompt)?;
-    let called: HashSet<&str> = history[start..].iter().flat_map(|m| m.tool_calls.iter().map(|c| c.name.as_str())).collect();
+    let called: HashSet<&str> = history[start..]
+        .iter()
+        .flat_map(|m| m.tool_calls.iter().map(|c| crate::registry::canonical_name(c.name.as_str())))
+        .collect();
     if called.is_empty() {
         return None;
     }

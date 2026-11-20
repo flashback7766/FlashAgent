@@ -81,7 +81,14 @@ fn collect_folders(root: &Path, prefix: &str, depth: usize, out: &mut Vec<(Strin
     }
     let Ok(entries) = std::fs::read_dir(root) else { return };
     let mut names: Vec<String> = Vec::new();
-    for entry in entries.flatten() {
+    // Capped like the file list: a backup dump or a data folder can hold
+    // millions of entries, and a walk that reads all of them is a start-up
+    // that never draws. Each entry costs a stat, so the cap is what keeps
+    // this from turning into minutes of disk work.
+    for (seen, entry) in entries.flatten().enumerate() {
+        if seen >= MAX_ENTRIES {
+            break;
+        }
         let name = entry.file_name().to_string_lossy().to_string();
         if name.starts_with('.') || SKIP.contains(&name.as_str()) {
             continue;
@@ -138,6 +145,24 @@ fn read_folder(path: &Path, depth: usize) -> (Vec<String>, usize) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_folder_with_more_entries_than_the_cap_still_answers() {
+        // A backup dump in the working directory used to hold the start-up in
+        // a kernel read for minutes: the walk read every entry and stat-ed it.
+        // The cap is what stops that, and the outline still says something.
+        let dir = std::env::temp_dir().join(format!("fa-outline-huge-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let dump = dir.join("backups");
+        std::fs::create_dir_all(&dump).unwrap();
+        for i in 0..(MAX_ENTRIES + 2_000) {
+            std::fs::write(dump.join(format!("file-{i:06}.bak")), "").unwrap();
+        }
+        let outline = project_outline(&dir, 2_000);
+        assert!(!outline.is_empty(), "the walk gave up entirely");
+        assert!(outline.contains("… and"), "the named files are capped with a note: {outline}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     fn project(tag: &str) -> std::path::PathBuf {
         let dir = std::env::temp_dir().join(format!("fa-outline-{tag}-{}", std::process::id()));

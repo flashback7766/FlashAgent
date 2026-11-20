@@ -471,7 +471,10 @@ impl BuiltinTools {
         // is on the handler, not on the name, so a tool declared with no code
         // anywhere is a compile error rather than a call that answers
         // "unknown tool" a user has to report.
-        let Some(def) = flashagent_core::registry::find(&call.name) else {
+        // A prompt from before the rename taught `update_plan`; a model that
+        // kept the habit answers through the new tool.
+        let name = flashagent_core::registry::canonical_name(&call.name);
+        let Some(def) = flashagent_core::registry::find(name) else {
             if call.name.starts_with("mcp__") || self.mcp_manager.has_tool(&call.name) {
                 return self.mcp_manager.call_tool(&call.name, &call.args_json).await.map(Answer::Text);
             }
@@ -559,7 +562,7 @@ impl BuiltinTools {
                 .await
                 .map(Answer::Text)
             }
-            Handler::UpdatePlan => plan_tool::run_update_plan(&call.args_json).map(Answer::Text),
+            Handler::Plan => plan_tool::run_plan(&call.args_json).map(Answer::Text),
             Handler::Memory => {
                 let a: memory_tools::MemoryArgs = parse_args(&call.args_json, &call.name)?;
                 memory_tools::memory(&self.cwd, self.home.as_deref(), &self.is_goal_mode, a).map(Answer::Text)
@@ -1268,7 +1271,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn update_plan_is_offered_and_works_in_ordinary_chat_as_well_as_a_goal() {
+    async fn plan_is_offered_and_works_in_ordinary_chat_as_well_as_a_goal() {
         let tools = BuiltinTools::new(BuiltinToolsConfig {
             cwd: testing::tempdir(),
             ..Default::default()
@@ -1278,19 +1281,37 @@ mod tests {
         // It used to refuse itself here, so a model that had planned a long
         // task in ordinary chat had nowhere to show the plan.
         let out = tools
-            .execute(&ToolCall { id: "t".into(), name: "update_plan".into(), args_json: r#"{"steps":[{"text":"a"}]}"#.into() })
+            .execute(&ToolCall {
+                id: "t".into(),
+                name: "plan".into(),
+                args_json: r#"{"action":"create","items":[{"text":"a"}]}"#.into(),
+            })
             .await;
         assert!(!out.is_error, "a plan outside /goal must be kept: {}", out.content);
         assert!(out.content.contains("1 step"), "{}", out.content);
+        // A step is marked without sending the whole list again.
+        let out = tools
+            .execute(&ToolCall {
+                id: "t2".into(),
+                name: "plan".into(),
+                args_json: r#"{"action":"done","steps":["a"]}"#.into(),
+            })
+            .await;
+        assert!(!out.is_error, "{}", out.content);
+        assert!(out.content.contains("Marked"), "{}", out.content);
 
         tools.set_goal_mode(true);
         let names = |specs: Vec<ToolSpec>| specs.into_iter().map(|s| s.name).collect::<Vec<_>>();
         assert_eq!(names(before), names(tools.specs()), "starting a goal must not change the tool list the server has cached");
         let out = tools
-            .execute(&ToolCall { id: "t".into(), name: "update_plan".into(), args_json: r#"{"steps":[{"text":"a"}]}"#.into() })
+            .execute(&ToolCall {
+                id: "t3".into(),
+                name: "plan".into(),
+                args_json: r#"{"action":"change","items":[{"text":"a","status":"completed"}]}"#.into(),
+            })
             .await;
         assert!(!out.is_error, "{}", out.content);
-        assert!(out.content.contains("1 step"), "{}", out.content);
+        assert!(out.content.contains("1 done"), "{}", out.content);
     }
 
     #[tokio::test]

@@ -58,7 +58,8 @@ impl CompositeTools {
 #[async_trait]
 impl ToolExec for CompositeTools {
     async fn execute(&self, call: &ToolCall) -> ToolOutput {
-        match self.executor_for(&call.name) {
+        let name = flashagent_core::registry::canonical_name(&call.name);
+        match self.executor_for(name) {
             Some(e) => e.execute(call).await,
             None => ToolOutput {
                 content: format!("unknown tool: {}", call.name),
