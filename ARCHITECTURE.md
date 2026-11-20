@@ -101,6 +101,15 @@ what it answered stay in the history as they were. `core::is_prompt` tells
 such messages, like tool pictures and task notices, from what the user
 said.
 
+Start-up reads the working folder three times — the project's `.mcp.json`,
+its rule files and the outline for the prompt — and each read runs on a
+blocking thread behind a two-second clock (the outline walk also stops at a
+fixed number of entries per folder). A folder that answers slowly — a dump
+with millions of entries was found in the wild — costs its rules and its
+outline, not the interface. `FLASHAGENT_TRACE=1` appends every start-up
+phase to `~/.flashagent/startup-trace.log`, and a panic inside the
+alternate screen restores the terminal before the message prints.
+
 `run_shell` uses `sh` on Unix. On Windows it uses Git Bash when Git for
 Windows is installed, since models write Unix commands and cmd.exe runs
 none of them; otherwise cmd.exe, and the system prompt names the shell
@@ -319,11 +328,16 @@ graph LR
   came from, so a click on a thought or a tool call opens or folds that one
   (`ChatLine::is_expanded` overrides F2 for it).
 - The mouse works the whole frame: every list scrolls with the wheel, each
-  card closes from its own ✕, the permission-mode label and the context
-  gauge are buttons, a drag selects transcript text and copies it when the
-  button comes up, and the reading screens (`/usage`, `/memory`, `/agents`)
-  answer clicks on their rows and hint words the way their keys do. Shift
-  belongs to the terminal, so text selection stays available.
+  card closes from its own ✕, the permission-mode label, the context gauge,
+  the status row's provider and model names and the plan box are buttons, a
+  drag selects transcript text and copies it when the button comes up, and
+  the reading screens (`/usage`, `/memory`, `/agents`) answer clicks on
+  their rows and hint words the way their keys do. Shift belongs to the
+  terminal, so text selection stays available.
+- The model's plan draws in a box at the screen's top-right corner, under
+  the welcome card, while the transcript keeps a one-line summary. The box
+  wraps long steps, stands down when every step is done, and any press on
+  it sends it away until the next `plan` call.
 - Nothing moves the layout while it animates: the welcome card holds its
   full height while it draws itself in, and the tip line keeps the same
   number of rows for every tip at a given width.
