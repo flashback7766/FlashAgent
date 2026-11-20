@@ -16,6 +16,7 @@ import asyncio
 import json
 import logging
 import time
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -24,6 +25,7 @@ import httpx
 from aiogram import Bot, Dispatcher, F, Router
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ChatAction, ParseMode
+from aiogram.exceptions import TelegramRetryAfter
 from aiogram.filters import Command, CommandObject, CommandStart
 from aiogram.types import (
     CallbackQuery,
@@ -184,6 +186,16 @@ class App:
         task = asyncio.create_task(coro)
         self._tasks.add(task)
         task.add_done_callback(self._tasks.discard)
+
+    async def _send(self, make: "Callable[[], Awaitable[Message]]") -> Message:
+        """One Telegram send, honouring the flood clock: Telegram says
+        'retry in N seconds' and the message still goes out instead of
+        evaporating — a burst of replies must not lose its tail."""
+        try:
+            return await make()
+        except TelegramRetryAfter as e:
+            await asyncio.sleep(e.retry_after + 0.5)
+            return await make()
 
     # ---------- startup ----------
 
@@ -541,15 +553,15 @@ class App:
         slot_id = st.slots.get(target)
         if slot_id is None:
             try:
-                msg = await self.bot.send_message(
+                msg = await self._send(lambda: self.bot.send_message(
                     chat_id,
                     sanitize_tg_html(parts[0]),
                     reply_parameters=ReplyParameters(message_id=target),
-                )
+                ))
             except Exception:
                 # The member's message may be gone; the answer still lands.
                 try:
-                    msg = await self.bot.send_message(chat_id, plain_text(parts[0]))
+                    msg = await self._send(lambda: self.bot.send_message(chat_id, plain_text(parts[0])))
                 except Exception:
                     log.exception("reply to msg:%s failed", target)
                     return False
@@ -557,14 +569,14 @@ class App:
             slot_id = msg.message_id
         else:
             try:
-                await self.bot.edit_message_text(sanitize_tg_html(parts[0]), chat_id=chat_id, message_id=slot_id)
+                await self._send(lambda: self.bot.edit_message_text(sanitize_tg_html(parts[0]), chat_id=chat_id, message_id=slot_id))
             except Exception:
                 # The brain's markup did not pass the parser even sanitized:
                 # plain text, same place, no literal tags.
                 try:
-                    await self.bot.edit_message_text(
+                    await self._send(lambda: self.bot.edit_message_text(
                         plain_text(parts[0]), chat_id=chat_id, message_id=slot_id
-                    )
+                    ))
                 except Exception:
                     log.exception("edit reply to msg:%s failed", target)
                     return False
@@ -572,9 +584,9 @@ class App:
         self._save_delivered()
         for part in parts[1:]:
             try:
-                await self.bot.send_message(chat_id, sanitize_tg_html(part))
+                await self._send(lambda: self.bot.send_message(chat_id, sanitize_tg_html(part)))
             except Exception:
-                await self.bot.send_message(chat_id, plain_text(part))
+                await self._send(lambda: self.bot.send_message(chat_id, plain_text(part)))
         return True
 
     async def _deliver_text(self, chat_id: int, status: Message, text: str) -> None:
@@ -583,18 +595,18 @@ class App:
         assert self.bot is not None
         parts = split_reply(text)
         try:
-            await status.edit_text(sanitize_tg_html(parts[0]))
+            await self._send(lambda: status.edit_text(sanitize_tg_html(parts[0])))
         except Exception:
             try:
-                await status.edit_text(plain_text(parts[0]))
+                await self._send(lambda: status.edit_text(plain_text(parts[0])))
             except Exception:
                 log.exception("final edit failed")
                 return
         for part in parts[1:]:
             try:
-                await self.bot.send_message(chat_id, sanitize_tg_html(part))
+                await self._send(lambda: self.bot.send_message(chat_id, sanitize_tg_html(part)))
             except Exception:
-                await self.bot.send_message(chat_id, plain_text(part))
+                await self._send(lambda: self.bot.send_message(chat_id, plain_text(part)))
 
     async def _steer(
         self, st: RoomState, prompt: str, chat_id: int, reply_to: Message | None
