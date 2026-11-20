@@ -5,7 +5,8 @@ After=flashagent-serve-dev.service flashagent-serve-users.service
 
 [Service]
 WorkingDirectory=%h/RXPlaya/bot
-ExecStart=%h/RXPlaya/bot/venv/bin/python bot.py
+# The v2 entry point: the package module, the config as the only argument.
+ExecStart=%h/RXPlaya/bot/venv/bin/python -m flashagent_bot bot.toml
 Restart=on-failure
 RestartSec=5
 

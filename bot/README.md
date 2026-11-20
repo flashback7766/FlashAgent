@@ -47,6 +47,14 @@ No buffer, no cost per background message:
 3. Add the bot to the rooms (message access on) and make it an admin in
    the channel it posts to.
 
+4. systemd --user units live in `deploy/`. Install them and switch on
+   linger — without linger nothing comes back after a reboot:
+   ```
+   cp deploy/*.service ~/.config/systemd/user/ && systemctl --user daemon-reload
+   systemctl --user enable --now flashagent-serve-dev flashagent-serve-users flashagent-bot
+   loginctl enable-linger $USER
+   ```
+
 ## Commands
 
 `/ask`, `/report` — everyone. `/post`, `/remember`, `/digest`, `/usage`,

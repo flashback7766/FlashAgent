@@ -4,7 +4,7 @@ Description=FlashAgent serve — the users' room's brain (compact tier, manual m
 After=network-online.target
 
 [Service]
-ExecStart=%h/.local/bin/flashagent --serve --dir %h/RXPlaya/reports --port 8094 --prompt compact --effort off --mode manual
+ExecStart=%h/.local/bin/flashagent --serve --dir %h/RXPlaya/reports --port 8094 --prompt compact --effort off --mode manual --context-cap 65000 --compact-at 55000
 Environment=FLASHAGENT_SERVE_TOKEN=rx-users-2026
 Restart=on-failure
 RestartSec=5
