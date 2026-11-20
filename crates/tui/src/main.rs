@@ -597,21 +597,24 @@ async fn main() -> Result<()> {
         let mut dir = None;
         let mut prompt = None;
         let mut mode = None;
+        let mut effort = None;
         let mut args = std::env::args().skip(1).peekable();
         while let Some(a) = args.next() {
             match a.as_str() {
                 "--port" => port = args.next().and_then(|v| v.parse().ok()).unwrap_or(port),
                 "--dir" => dir = args.next().map(std::path::PathBuf::from),
                 // One server per deployment: the dev room gets the whole
-                // prompt, a report room runs on the compact one.
+                // prompt, a report room runs on the compact one; the
+                // reasoning effort is the room's, not the config's.
                 "--prompt" => prompt = args.next(),
                 "--mode" => mode = args.next(),
+                "--effort" => effort = args.next(),
                 _ => {}
             }
         }
         return crate::serve::run_serve(
             config,
-            crate::serve::ServeOpts { port, dir, prompt, mode },
+            crate::serve::ServeOpts { port, dir, prompt, mode, effort },
         )
         .await
         .map(|_| ());

@@ -491,6 +491,9 @@ pub(crate) struct ServeOpts {
     /// Overrides `config.permission_mode`: a room's brain may be more or
     /// less trusted than the TUI's.
     pub mode: Option<String>,
+    /// Overrides `config.thinking_effort`: a bot answering a group chat
+    /// reasons at the room's pace, not the owner's.
+    pub effort: Option<String>,
 }
 
 /// The permission mode a `--mode` flag names, or None when it names nothing.
@@ -554,7 +557,7 @@ pub(crate) async fn run_serve(mut config: flashagent_core::AppConfig, opts: Serv
         source.0.adopt_discovery(disc);
     }
     source.0.set_model(&model);
-    let effort = config.thinking_effort.clone();
+    let effort = opts.effort.clone().unwrap_or_else(|| config.thinking_effort.clone());
 
     // The working folder is read three times, each read behind a clock: a slow
     // folder costs its rules and its outline, not the server.

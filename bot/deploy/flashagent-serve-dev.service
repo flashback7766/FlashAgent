@@ -4,8 +4,8 @@ Description=FlashAgent serve — the developer room's brain
 After=network-online.target
 
 [Service]
-ExecStart=%h/.local/bin/flashagent --serve --dir %h/RXPlaya/brain --port 8093
-Environment=FLASHAGENT_SERVE_TOKEN=change-me
+ExecStart=%h/.local/bin/flashagent --serve --dir %h/RXPlaya/brain --port 8093 --effort low
+Environment=FLASHAGENT_SERVE_TOKEN=rx-dev-2026
 Restart=on-failure
 RestartSec=5
 
