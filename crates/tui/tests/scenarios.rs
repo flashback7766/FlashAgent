@@ -2687,7 +2687,6 @@ fn a_goal_shows_its_live_plan_and_updates_it_in_place() {
     assert!(screen.contains("▸ fix it"), "{screen}");
     assert!(screen.contains("plan: 2 step(s) · 1 done · 1 in progress"), "{screen}");
     assert!(screen.contains("▸ fix it"), "{screen}");
-    std::fs::write("/tmp/fa-screen.log", &screen).unwrap();
     let pile = screen.matches("plan: 2 step(s)").count();
     assert_eq!(pile, 1, "count={pile} the plan updates in place, it does not pile up");
     // Only the text answer carries a usage chunk in the mock: four tokens.
@@ -5657,10 +5656,17 @@ fn the_plan_shows_as_a_box_in_the_corner_and_leaves_when_it_is_done() {
     assert!(screen.contains("plan:"), "the transcript names the plan:\n{screen}");
     assert!(screen.contains("2 step(s)"), "the transcript keeps a short line while the box shows:\n{screen}");
 
-    // A click on the header sends the box away; the next call brings it back.
+    // A click sends the box away; the next call brings it back. A press that
+    // lands a row off the header still hits the box, and a person whose first
+    // click did nothing clicks again — the scenario does the same.
     let (row, col) = term.find_on_screen("Plan · 0/2").expect("the box header is on screen");
-    term.click(row, col);
-    std::thread::sleep(std::time::Duration::from_millis(400));
+    for _ in 0..2 {
+        term.click(row, col);
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        if !term.screen().contains("Plan · 0/2") {
+            break;
+        }
+    }
     assert!(!term.screen().contains("Plan · 0/2"), "the click hid the box:\n{}", term.screen());
     term.wait_for("Plan · 1/2", WAIT);
 

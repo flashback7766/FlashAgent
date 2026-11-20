@@ -107,9 +107,10 @@ pub(crate) struct Renderer {
     overlay_close: Option<(usize, u16)>,
     /// The command popup's place on the last frame, when one was open.
     pub(crate) popup_rows: Option<PopupRows>,
-    /// The plan box's header on screen: (row, from, to), for a hover and a
-    /// press that sends the box away.
-    pub(crate) plan_zone: Option<(usize, usize, usize)>,
+    /// The plan box on screen: (first row, one past the last row, from
+    /// column, to column). Any press inside the box sends it away; the header
+    /// row is the one that lights on a hover.
+    pub(crate) plan_zone: Option<(usize, usize, usize, usize)>,
 }
 
 /// Where the command popup sat on the last frame. A press on one of its rows
@@ -2197,14 +2198,14 @@ impl Renderer {
                     let pad = " ".repeat(from.saturating_sub(visible_width(&left)));
                     rows[row] = format!("{left}{pad}{seg}");
                 }
-                self.plan_zone = Some((top, from + 1, width.saturating_sub(2)));
+                self.plan_zone = Some((top, top + box_h, from + 1, width.saturating_sub(2)));
             }
         }
     }
     // The plan header carries the same quiet light as the other buttons while
     // the pointer is on it.
     if hover_plan {
-        if let Some((row, from, to)) = self.plan_zone {
+        if let Some((row, _, from, to)) = self.plan_zone {
             if row < rows.len() {
                 rows[row] = flashagent_tui::style_span(&rows[row], from, to, "\x1b[48;2;38;36;33m", "\x1b[49m");
             }
