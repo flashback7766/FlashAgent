@@ -446,6 +446,10 @@ class App:
                         if await self._deliver_reply(st, chat_id, ev.message_id, ev.text):
                             answered.add(ev.message_id)
                             replies += 1
+                            if reply_to is not None and ev.message_id == reply_to.message_id:
+                                # The slot that just became the answer IS the
+                                # status message: the finally must not eat it.
+                                status = None
                     elif ev.type == "tool":
                         now = time.monotonic()
                         if now - last_edit > EDIT_THROTTLE:
