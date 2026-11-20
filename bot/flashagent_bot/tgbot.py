@@ -84,7 +84,7 @@ HELP = (
     "/remember факт — записать в память (админы)\n"
     "/post тема — черновик поста в канал (админы)\n"
     "/digest — сводка репортов юзеров (админы)\n"
-    "Просто пиши в чат — я подключаюсь, когда адресован."
+    "Я отвечаю только когда адресован: /команда, @упоминание или reply."
 )
 
 
@@ -951,24 +951,14 @@ class App:
         if st.journal is not None:
             st.journal.append(who, text, msg_id=message.message_id)
 
-        user_id = message.from_user.id if message.from_user else None
-        if room.kind == "users" and not self.is_admin(user_id):
-            verdict, secs = self.limiter.check(
-                int(user_id), per_hour=ECONOMY_PER_HOUR if self.over_budget() else None
-            )
-            if verdict == MUTED:
-                await message.answer(
-                    f"😴 тишина ещё {int(secs // 3600)} ч {int(secs % 3600 // 60)} мин:"
-                    " был спам после предупреждения"
-                )
-                return
-            if verdict == COOLDOWN:
-                await message.answer(
-                    f"⏳ лимит {self.cfg.requests_per_hour}/час,"
-                    f" отвечу через {int(secs // 60) + 1} мин"
-                )
-                return
+        # The bot speaks only when addressed — a command, a mention or a
+        # reply. Room chatter is journalled for context and never answered
+        # on its own: no free talk, no troll bait, no surprises.
+        if not self._addressed(st, message):
+            return
 
+        # A reply to the draft is addressed by definition; it may be the
+        # critique the redo button is waiting for.
         if room.kind == "dev" and room.chat_id in self.redo_awaited:
             reply = message.reply_to_message
             draft = self.drafts.get(room.chat_id)
@@ -993,8 +983,6 @@ class App:
                     await self._show_draft(st, new_text)
                 return
 
-        if room.kind == "dev" and not self._addressed(st, message):
-            return  # background chatter: journalled, not answered
         prompt = f"{self._msg(message)}: {text}{lang_hint(text)}{BREVITY}"
         text_out, replies = await self._run_turn(st, prompt, message.chat.id, reply_to=message)
         if text_out:
