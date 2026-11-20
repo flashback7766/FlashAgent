@@ -148,9 +148,31 @@ class App:
                 self.gh_last = datetime.fromisoformat(raw["last"])
         except (ValueError, KeyError, OSError):
             pass
+        # The answers already delivered: target message id → the bot's
+        # message that carries the answer. Persisted, so a restart neither
+        # re-delivers an answered prompt nor loses an in-flight one.
+        self.delivered: dict[int, int] = {}
+        try:
+            raw = json.loads(
+                (cfg.data_dir / "replies.json").read_text(encoding="utf-8")
+            )
+            self.delivered = {int(k): int(v) for k, v in raw.items()}
+        except (ValueError, OSError):
+            pass
         # Fire-and-forget coroutines need a held reference, or the event loop
         # may collect them mid-flight.
         self._tasks: set[asyncio.Task] = set()
+
+    def _save_delivered(self) -> None:
+        try:
+            self.cfg.data_dir.mkdir(parents=True, exist_ok=True)
+            items = list(self.delivered.items())[-300:]
+            self.delivered = dict(items)
+            (self.cfg.data_dir / "replies.json").write_text(
+                json.dumps(dict(items)), encoding="utf-8"
+            )
+        except OSError:
+            log.exception("delivered-replies save failed")
         self.drafts: dict[int, Draft] = {}
         self.redo_awaited: set[int] = set()
         self.series_done: set[str] = set()
@@ -178,9 +200,23 @@ class App:
             if st.brain is not None and not await st.brain.health(self.http):
                 log.warning("brain %s (%s) is not answering", st.room.name, st.brain.url)
             if st.brain is not None:
-                skipped = await st.brain.catch_up(self.http)
-                if skipped:
-                    log.info("feed %s: skipped %d stale event(s)", st.brain.url, skipped)
+                stale = await st.brain.catch_up(self.http)
+                if stale:
+                    log.info(
+                        "feed %s: %d stale event(s) from before the restart",
+                        st.brain.url,
+                        len(stale),
+                    )
+                # An in-flight answer the old process never polled is not
+                # garbage: the members still have no reply. Deliver it late.
+                for ev in stale:
+                    if (
+                        ev.type == "reply"
+                        and ev.message_id not in self.delivered
+                        and (ev.text or "").strip()
+                    ):
+                        log.info("delivering in-flight reply to msg:%s", ev.message_id)
+                        await self._deliver_reply(st, st.room.chat_id, ev.message_id, ev.text)
         if self.gh is not None:
             try:
                 self.gh_login = await self.gh.whoami(self.http)
@@ -485,12 +521,15 @@ class App:
     async def _deliver_reply(
         self, st: RoomState, chat_id: int, target: int, text: str
     ) -> bool:
-        """One message per target prompt: the first chat_reply creates it
-        as a reply to the member's message, the next ones edit it. Returns
-        False for stubs — a "." or the tool's own echoed result is not an
-        answer, and the final text will cover the prompt instead."""
+        """One message per target prompt, for good: the first chat_reply
+        fills the prompt's slot (the 💭 status, or a fresh reply), and the
+        delivered pair is remembered across restarts — a later call to the
+        same message is ignored, so nothing replaces a real answer. Returns
+        False for stubs and repeats."""
         assert self.bot is not None
         if is_stub_reply(text):
+            return False
+        if target in self.delivered:
             return False
         parts = split_reply(text)
         slot_id = st.slots.get(target)
@@ -522,11 +561,14 @@ class App:
                 except Exception:
                     log.exception("edit reply to msg:%s failed", target)
                     return False
+        self.delivered[target] = slot_id
+        self._save_delivered()
         for part in parts[1:]:
             try:
                 await self.bot.send_message(chat_id, part)
             except Exception:
                 await self.bot.send_message(chat_id, escape_html(part))
+        return True
 
     async def _deliver_text(self, chat_id: int, status: Message, text: str) -> None:
         """Morph the status message into the final answer; a too-long answer
