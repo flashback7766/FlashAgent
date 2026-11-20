@@ -94,3 +94,11 @@ def test_journal_without_serve_dir_rejected(tmp_path):
     text = VALID.replace('dir = "/tmp/brain"', 'dir = ""')
     with pytest.raises(ConfigError, match="no dir"):
         load(write(tmp_path, text))
+
+
+def test_github_without_token_yet_starts_without_it(tmp_path):
+    # The owner adds the issues token after the deploy; the bot must not
+    # refuse to start until then.
+    text = VALID + '\n[github]\ntoken = ""\nrepo = "rentalx-wifi/rx-playa"\n'
+    cfg = load(write(tmp_path, text))
+    assert cfg.github is None

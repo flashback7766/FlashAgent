@@ -145,10 +145,13 @@ def load(path: Path) -> Config:
 
     gh = raw.get("github") or {}
     github = None
-    if gh:
-        if not gh.get("token") or not gh.get("repo"):
-            raise ConfigError("[github] needs both token and repo")
+    if gh.get("token") and gh.get("repo"):
         github = Github(token=gh["token"], repo=gh["repo"])
+    elif gh:
+        # The section exists but the token is not in yet: the bot starts, and
+        # the report pipeline says it is not configured instead of dying.
+        # A repo without a token (or the reverse) is the same thing.
+        github = None
 
     limits = raw.get("limits") or {}
     budget = raw.get("budget") or {}
