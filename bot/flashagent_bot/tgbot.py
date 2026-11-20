@@ -33,10 +33,18 @@ from aiogram.types import (
 
 from .brain import Event, ServeClient
 from .config import Config, Room
+from .issues import GithubClient, GithubError
 from .journal import Journal
 from .limits import ALLOW, COOLDOWN, MUTED, RateLimiter
 from .usage import UsageStore
-from .util import escape_html, lang_hint, split_reply
+from .util import (
+    escape_html,
+    lang_hint,
+    parse_dedup_decision,
+    parse_issue_sentinel,
+    search_keywords,
+    split_reply,
+)
 
 log = logging.getLogger("flashagent_bot")
 
@@ -97,6 +105,19 @@ class App:
         self.me_username = ""
         self.economy_warned = False
         self.digests_done: set[str] = set()
+        self.gh = (
+            GithubClient(cfg.github.token, cfg.github.repo)
+            if cfg.github is not None
+            else None
+        )
+        # Fire-and-forget coroutines need a held reference, or the event loop
+        # may collect them mid-flight.
+        self._tasks: set[asyncio.Task] = set()
+
+    def _spawn(self, coro) -> None:
+        task = asyncio.create_task(coro)
+        self._tasks.add(task)
+        task.add_done_callback(self._tasks.discard)
 
     # ---------- startup ----------
 
@@ -489,12 +510,14 @@ class App:
                 return
         prompt = (
             f"Пришёл репорт от {who}: «{report}». Разберись: задай уточняющие"
-            " вопросы, если что-то неясно (шаги, логи, скриншоты). Issue"
-            " создаётся позже, когда картина ясна. Отвечай кратко."
+            " вопросы, если что-то неясно (шаги, логи, скриншоты). Когда"
+            " картина ясна — проблема понятна, детали собраны — закончи ответ"
+            " строкой ровно вида ISSUE: <короткий заголовок>, и issue будет"
+            " заведён. Отвечай кратко."
         )
         text = await self._run_turn(st, prompt, message.chat.id, reply_to=message)
         if text:
-            await self._say(message.chat.id, text, reply_to=message)
+            await self._answer_room(st, text, message.chat.id, reply_to=message)
 
     async def cmd_digest(self, message: Message) -> None:
         st = self.state_by_chat(message.chat.id)
@@ -568,7 +591,81 @@ class App:
         prompt = f"{who}: {text}{lang_hint(text)}{BREVITY}"
         text_out = await self._run_turn(st, prompt, message.chat.id, reply_to=message)
         if text_out:
-            await self._say(message.chat.id, text_out, reply_to=message)
+            await self._answer_room(st, text_out, message.chat.id, reply_to=message)
+
+    async def _answer_room(
+        self, st: RoomState, text: str, chat_id: int, reply_to: Message | None
+    ) -> None:
+        """Post a turn's answer and act on its sentinel. The `ISSUE:` line
+        is the brain's order to file, not something the room reads."""
+        assert self.bot is not None
+        clean, issue_title = parse_issue_sentinel(text)
+        if clean:
+            await self._say(chat_id, clean, reply_to=reply_to)
+        if issue_title:
+            if self.gh is None:
+                await self.bot.send_message(
+                    chat_id, "📌 [github] в bot.toml не настроен — issue не завёл"
+                )
+            else:
+                self._spawn(self._file_issue(st, issue_title, chat_id))
+
+    def _journal_tail(self, st: RoomState, n: int) -> str:
+        if st.journal is None:
+            return "(журнал пуст)"
+        lines = [
+            f"{r.get('who', '?')}: {r.get('text', '')}" for r in st.journal.tail(n)
+        ]
+        return "\n".join(lines) or "(журнал пуст)"
+
+    async def _file_issue(self, st: RoomState, title: str, chat_id: int) -> None:
+        """The report pipeline: the users' brain decided the problem is
+        clear (the sentinel), so dedup against the repo and file or amend.
+        The dev brain — the one that knows the project — writes the body."""
+        assert self.http is not None and self.gh is not None
+        dev = self.dev_state()
+        if dev is None or dev.brain is None:
+            return
+        try:
+            target: int | None = None
+            candidates = await self.gh.search_open(
+                self.http, search_keywords(title)
+            )
+            if candidates:
+                listing = "\n".join(
+                    f"#{c['number']} — {c['title']}: {c['body'][:200]}"
+                    for c in candidates
+                )
+                prompt = (
+                    f"Юзер прислал проблему: «{title}». В репо есть открытые"
+                    f" issues:\n{listing}\nЕсли одно из них уже про то же"
+                    " самое — ответь ровно REPLY: <номер>. Если проблема"
+                    " новая — ответь ровно NEW."
+                )
+                decision = await self._run_turn(dev, prompt, dev.room.chat_id)
+                if decision:
+                    target = parse_dedup_decision(decision)
+            body_prompt = (
+                f"Напиши тело issue для GitHub по заголовку «{title}»."
+                " Контекст — последние сообщения юзер-комнаты:\n"
+                + self._journal_tail(st, 30)
+                + "\nФормат: что происходит, шаги воспроизведения, ожидаемое"
+                " поведение, окружение (версия приложения, устройство, если"
+                " известно). Пиши по-русски, кратко и по делу."
+            )
+            body = (
+                await self._run_turn(dev, body_prompt, dev.room.chat_id) or title
+            )
+            if target is not None:
+                url = await self.gh.comment(
+                    self.http, target, f"{body}\n\n— дополнение из чата юзеров"
+                )
+                await self._say(chat_id, f"📌 дополнил issue #{target}: {url}")
+            else:
+                issue = await self.gh.create(self.http, title, body)
+                await self._say(chat_id, f"📌 завёл issue #{issue['number']}: {issue['url']}")
+        except GithubError as e:
+            await self._say(chat_id, f"⚠️ GitHub не вышел: {e}")
 
     async def _on_photo(self, st: RoomState, message: Message) -> None:
         """Screenshots land in the users' serve dir; the journal records
