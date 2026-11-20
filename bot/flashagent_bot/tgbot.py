@@ -399,8 +399,12 @@ class App:
                         answer.append(ev.text)
                     elif ev.type == "reply":
                         # Live: the room sees each answer as the model calls
-                        # it; the slot morphs from 💭 into the answer. A stub
-                        # ("." и прочее) не ответ — промпт получит финал.
+                        # it; the slot morphs from 💭 into the answer. The
+                        # first reply to a prompt IS the answer: later calls
+                        # to the same message never clobber it — the model
+                        # likes to follow its answer with a state report.
+                        if ev.message_id in answered:
+                            continue
                         if await self._deliver_reply(st, chat_id, ev.message_id, ev.text):
                             answered.add(ev.message_id)
                             replies += 1
@@ -1088,10 +1092,12 @@ class App:
             "Периодический пульс: в группе прошла болтовня. Прочитай журнал"
             f" {st.room.journal} (свежие строки; в каждой есть id сообщения)"
             " и реши, есть ли что сказать по делу — незаданный вопрос,"
-            " подсказка, предложение. Если есть — ответь тула chat_reply на"
-            " конкретные сообщения (можно несколько вызовов). Если сказать"
-            " нечего — ответь ровно одним словом SKIP обычным текстом, без"
-            " тула."
+            " подсказка, предложение. Не занимайся отчетностью: не проверяй"
+            " systemctl и сервисы, не описывай состояние машины, бота или"
+            " своих возможностей — только разговор по делу из болтовни. Если"
+            " есть что сказать — ответь тула chat_reply на конкретные"
+            " сообщения (можно несколько вызовов). Если сказать нечего —"
+            " ответь ровно одним словом SKIP обычным текстом, без тула."
         )
         text, replies = await self._run_turn(
             st, prompt, st.room.chat_id, deliver=False
