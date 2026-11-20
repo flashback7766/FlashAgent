@@ -18,6 +18,8 @@ from collections import deque
 from dataclasses import dataclass
 
 import tomllib
+
+import aiohttp
 from aiogram import Bot, Dispatcher, F
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
@@ -220,7 +222,7 @@ class BotApp:
         """One turn against the room's backend. The live line is edited as
         tools run; the finished answer is sent in chunks."""
         note = await message.answer("💭 думаю…")
-        ok, why = await room.brain.start_turn(self.bot.session, prompt)
+        ok, why = await room.brain.start_turn(self.http, prompt)
         if not ok:
             await note.edit_text(f"⚠️ {why}")
             return
@@ -229,7 +231,7 @@ class BotApp:
         failed = None
         while True:
             await asyncio.sleep(room.poll_interval)
-            events = await room.brain.poll(self.bot.session)
+            events = await room.brain.poll(self.http)
             for ev in events:
                 if ev.type == "text":
                     answer.append(ev.text)
@@ -274,7 +276,7 @@ class BotApp:
         if not room:
             return
         allow = query.data.endswith("1")
-        await room.brain.approve(self.bot.session, allow)
+        await room.brain.approve(self.http, allow)
         await query.answer("allowed" if allow else "denied")
 
     async def cmd_ask(self, message: Message, room: Room, question: str) -> None:
@@ -299,7 +301,7 @@ class BotApp:
             "Write the post itself, ready to publish, in the chat's language. No preamble."
         )
         note = await message.answer("📝 черновик пишется…")
-        ok, why = await room.brain.start_turn(self.bot.session, prompt)
+        ok, why = await room.brain.start_turn(self.http, prompt)
         if not ok:
             await note.edit_text(f"⚠️ {why}")
             return
@@ -307,7 +309,7 @@ class BotApp:
         failed = None
         while True:
             await asyncio.sleep(room.poll_interval)
-            events = await room.brain.poll(self.bot.session)
+            events = await room.brain.poll(self.http)
             for ev in events:
                 if ev.type == "text":
                     answer.append(ev.text)
@@ -396,7 +398,7 @@ class BotApp:
         await query.answer()
 
     async def cmd_status(self, message: Message, room: Room) -> None:
-        st = await room.brain.status(self.bot.session)
+        st = await room.brain.status(self.http)
         state = "running" if st.get("running") else "idle"
         await message.answer(f"🧠 backend {st.get('model', '?')} · {state} · turns {st.get('turns_done', 0)}")
 
@@ -489,6 +491,9 @@ async def async_main(cfg: dict) -> None:
     async def on_post_callback(query: CallbackQuery) -> None:
         await app.handle_post_callback(query)
 
+    app.http = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=120))
+    for room in app.rooms.values():
+        room.brain.session = app.http
     me = await bot.get_me()
     log.info("FlashAgent bot @%s is up over rooms: %s", me.username, ", ".join(f"{n}={r.chat_id}" for n, r in app.rooms.items()))
     await bot.delete_webhook(drop_pending_updates=True)
