@@ -47,6 +47,7 @@ class Github:
 class Config:
     token: str
     admins: list[int]
+    owner: int  # the voice of the project; the first admin when unset
     data_dir: Path
     brains: dict[str, ServeBrain]
     rooms: list[Room]
@@ -158,6 +159,9 @@ def load(path: Path) -> Config:
     return Config(
         token=str(token),
         admins=admins,
+        # The owner's voice matters to the brain ("владелец сказал"), and the
+        # first admin is the natural fallback when the config does not name one.
+        owner=int(bot.get("owner") or admins[0]),
         data_dir=data_dir,
         brains=brains,
         rooms=rooms,

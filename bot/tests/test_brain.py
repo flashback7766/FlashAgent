@@ -48,3 +48,21 @@ def test_since_advances_by_the_events_seen():
         assert client.since == 1
     finally:
         asyncio.run(http.aclose())
+
+
+def test_catch_up_skips_the_stale_feed_without_delivering():
+    body = json.dumps(
+        {
+            "events": [
+                {"type": "reply", "message_id": 42, "text": "старый ответ"},
+                {"type": "text", "text": "старый хвост"},
+            ]
+        }
+    ).encode()
+    client, http = make(body)
+    try:
+        skipped = asyncio.run(client.catch_up(http))
+        assert skipped == 2
+        assert client.since == 2  # the next poll starts past the stale part
+    finally:
+        asyncio.run(http.aclose())

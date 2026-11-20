@@ -99,3 +99,37 @@ def test_a_failure_raises_what_the_room_sees():
             asyncio.run(client.create(http, "x", "y"))
     finally:
         asyncio.run(http.aclose())
+
+
+def test_closed_by_author_since_scopes_the_query():
+    seen = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["q"] = request.url.params["q"]
+        return httpx.Response(200, json={"items": [{"number": 9, "title": "t", "html_url": "u", "closed_at": "2026-11-21T10:00:00Z"}]})
+
+    client, http = make_client(handler)
+    try:
+        items = asyncio.run(
+            client.closed_by_author_since(http, "FlashAgent-bot", "2026-11-21T00:00:00Z")
+        )
+    finally:
+        asyncio.run(http.aclose())
+    assert seen["q"] == (
+        "repo:rentalx-wifi/rx-playa is:issue is:closed"
+        " author:FlashAgent-bot closed:>=2026-11-21T00:00:00Z"
+    )
+    assert items[0]["number"] == 9
+    assert items[0]["closed_at"] == "2026-11-21T10:00:00Z"
+
+
+def test_whoami_returns_the_login():
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"login": "FlashAgent-bot"})
+
+    client, http = make_client(handler)
+    try:
+        login = asyncio.run(client.whoami(http))
+    finally:
+        asyncio.run(http.aclose())
+    assert login == "FlashAgent-bot"

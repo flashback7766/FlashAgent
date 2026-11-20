@@ -46,6 +46,40 @@ class GithubClient:
             for i in r.json().get("items", [])
         ]
 
+    async def closed_by_author_since(
+        self, http: httpx.AsyncClient, author: str, since_iso: str, limit: int = 20
+    ) -> list[dict]:
+        """Issues CREATED by the bot account and closed since `since_iso`
+        (ISO 8601, UTC). The search index lags a little; the watcher keeps
+        its own `seen` set so a lag cannot double-report."""
+        q = (
+            f"repo:{self.repo} is:issue is:closed author:{author}"
+            f" closed:>={since_iso}"
+        )
+        r = await http.get(
+            f"{API}/search/issues",
+            headers=self._headers,
+            params={"q": q, "per_page": limit, "order": "desc"},
+        )
+        if r.status_code != 200:
+            raise GithubError(f"поиск закрытых не вышел: HTTP {r.status_code}")
+        return [
+            {
+                "number": i["number"],
+                "title": i["title"],
+                "url": i["html_url"],
+                "closed_at": i.get("closed_at") or "",
+            }
+            for i in r.json().get("items", [])
+        ]
+
+    async def whoami(self, http: httpx.AsyncClient) -> str:
+        """The login the token belongs to — the author the watcher watches."""
+        r = await http.get(f"{API}/user", headers=self._headers)
+        if r.status_code != 200:
+            raise GithubError(f"кто я: HTTP {r.status_code}")
+        return str(r.json().get("login") or "")
+
     async def create(
         self, http: httpx.AsyncClient, title: str, body: str
     ) -> dict:

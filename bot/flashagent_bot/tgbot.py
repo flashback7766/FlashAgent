@@ -13,9 +13,11 @@ handler, so commands are registered before the catch-all room listener.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import time
 from dataclasses import dataclass, field
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import httpx
@@ -57,6 +59,11 @@ BREVITY = (
     "\n\n(Ответь кратко и по делу: Telegram не принимает сообщения"
     " длиннее 4096 символов.)"
 )
+
+ROOM_CONTEXT = {
+    "dev": "ты в дев-группе проекта — тут разработчики, можно технично",
+    "users": "ты в чате юзеров сообщества — пиши проще и дружелюбнее",
+}
 
 HELP = (
     "FlashAgent — бот проекта. Что я умею:\n"
@@ -124,6 +131,19 @@ class App:
             if cfg.github is not None
             else None
         )
+        # The closed-issues watcher: what it already reported, and from when
+        # it looks — persisted, so a restart does not re-report or forget.
+        self.gh_login: str | None = None
+        self.gh_seen: set[int] = set()
+        self.gh_last: datetime | None = None
+        self._gh_state = cfg.data_dir / "gh-watch.json"
+        try:
+            raw = json.loads(self._gh_state.read_text(encoding="utf-8"))
+            self.gh_seen = {int(n) for n in raw.get("seen", [])}
+            if raw.get("last"):
+                self.gh_last = datetime.fromisoformat(raw["last"])
+        except (ValueError, KeyError, OSError):
+            pass
         # Fire-and-forget coroutines need a held reference, or the event loop
         # may collect them mid-flight.
         self._tasks: set[asyncio.Task] = set()
@@ -153,10 +173,23 @@ class App:
         for st in self.rooms.values():
             if st.brain is not None and not await st.brain.health(self.http):
                 log.warning("brain %s (%s) is not answering", st.room.name, st.brain.url)
+            if st.brain is not None:
+                skipped = await st.brain.catch_up(self.http)
+                if skipped:
+                    log.info("feed %s: skipped %d stale event(s)", st.brain.url, skipped)
+        if self.gh is not None:
+            try:
+                self.gh_login = await self.gh.whoami(self.http)
+                log.info("github: watching as %s", self.gh_login)
+            except GithubError as e:
+                log.warning("github whoami failed: %s", e)
+            if self.gh_last is None:
+                self.gh_last = datetime.now(timezone.utc) - timedelta(days=1)
         background = [
             asyncio.create_task(self._pulse_loop()),
             asyncio.create_task(self._digest_loop()),
             asyncio.create_task(self._series_loop()),
+            asyncio.create_task(self._gh_loop()),
         ]
         log.info("bot up as @%s, %d rooms", self.me_username, len(self.rooms))
         try:
@@ -206,7 +239,14 @@ class App:
             return "channel"
         name = u.first_name or u.username or "member"
         full = f"{name} (@{u.username})" if u.username else name
-        role = "admin" if self.is_admin(u.id) else "member"
+        # Who is speaking decides how the brain answers: the owner's word
+        # weighs more than a member's question.
+        if u.id == self.cfg.owner:
+            role = "владелец"
+        elif self.is_admin(u.id):
+            role = "админ"
+        else:
+            role = "юзер"
         # The numeric id is what a tg://user?id= mention link is built from —
         # the way the model tags a member who has no @username.
         return f"[{role}] {full} (id:{u.id})"
@@ -299,8 +339,12 @@ class App:
         if st.busy:
             await self._steer(st, prompt, chat_id, reply_to)
             return (None, 0)
+        # The brain must know which room it is talking in: the dev group
+        # gets the technical voice, the users' chat the simple one.
+        prompt = f"({ROOM_CONTEXT.get(st.room.kind, '')}) {prompt}"
         st.busy = True
         status: Message | None = None
+        answered: set[int] = set()
         answer: list[str] = []
         tokens = [0, 0]
         replies = 0
@@ -353,9 +397,11 @@ class App:
                         answer.append(ev.text)
                     elif ev.type == "reply":
                         # Live: the room sees each answer as the model calls
-                        # it; the slot morphs from 💭 into the answer.
-                        replies += 1
-                        await self._deliver_reply(st, chat_id, ev.message_id, ev.text)
+                        # it; the slot morphs from 💭 into the answer. A stub
+                        # ("." и прочее) не ответ — промпт получит финал.
+                        if await self._deliver_reply(st, chat_id, ev.message_id, ev.text):
+                            answered.add(ev.message_id)
+                            replies += 1
                     elif ev.type == "tool":
                         now = time.monotonic()
                         if now - last_edit > EDIT_THROTTLE:
@@ -390,9 +436,23 @@ class App:
 
             result = "".join(answer).strip()
             self._maybe_warn_budget(chat_id)
+            trigger = reply_to.message_id if reply_to else None
             if replies == 0 and deliver and result:
                 # The slot becomes the answer: the room watched one message
                 # go 💭 → 🔧 → text, no delete-and-resent.
+                await self._deliver_text(chat_id, status, result)
+                status = None
+                return (result, replies)
+            if (
+                replies
+                and deliver
+                and result
+                and trigger is not None
+                and trigger not in answered
+            ):
+                # The model tool-replied somewhere else (or emitted stubs):
+                # this prompt's own slot gets the final text instead of
+                # silence and a "Deleted message".
                 await self._deliver_text(chat_id, status, result)
                 status = None
                 return (result, replies)
@@ -416,10 +476,14 @@ class App:
 
     async def _deliver_reply(
         self, st: RoomState, chat_id: int, target: int, text: str
-    ) -> None:
+    ) -> bool:
         """One message per target prompt: the first chat_reply creates it
-        as a reply to the member's message, the next ones edit it."""
+        as a reply to the member's message, the next ones edit it. Returns
+        False for stubs — a "." is not an answer, and the final text will
+        cover the prompt instead."""
         assert self.bot is not None
+        if not text.strip() or text.strip() in {".", "…", "-", "—", "•"}:
+            return False
         parts = split_reply(text)
         slot_id = st.slots.get(target)
         if slot_id is None:
@@ -435,7 +499,7 @@ class App:
                     msg = await self.bot.send_message(chat_id, escape_html(parts[0]))
                 except Exception:
                     log.exception("reply to msg:%s failed", target)
-                    return
+                    return False
             st.slots[target] = msg.message_id
             slot_id = msg.message_id
         else:
@@ -449,7 +513,7 @@ class App:
                     )
                 except Exception:
                     log.exception("edit reply to msg:%s failed", target)
-                    return
+                    return False
         for part in parts[1:]:
             try:
                 await self.bot.send_message(chat_id, part)
@@ -1097,3 +1161,53 @@ class App:
                         await self._show_draft(st, text)
             except Exception:
                 log.exception("series loop hiccup")
+
+    def _gh_save(self) -> None:
+        try:
+            self._gh_state.parent.mkdir(parents=True, exist_ok=True)
+            self._gh_state.write_text(
+                json.dumps(
+                    {
+                        "last": self.gh_last.isoformat() if self.gh_last else "",
+                        "seen": sorted(self.gh_seen)[-200:],
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+        except OSError:
+            log.exception("gh-watch save failed")
+
+    async def _gh_loop(self) -> None:
+        """The closed-issues watcher: every couple of minutes the issues the
+        bot account created get checked, and a closure lands in the dev room
+        as a one-line notice."""
+        assert self.bot is not None
+        while True:
+            await asyncio.sleep(150)
+            if self.gh is None or self.http is None or self.gh_login is None:
+                continue
+            dev = self.dev_state()
+            if dev is None:
+                continue
+            try:
+                since = (
+                    self.gh_last or datetime.now(timezone.utc) - timedelta(days=1)
+                ).strftime("%Y-%m-%dT%H:%M:%SZ")
+                items = await self.gh.closed_by_author_since(
+                    self.http, self.gh_login, since
+                )
+                fresh = [i for i in items if i["number"] not in self.gh_seen]
+                for i in sorted(fresh, key=lambda x: x["number"]):
+                    self.gh_seen.add(i["number"])
+                    await self.bot.send_message(
+                        dev.room.chat_id,
+                        f"📌 issue #{i['number']} «{escape_html(i['title'])}» закрыт: {i['url']}",
+                    )
+                self.gh_last = datetime.now(timezone.utc)
+                if fresh:
+                    self._gh_save()
+            except GithubError as e:
+                log.warning("gh watch: %s", e)
+            except Exception:
+                log.exception("gh loop hiccup")

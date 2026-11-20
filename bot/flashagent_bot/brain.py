@@ -68,6 +68,17 @@ class ServeClient:
     async def reset(self, http: httpx.AsyncClient) -> None:
         await http.post(f"{self.url}/reset", headers=self._headers())
 
+    async def catch_up(self, http: httpx.AsyncClient) -> int:
+        """Skip everything the feed accumulated before this process started.
+        The feed never shrinks and `since` starts at 0, so a restarted bot
+        would otherwise replay old replies as fresh ones. Returns how many
+        stale events were skipped."""
+        try:
+            stale = await self.poll(http)
+        except httpx.HTTPError:
+            return 0
+        return len(stale)
+
     async def poll(self, http: httpx.AsyncClient) -> list[Event]:
         """New events since the last poll, oldest first."""
         r = await http.get(

@@ -102,3 +102,14 @@ def test_github_without_token_yet_starts_without_it(tmp_path):
     text = VALID + '\n[github]\ntoken = ""\nrepo = "rentalx-wifi/rx-playa"\n'
     cfg = load(write(tmp_path, text))
     assert cfg.github is None
+
+
+def test_owner_defaults_to_the_first_admin(tmp_path):
+    cfg = load(write(tmp_path, VALID))
+    assert cfg.owner == 1
+
+
+def test_owner_can_be_named_explicitly(tmp_path):
+    text = VALID.replace("admins = [1, 2]", "admins = [1, 2]\nowner = 2")
+    cfg = load(write(tmp_path, text))
+    assert cfg.owner == 2
