@@ -423,6 +423,35 @@ fn threshold_pct_of(compact_at: Option<usize>, configured: usize, capacity: usiz
     }
 }
 
+/// What a POST /turn means, decided before any guard is dropped.
+enum TurnPath {
+    /// No turn runs: start one.
+    Start,
+    /// A turn runs and the prompt flew into it as a steer. The loop drains
+    /// steers at the top of its next step, so the words ride in the same
+    /// request as whatever tool results just landed — no separate endpoint
+    /// dance for the client.
+    Steered,
+    /// A turn runs but its steering channel is gone (the few instructions
+    /// between `running = true` and the spawn): nothing to fly into.
+    BusyWithoutChannel,
+}
+
+/// POST /turn while a turn is already running is a steer by itself.
+fn turn_path(state: &SharedState, text: &str) -> TurnPath {
+    let st = state.lock().expect("serve state");
+    if st.running {
+        return match st.steer_tx.as_ref() {
+            Some(tx) => {
+                let _ = tx.send(flashagent_core::Steer::text(text.to_string()));
+                TurnPath::Steered
+            }
+            None => TurnPath::BusyWithoutChannel,
+        };
+    }
+    TurnPath::Start
+}
+
 /// The whole API: small on purpose. The bot polls `/events`, starts turns,
 /// answers approvals, and that is all a Telegram client needs.
 async fn handle(
@@ -499,10 +528,21 @@ async fn handle(
                         )
                         .await;
                     }
-                    let mut app = app.lock().expect("serve app");
-                    match app.start_turn(&text) {
-                        Ok(()) => (200u16, serde_json::json!({"ok": true})),
-                        Err(why) => (409u16, serde_json::json!({"error": why})),
+                    match turn_path(state, &text) {
+                        TurnPath::Steered => {
+                            (200u16, serde_json::json!({"ok": true, "steered": true}))
+                        }
+                        TurnPath::BusyWithoutChannel => (
+                            409u16,
+                            serde_json::json!({"error": "a turn is already running"}),
+                        ),
+                        TurnPath::Start => {
+                            let mut app = app.lock().expect("serve app");
+                            match app.start_turn(&text) {
+                                Ok(()) => (200u16, serde_json::json!({"ok": true})),
+                                Err(why) => (409u16, serde_json::json!({"error": why})),
+                            }
+                        }
                     }
                 }
                 ("POST", "/approve") => {
@@ -864,6 +904,29 @@ mod tests {
         // A body without text is a bad request, not a mystery.
         let (status, _) = steer_answer(&state, b"{}");
         assert_eq!(status, 400);
+    }
+
+    #[test]
+    fn a_turn_while_a_turn_runs_is_a_steer_by_itself() {
+        let state: SharedState = Arc::new(Mutex::new(ServeState::default()));
+        // Idle: a prompt starts a turn.
+        assert!(matches!(turn_path(&state, "го"), TurnPath::Start));
+        // A prompt into a running turn flies in as a steer — the client just
+        // posts /turn and never learns the difference.
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        {
+            let mut st = state.lock().unwrap();
+            st.running = true;
+            st.steer_tx = Some(tx);
+        }
+        assert!(matches!(turn_path(&state, "стоп, не так"), TurnPath::Steered));
+        assert_eq!(rx.try_recv().expect("delivered").text, "стоп, не так");
+        // A running turn with no channel left: busy, nothing to fly into.
+        state.lock().unwrap().steer_tx = None;
+        assert!(matches!(
+            turn_path(&state, "го"),
+            TurnPath::BusyWithoutChannel
+        ));
     }
 
     #[test]

@@ -378,9 +378,12 @@ class App:
     async def _steer(
         self, st: RoomState, prompt: str, chat_id: int, reply_to: Message | None
     ) -> None:
+        """A prompt while the brain answers is a steer by itself: the bot
+        just posts /turn, serve flies it into the running answer, and the
+        loop rides it in the same request as the next tool results."""
         assert self.bot is not None and self.http is not None and st.brain is not None
         try:
-            err = await st.brain.steer(self.http, prompt)
+            err = await st.brain.start_turn(self.http, prompt)
         except httpx.HTTPError:
             err = "мозг не отвечает"
         if err:

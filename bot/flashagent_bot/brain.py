@@ -46,21 +46,11 @@ class ServeClient:
         return r.json()
 
     async def start_turn(self, http: httpx.AsyncClient, text: str) -> str:
-        """Hand the prompt to the brain. Returns "" on acceptance, the
-        error text otherwise."""
+        """Hand the prompt to the brain. A prompt that lands while a turn
+        runs is a steer by itself (serve flies it into the running answer).
+        Returns "" on acceptance, the error text otherwise."""
         r = await http.post(
             f"{self.url}/turn", headers=self._headers(), json={"text": text}
-        )
-        if r.status_code == 200:
-            return ""
-        return self._error_of(r)
-
-    async def steer(self, http: httpx.AsyncClient, text: str) -> str:
-        """Inject words into a *running* turn. Returns "" on acceptance,
-        the error text otherwise (409 when the brain is idle, 404 before
-        the serve learns the endpoint)."""
-        r = await http.post(
-            f"{self.url}/steer", headers=self._headers(), json={"text": text}
         )
         if r.status_code == 200:
             return ""
