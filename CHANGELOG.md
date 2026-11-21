@@ -2,13 +2,15 @@
 
 ## b734 — The feed has one truth
 
-- **Questions are cards, not walls of text.** `user_interaction` ask is
-  now one editable message with option buttons and a live tally. In a
-  /report only the author's answer counts and a single click closes the
-  card at once; in the dev room everyone votes and Готово closes the
-  round. The model gets the tally and the majority, not a lone option;
-  the options must be mutually exclusive and at one level (a multi-select
-  question lists atomic items, not nested sets).
+- **Questions are native polls, not walls of text.** `user_interaction`
+  ask sends a non-anonymous Telegram poll in its own message (multiple
+  answers when the model asks for them) and deletes that message as soon
+  as the answer is known; the original status message stays the answer
+  slot. In a /report only the author's answer counts and a single click
+  closes the poll at once; in the dev room everyone votes and the poll
+  closes after a quiet window. The model gets the tally and the majority,
+  not a lone option; the options must be mutually exclusive and at one
+  level (a multi-select question lists atomic items, not nested sets).
   A short, small GIF or video sticker becomes a 3 fps contact sheet, so
   the brain sees the motion instead of one frame.
 - **A restarted bot never replays an old answer.** Each room's `main` turn
