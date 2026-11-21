@@ -601,6 +601,7 @@ async fn main() -> Result<()> {
         let mut context_cap = None;
         let mut compact_at = None;
         let mut disable = None;
+        let mut no_ask = false;
         let mut args = std::env::args().skip(1).peekable();
         while let Some(a) = args.next() {
             match a.as_str() {
@@ -620,6 +621,9 @@ async fn main() -> Result<()> {
                 // A room's brain does not need the whole toolbox: no
                 // subagents, no plan, no edit — each one is a failure mode.
                 "--disable" => disable = args.next(),
+                // The bot runs unattended: an approval card nobody answers is
+                // a hang, so a would-be question becomes a refusal.
+                "--no-ask" => no_ask = true,
                 _ => {}
             }
         }
@@ -634,6 +638,7 @@ async fn main() -> Result<()> {
                 context_cap,
                 compact_at,
                 disable,
+                no_ask,
             },
         )
         .await

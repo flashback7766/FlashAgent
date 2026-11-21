@@ -1267,6 +1267,10 @@ impl PermissionState {
             Category::Read | Category::Net => Verdict::Allow,
             Category::Write => match mode {
                 PermissionMode::Yolo | PermissionMode::Bypass | PermissionMode::AcceptEdits => Verdict::Allow,
+                // A standing allow is the operator's decision, not a question
+                // for the person: in a serve the memory vault stays writable
+                // even in read-only planning, without a card.
+                PermissionMode::Planning if always => Verdict::Allow,
                 PermissionMode::Planning => Verdict::Deny("planning mode is read-only".into()),
                 PermissionMode::Manual if always => Verdict::Allow,
                 PermissionMode::Manual => Verdict::NeedApproval { diff: diff() },
@@ -1625,6 +1629,18 @@ mod tests {
             Verdict::Allow,
             "the serve's standing rule skips the card"
         );
+        // Planning stays read-only except for an explicit standing allow:
+        // the users' serve remembers facts without a question.
+        let planning = PermissionState::new(PermissionMode::Planning, Arc::new(DenyAllGate));
+        let mut rules = RuleSet::default();
+        rules.always_allow_tools.push("memory".into());
+        planning.set_rules(rules);
+        assert_eq!(planning.decide(&create, || None), Verdict::Allow);
+        let edit = call("edit", r#"{"path":"src/main.rs","file_text":"x"}"#);
+        assert!(matches!(
+            planning.decide(&edit, || None),
+            Verdict::Deny(_)
+        ));
     }
 
     #[test]

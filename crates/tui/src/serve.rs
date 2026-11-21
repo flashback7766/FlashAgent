@@ -818,6 +818,9 @@ pub(crate) struct ServeOpts {
     /// Tools this serve must not offer (`--disable a,b`): a room's brain does
     /// not need the whole TUI toolbox, and every extra tool is a failure mode.
     pub disable: Option<String>,
+    /// Never ask a human: whatever the mode would send to an approval card is
+    /// denied outright. The bot runs unattended; safety is policy, not Q&A.
+    pub no_ask: bool,
 }
 
 /// The permission mode a `--mode` flag names, or None when it names nothing.
@@ -934,8 +937,16 @@ pub(crate) async fn run_serve(mut config: flashagent_core::AppConfig, opts: Serv
         counter: AtomicU64::new(0),
         timeout: Duration::from_secs(300),
     });
+    // With --no-ask the permission layer never reaches the card gate: what it
+    // would ask about is denied at once, so an unattended turn can never wait
+    // five minutes for a button nobody will press.
+    let approval_gate: Arc<dyn flashagent_core::permissions::ApprovalGate> = if opts.no_ask {
+        Arc::new(flashagent_core::permissions::DenyAllGate)
+    } else {
+        gate.clone()
+    };
     let perm_state =
-        Arc::new(flashagent_core::permissions::PermissionState::new(config.permission_mode, gate.clone()));
+        Arc::new(flashagent_core::permissions::PermissionState::new(config.permission_mode, approval_gate));
     perm_state.set_project_root(cwd.clone());
     // The memory vault is the brain's own store, not a code change: a write
     // there must never wait on an approval card (the users' room runs manual).
