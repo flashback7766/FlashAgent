@@ -19,6 +19,11 @@ use super::{build_turn_options, trace};
 
 /// A pending approval: the loop is holding a call until someone answers.
 struct PendingApproval {
+    /// Which session's feed the request belongs to; the permission layer is
+    /// built once for the whole serve, so the gate learns the session per
+    /// call instead of capturing a state at start-up.
+    session: usize,
+    state: SharedState,
     respond: tokio::sync::oneshot::Sender<flashagent_core::permissions::Decision>,
 }
 
@@ -76,12 +81,27 @@ impl ServeState {
 
 type SharedState = Arc<Mutex<ServeState>>;
 
+tokio::task_local! {
+    /// The session whose turn owns the current task. The permission layer is
+    /// process-wide (the tools are built once), so the approval gate finds
+    /// the feed of the turn that called the tool through this instead of a
+    /// state captured at start-up — every session has its own feed.
+    static CURRENT_SESSION: SharedState;
+}
+
+fn session_key(state: &SharedState) -> usize {
+    Arc::as_ptr(state) as usize
+}
+
+fn current_session() -> Option<SharedState> {
+    CURRENT_SESSION.try_with(Clone::clone).ok()
+}
+
 /// The approval gate for a session nobody sits at: the request goes into the
-/// event feed, the client answers through `POST /approve`, and a call that
-/// waits past the clock is denied — the model adapts to a refusal, a hung
-/// start-up it cannot adapt to.
+/// session's event feed, the client answers through `POST /approve`, and a
+/// call that waits past the clock is denied — the model adapts to a refusal,
+/// a hung start-up it cannot adapt to.
 struct ServeGate {
-    state: SharedState,
     responders: Mutex<Vec<PendingApproval>>,
     counter: AtomicU64,
     timeout: Duration,
@@ -95,10 +115,14 @@ impl ServeGate {
         args_json: &str,
         diff: Option<String>,
         respond: tokio::sync::oneshot::Sender<flashagent_core::permissions::Decision>,
-    ) {
-        self.responders.lock().expect("gate responders").push(PendingApproval { respond });
-        let mut st = self.state.lock().expect("serve state");
-        st.pending = Some(serde_json::json!({
+    ) -> SharedState {
+        let state = current_session().unwrap_or_default();
+        self.responders.lock().expect("gate responders").push(PendingApproval {
+            session: session_key(&state),
+            state: state.clone(),
+            respond,
+        });
+        let event = serde_json::json!({
             "type": "approval",
             "id": id,
             "tool": tool,
@@ -106,21 +130,31 @@ impl ServeGate {
                 .ok()
                 .unwrap_or_default(),
             "diff": diff,
-        }));
+        });
+        {
+            let mut st = state.lock().expect("serve state");
+            st.pending = Some(event.clone());
+            st.push_event(event);
+        }
+        state
     }
 
-    fn answer(&self, allow: bool) -> bool {
+    /// `POST /approve` names a session: its waiting call is the one to answer.
+    fn answer_for(&self, state: &SharedState, allow: bool) -> bool {
         use flashagent_core::permissions::Decision;
-        let pending = self.responders.lock().expect("gate responders").pop();
-        if let Some(PendingApproval { respond }) = pending {
-            let _ = respond.send(if allow { Decision::Allow } else { Decision::Deny });
-            let mut st = self.state.lock().expect("serve state");
-            st.pending = None;
-            st.push_event(serde_json::json!({"type": "approval_answered", "allow": allow}));
-            true
-        } else {
-            false
-        }
+        let key = session_key(state);
+        let pending = {
+            let mut responders = self.responders.lock().expect("gate responders");
+            match responders.iter().rposition(|p| p.session == key) {
+                Some(pos) => responders.remove(pos),
+                None => return false,
+            }
+        };
+        let _ = pending.respond.send(if allow { Decision::Allow } else { Decision::Deny });
+        let mut st = pending.state.lock().expect("serve state");
+        st.pending = None;
+        st.push_event(serde_json::json!({"type": "approval_answered", "allow": allow}));
+        true
     }
 }
 
@@ -130,12 +164,12 @@ impl flashagent_core::permissions::ApprovalGate for ServeGate {
         use flashagent_core::permissions::Decision;
         let id = self.counter.fetch_add(1, Ordering::Relaxed) + 1;
         let (tx, rx) = tokio::sync::oneshot::channel();
-        self.push(id, &req.tool, &req.args_json, req.diff.clone(), tx);
+        let state = self.push(id, &req.tool, &req.args_json, req.diff.clone(), tx);
         match tokio::time::timeout(self.timeout, rx).await {
             Ok(Ok(decision)) => decision,
             _ => {
                 // The answer never came; the feed says the wait is over.
-                let mut st = self.state.lock().expect("serve state");
+                let mut st = state.lock().expect("serve state");
                 st.pending = None;
                 st.push_event(serde_json::json!({"type": "approval_timeout", "id": id, "tool": req.tool}));
                 Decision::Deny
@@ -196,6 +230,9 @@ struct ServeBase {
     source: Arc<crate::backend::BackendSource>,
     source_dyn: Arc<dyn flashagent_core::LlmSource>,
     perm: &'static flashagent_core::permissions::PermissionedTools,
+    /// One gate for the whole serve: it routes each approval to the session
+    /// whose turn called the tool, through the task-local.
+    gate: Arc<ServeGate>,
     config: flashagent_core::AppConfig,
     model: String,
     effort: String,
@@ -219,19 +256,15 @@ struct Session {
 impl Session {
     fn new(base: &ServeBase, key: &str) -> Self {
         let state: SharedState = Arc::new(Mutex::new(ServeState::default()));
-        let gate = Arc::new(ServeGate {
-            state: state.clone(),
-            responders: Mutex::new(Vec::new()),
-            counter: AtomicU64::new(0),
-            timeout: Duration::from_secs(300),
-        });
         let session_id = format!("{key}-{}", crate::sessions::new_session_id());
         let app = Arc::new(Mutex::new(ServeApp::new(
             base,
             state.clone(),
             session_id.clone(),
         )));
-        Self { session_id, state, gate, app }
+        // The approval buttons answer the same process-wide gate the
+        // permission layer calls; the state names the session.
+        Self { session_id, state, gate: base.gate.clone(), app }
     }
 }
 
@@ -382,7 +415,14 @@ impl ServeApp {
                 }
                 st.push_event(event_to_json(&event));
             };
-            let res = loop_.run(source.as_ref(), perm, shared, &mut on_event).await;
+            // The approval gate finds this session through the task-local:
+            // the tools are shared by every session, the feed is not.
+            let run_state = state.clone();
+            let res = CURRENT_SESSION
+                .scope(run_state, async move {
+                    loop_.run(source.as_ref(), perm, shared, &mut on_event).await
+                })
+                .await;
             let mut st = state.lock().expect("serve state");
             st.running = false;
             st.steer_tx = None;
@@ -731,7 +771,10 @@ async fn handle(
                         .get("allow")
                         .and_then(|a| a.as_bool())
                         .unwrap_or(false);
-                    (200u16, serde_json::json!({"answered": session.gate.answer(allow)}))
+                    (
+                        200u16,
+                        serde_json::json!({"answered": session.gate.answer_for(&session.state, allow)}),
+                    )
                 }
                 ("POST", "/cancel") => {
                     let app = session.app.lock().expect("serve app");
@@ -811,7 +854,6 @@ pub(crate) async fn run_serve(mut config: flashagent_core::AppConfig, opts: Serv
     let remote =
         flashagent_core::url_host(&endpoint.url).is_some_and(|host| !flashagent_core::is_local_host(&host));
     let model = config.active_profile().model.clone();
-    let state: SharedState = Arc::new(Mutex::new(ServeState::default()));
     let source = Arc::new(crate::backend::BackendSource(flashagent_llm::Client::new(endpoint.clone(), "")));
     source.0.set_max_retries(config.network_retries);
     source.0.set_session_id(crate::sessions::new_session_id());
@@ -876,7 +918,6 @@ pub(crate) async fn run_serve(mut config: flashagent_core::AppConfig, opts: Serv
     trace("serve: tools ready");
 
     let gate = Arc::new(ServeGate {
-        state: state.clone(),
         responders: Mutex::new(Vec::new()),
         counter: AtomicU64::new(0),
         timeout: Duration::from_secs(300),
@@ -964,6 +1005,7 @@ pub(crate) async fn run_serve(mut config: flashagent_core::AppConfig, opts: Serv
         source: source.clone(),
         source_dyn,
         perm,
+        gate,
         config: config.clone(),
         model: model.clone(),
         effort,
@@ -1006,8 +1048,8 @@ mod tests {
 
     #[tokio::test]
     async fn an_unanswered_approval_is_denied_when_the_clock_runs_out() {
+        let state: SharedState = Arc::new(Mutex::new(ServeState::default()));
         let gate = ServeGate {
-            state: Arc::new(Mutex::new(ServeState::default())),
             responders: Mutex::new(Vec::new()),
             counter: AtomicU64::new(0),
             timeout: Duration::from_millis(80),
@@ -1018,9 +1060,12 @@ mod tests {
             category: flashagent_core::permissions::Category::Shell,
             diff: None,
         };
-        assert!(matches!(gate.approve(&req).await, flashagent_core::permissions::Decision::Deny));
+        let decision = CURRENT_SESSION
+            .scope(state.clone(), async { gate.approve(&req).await })
+            .await;
+        assert!(matches!(decision, flashagent_core::permissions::Decision::Deny));
         // The feed says the wait ended, so the bot can tell the person why.
-        let st = gate.state.lock().unwrap();
+        let st = state.lock().unwrap();
         assert_eq!(st.pending, None);
         let shown = format!("{:?}", st.events);
         assert!(shown.contains("approval_timeout"), "{shown}");
@@ -1028,8 +1073,8 @@ mod tests {
 
     #[tokio::test]
     async fn an_approval_answered_through_the_api_allows_the_call() {
+        let state: SharedState = Arc::new(Mutex::new(ServeState::default()));
         let gate = Arc::new(ServeGate {
-            state: Arc::new(Mutex::new(ServeState::default())),
             responders: Mutex::new(Vec::new()),
             counter: AtomicU64::new(0),
             timeout: Duration::from_secs(10),
@@ -1043,18 +1088,26 @@ mod tests {
         let waiter = {
             let gate = gate.clone();
             let req = req.clone();
-            tokio::spawn(async move { gate.approve(&req).await })
+            let state = state.clone();
+            tokio::spawn(async move {
+                CURRENT_SESSION
+                    .scope(state, async { gate.approve(&req).await })
+                    .await
+            })
         };
         // The pending approval shows in the feed with its diff.
         tokio::time::sleep(Duration::from_millis(60)).await;
         let (pending_tool, pending_diff) = {
-            let st = gate.state.lock().unwrap();
+            let st = state.lock().unwrap();
             let pending = st.pending.clone().expect("the approval is in the feed");
             (pending["tool"].clone(), pending["diff"].clone())
         };
         assert_eq!(pending_tool, "edit");
         assert_eq!(pending_diff, "+ hello");
-        assert!(gate.answer(true), "the answer lands on the waiting call");
+        assert!(
+            gate.answer_for(&state, true),
+            "the answer lands on the waiting call"
+        );
         assert!(matches!(waiter.await.unwrap(), flashagent_core::permissions::Decision::Allow));
     }
 
@@ -1130,9 +1183,7 @@ mod tests {
     /// network — a session never calls the server from these paths.
     fn test_base() -> ServeBase {
         let tools = Arc::new(flashagent_tools::BuiltinTools::new(Default::default()).unwrap());
-        let st: SharedState = Arc::new(Mutex::new(ServeState::default()));
         let gate: Arc<ServeGate> = Arc::new(ServeGate {
-            state: st,
             responders: Mutex::new(Vec::new()),
             counter: AtomicU64::new(0),
             timeout: Duration::from_secs(10),
@@ -1143,7 +1194,7 @@ mod tests {
                 Some(tools.clone()),
                 Arc::new(flashagent_core::permissions::PermissionState::new(
                     flashagent_core::PermissionMode::Manual,
-                    gate,
+                    gate.clone(),
                 )),
             )));
         ServeBase {
@@ -1161,6 +1212,7 @@ mod tests {
                 src
             },
             perm,
+            gate,
             config: flashagent_core::AppConfig::default(),
             model: "test-model".into(),
             effort: "off".into(),
