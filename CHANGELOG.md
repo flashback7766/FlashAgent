@@ -1,5 +1,33 @@
 # Changelog
 
+## b733 — Named sessions: a report discussion runs in its own brain
+
+- **Every serve route addresses a session.** The `session` query parameter
+  or body field picks the brain — `main` when unnamed — and each session
+  carries its own feed, history, approvals, cancellation and archive. A
+  /report discussion in a busy room runs in its own brain: other members'
+  messages, steers and churn live in `main` and cannot bleed into it.
+- **The bot binds the reporter to their report session** and routes their
+  follow-ups there; when the issue lands, both are released back to `main`
+  and the report's brain is wiped.
+- **The bot speaks only when addressed.** The users' room's free talk was
+  the flood — a member's casual message became a steered prompt and the
+  brain answered everything, bickering included. Both rooms now run the
+  same rule: a turn starts only on a command, a mention or a reply;
+  chatter is journalled for context and never answered.
+- **The first reply to a prompt is the answer, and it survives.** The
+  delivery wrapper never returned success, so the turn tail edited the
+  final text straight over a delivered answer; the delivered pairs now
+  persist across restarts, a later `chat_reply` to the same message is
+  ignored, the tool's own echoed result is filtered as a stub, and a
+  restart delivers an in-flight answer late instead of losing it.
+- **A turn may not flood the room.** `replies_per_turn` (default 3) caps
+  the answers one turn delivers; the flood clock Telegram names is slept
+  and retried instead of losing the tail; the model's markup goes through
+  a sanitizer (whitelisted tags render, junk becomes text), fastfetch is
+  run with `--logo none`, and the users' brain refuses provocations with
+  one short line.
+
 ## b732 — The brain answers each message with its own chat_reply
 
 - **`chat_reply(message_id, text)` — the per-message answer.** The room's
