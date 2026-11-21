@@ -80,10 +80,6 @@ fn truncate_output(mut text: String) -> String {
     text
 }
 
-/// Where a `chat_reply` goes: the host (serve) turns one call into one chat
-/// message the bot relays as a reply to that member. The TUI has none.
-pub type ReplyOutbox = std::sync::Arc<dyn Fn(i64, &str) + Send + Sync>;
-
 #[derive(Default)]
 pub struct BuiltinToolsConfig {
     /// For all filesystem tools and the shell.
@@ -103,10 +99,10 @@ pub struct BuiltinToolsConfig {
     /// Where `~` and the memory stores point. `None` reads HOME; a test sets
     /// it so no memory is written into the owner's home directory.
     pub home: Option<PathBuf>,
-    /// The chat outbox: set by `--serve`, whose bot relays each call to the
-    /// room as a reply to one member's message. `None` leaves `chat_reply`
-    /// off the toolset entirely — a terminal session has no chat to talk to.
-    pub reply_outbox: Option<ReplyOutbox>,
+    /// Set by `--serve`: the session's event stream carries every
+    /// `chat_reply` call as a `reply` entry. Off in the terminal — a TUI
+    /// session has no chat to talk to, so the tool is not even offered.
+    pub chat_enabled: bool,
 }
 
 /// What a tool answered: text for the model, or a picture.
@@ -204,8 +200,8 @@ pub struct BuiltinTools {
     /// The tools that are off. Shared with the app, so the switch takes effect
     /// in the conversation that is running.
     disabled: Arc<std::sync::RwLock<Vec<String>>>,
-    /// The chat outbox behind `chat_reply`; `None` keeps the tool unoffered.
-    reply_outbox: Option<ReplyOutbox>,
+    /// Whether `chat_reply` is on: set from `BuiltinToolsConfig`.
+    chat_enabled: bool,
     /// The measured tool list. Measuring it means tokenizing every schema,
     /// and the list is asked for on every tool call.
     specs_cache: parking_lot::Mutex<Option<SpecsCache>>,
@@ -239,7 +235,7 @@ impl BuiltinTools {
             vision_supported: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             mcp_manager,
             disabled: Arc::new(std::sync::RwLock::new(config.disabled_tools.unwrap_or_default())),
-            reply_outbox: config.reply_outbox,
+            chat_enabled: config.chat_enabled,
             specs_cache: parking_lot::Mutex::new(None),
             #[cfg(test)]
             specs_measured: std::sync::atomic::AtomicUsize::new(0),
@@ -358,7 +354,7 @@ impl BuiltinTools {
             // `BuiltinTools` is what a subagent is given, so the parent-only
             // tools are not offered from here. The chat outbox makes
             // `chat_reply` real; without it the tool is not on the table.
-            .filter(|def| registry::offered(def, core, vision, web, false, self.reply_outbox.is_some()))
+            .filter(|def| registry::offered(def, core, vision, web, false, self.chat_enabled))
             // A tool the owner has switched off is not on the table at all.
             .filter(|def| !self.tool_disabled(def.name))
             .map(|def| ToolSpec {
@@ -576,11 +572,15 @@ impl BuiltinTools {
             }
             Handler::Plan => plan_tool::run_plan(&call.args_json).map(Answer::Text),
             Handler::ChatReply => {
-                let outbox = self.reply_outbox.as_ref().ok_or_else(|| {
-                    ToolError::Other("chat_reply is not available here: nothing serves a chat".into())
-                })?;
+                if !self.chat_enabled {
+                    return Err(ToolError::Other(
+                        "chat_reply is not available here: nothing serves a chat".into(),
+                    ));
+                }
+                // The delivery is the ToolStarted event on this session's
+                // feed (serve maps it to a `reply` entry); the tool only
+                // validates the call and confirms.
                 let a: ChatReplyArgs = parse_args(&call.args_json, &call.name)?;
-                (outbox)(a.message_id, &a.text);
                 Ok(Answer::Text(format!("Reply sent to msg:{}.", a.message_id)))
             }
             Handler::Memory => {
@@ -935,6 +935,9 @@ struct WebArgs {
 #[derive(Deserialize)]
 struct ChatReplyArgs {
     message_id: i64,
+    /// Read only by the schema: the delivery rides the call's own
+    /// ToolStarted event, so the executor never touches the text.
+    #[allow(dead_code)]
     text: String,
 }
 
@@ -1011,19 +1014,15 @@ mod tests {
         assert!(!diff.contains("a//"), "{diff}");
     }
     #[tokio::test]
-    async fn a_chat_reply_lands_in_the_outbox_and_the_toolset() {
+    async fn a_chat_reply_confirms_the_call_when_the_chat_is_on() {
         let dir = testing::tempdir();
-        let sent = Arc::new(std::sync::Mutex::new(Vec::new()));
-        let keep = sent.clone();
         let tools = BuiltinTools::new(BuiltinToolsConfig {
             cwd: dir.clone(),
-            reply_outbox: Some(Arc::new(move |id: i64, text: &str| {
-                keep.lock().unwrap().push((id, text.to_string()));
-            })),
+            chat_enabled: true,
             ..Default::default()
         })
         .expect("tools");
-        // With the outbox wired the tool is on the table.
+        // With the chat on the tool is on the table.
         assert!(tools.specs().iter().any(|s| s.name == "chat_reply"), "offered");
         let out = tools
             .execute(&batch_call(
@@ -1033,10 +1032,9 @@ mod tests {
             .await;
         assert!(!out.is_error, "{}", out.content);
         assert!(out.content.contains("msg:42"), "{}", out.content);
-        assert_eq!(*sent.lock().unwrap(), vec![(42, "держи".to_string())]);
     }
     #[tokio::test]
-    async fn chat_reply_without_an_outbox_is_not_offered_and_refused() {
+    async fn chat_reply_without_a_chat_is_not_offered_and_refused() {
         let dir = testing::tempdir();
         let tools = BuiltinTools::new(BuiltinToolsConfig {
             cwd: dir,

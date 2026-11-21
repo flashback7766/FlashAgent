@@ -333,6 +333,16 @@ impl ServeApp {
             let state_for_events = state.clone();
             let mut on_event = |event: flashagent_core::LoopEvent| {
                 let mut st = state_for_events.lock().expect("serve state");
+                // A chat_reply call IS the delivery: the event stream of the
+                // session it ran in carries it as a `reply` with the full
+                // text — the bot posts it to that exact message.
+                if let flashagent_core::LoopEvent::ToolStarted { name, args_json, .. } = &event {
+                    if name == "chat_reply" {
+                        if let Some(reply) = chat_reply_event(args_json) {
+                            st.events.push(reply);
+                        }
+                    }
+                }
                 if let flashagent_core::LoopEvent::TurnDelta(text) = &event {
                     st.text.push_str(text);
                 }
@@ -528,6 +538,20 @@ fn threshold_pct_of(compact_at: Option<usize>, configured: usize, capacity: usiz
         Some(at) if capacity > 0 && at <= capacity => (at * 100 / capacity).max(1),
         _ => flashagent_core::resolved_compact_threshold(configured, capacity),
     }
+}
+
+/// A chat_reply call becomes a `reply` feed entry: the message id and the
+/// full text ride in the call's own arguments. `None` when the call does
+/// not name a message — nothing to deliver.
+fn chat_reply_event(args_json: &str) -> Option<serde_json::Value> {
+    let args = serde_json::from_str::<serde_json::Value>(args_json).ok()?;
+    let message_id = args.get("message_id").and_then(|v| v.as_i64())?;
+    let text = args.get("text").and_then(|v| v.as_str()).unwrap_or_default();
+    Some(serde_json::json!({
+        "type": "reply",
+        "message_id": message_id,
+        "text": text,
+    }))
 }
 
 /// What a POST /turn means, decided before any guard is dropped.
@@ -800,20 +824,9 @@ pub(crate) async fn run_serve(mut config: flashagent_core::AppConfig, opts: Serv
         mcp_manager: mcp.clone(),
         disabled_tools: Some(config.disabled_tools.clone()),
         home: None,
-        // The bot's room is the chat this session serves: every `chat_reply`
-        // call lands in the feed as a `reply` event, and the bot posts it as
-        // a Telegram reply to that exact message.
-        reply_outbox: {
-            let state = state.clone();
-            Some(Arc::new(move |message_id: i64, text: &str| {
-                let mut st = state.lock().expect("serve state");
-                st.events.push(serde_json::json!({
-                    "type": "reply",
-                    "message_id": message_id,
-                    "text": text,
-                }));
-            }) as flashagent_tools::ReplyOutbox)
-        },
+        // Every session's event stream carries its own `chat_reply` calls as
+        // `reply` events — the outbox is the feed itself, per session.
+        chat_enabled: true,
     })?);
     trace("serve: tools ready");
 
@@ -1055,27 +1068,17 @@ mod tests {
     }
 
     #[test]
-    fn the_chat_reply_outbox_pushes_into_the_feed() {
-        let state: SharedState = Arc::new(Mutex::new(ServeState::default()));
-        // The closure run_serve hands BuiltinTools: one call, one feed entry
-        // the bot polls and turns into a Telegram reply.
-        let push = {
-            let state = state.clone();
-            Arc::new(move |message_id: i64, text: &str| {
-                let mut st = state.lock().expect("serve state");
-                st.events.push(serde_json::json!({
-                    "type": "reply",
-                    "message_id": message_id,
-                    "text": text,
-                }));
-            })
-        };
-        push(42, "держи");
-        let st = state.lock().unwrap();
-        assert_eq!(st.events.len(), 1);
-        assert_eq!(st.events[0]["type"], "reply");
-        assert_eq!(st.events[0]["message_id"], 42);
-        assert_eq!(st.events[0]["text"], "держи");
+    fn a_chat_reply_call_becomes_a_reply_event() {
+        // The delivery is the call's own ToolStarted event: the args carry
+        // the target and the full text, per session — no shared outbox to
+        // route wrong.
+        let reply = chat_reply_event(r#"{"message_id": 42, "text": "держи"}"#).expect("delivered");
+        assert_eq!(reply["type"], "reply");
+        assert_eq!(reply["message_id"], 42);
+        assert_eq!(reply["text"], "держи");
+        // A call that names no message delivers nothing.
+        assert!(chat_reply_event(r#"{"text": "без id"}"#).is_none());
+        assert!(chat_reply_event("не json").is_none());
     }
 
     /// A minimal base for the session tests: real tools and permissions, no
