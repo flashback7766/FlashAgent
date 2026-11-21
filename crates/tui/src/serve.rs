@@ -302,8 +302,18 @@ fn event_to_json(event: &flashagent_core::LoopEvent) -> serde_json::Value {
                 })
                 .unwrap_or_default(),
         }),
-        LoopEvent::ToolFinished { is_error, result_len, .. } => {
-            serde_json::json!({"type": "tool_end", "ok": !is_error, "result_len": result_len})
+        LoopEvent::ToolFinished { is_error, result_len, result, .. } => {
+            // The verdict line rides along, capped: the bot watches a
+            // `github` result for the issue it just adopted, and a log line
+            // beats a bare length when a room asks what happened.
+            serde_json::json!({
+                "type": "tool_end",
+                "ok": !is_error,
+                "result_len": result_len,
+                "result": result
+                    .as_deref()
+                    .map(|r| r.chars().take(300).collect::<String>()),
+            })
         }
         LoopEvent::Usage(u) => serde_json::json!({
             "type": "usage",
