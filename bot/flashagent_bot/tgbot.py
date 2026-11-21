@@ -91,14 +91,13 @@ HELP = (
 @dataclass
 class RoomState:
     room: Room
-    brain: ServeClient | None
+    brain: ServeClient | None  # the main session
     journal: Journal | None = None
-    busy: bool = False
+    busy: dict[str, bool] = field(default_factory=dict)  # per session
+    clients: dict[str, ServeClient] = field(default_factory=dict)  # per session
+    report_of: dict[int, str] = field(default_factory=dict)  # user → session
+    session_owner: dict[str, int] = field(default_factory=dict)  # session → user
     pulse_mark: int = 0  # journal.count at the last pulse
-    # One evolving message per target prompt: target msg id → the bot's
-    # message that started as 💭 and becomes that prompt's answer. Lives for
-    # one turn; steered prompts get theirs from the steer ack.
-    slots: dict[int, int] = field(default_factory=dict)
 
 
 @dataclass
@@ -152,15 +151,18 @@ class App:
                 self.gh_last = datetime.fromisoformat(raw["last"])
         except (ValueError, KeyError, OSError):
             pass
-        # The answers already delivered: target message id → the bot's
-        # message that carries the answer. Persisted, so a restart neither
-        # re-delivers an answered prompt nor loses an in-flight one.
-        self.delivered: dict[int, int] = {}
+        # The slot registry: target message id → the bot's message carrying
+        # that prompt's answer (starts as 💭, becomes the answer). `answered`
+        # is the first-wins set. Both persist, so a restart neither re-sends
+        # an answered prompt nor loses an in-flight one.
+        self.slots: dict[int, int] = {}
+        self.answered: set[int] = set()
         try:
             raw = json.loads(
                 (cfg.data_dir / "replies.json").read_text(encoding="utf-8")
             )
-            self.delivered = {int(k): int(v) for k, v in raw.items()}
+            self.slots = {int(k): int(v) for k, v in raw.get("slots", {}).items()}
+            self.answered = {int(n) for n in raw.get("answered", [])}
         except (ValueError, OSError):
             pass
         # Fire-and-forget coroutines need a held reference, or the event loop
@@ -170,10 +172,14 @@ class App:
     def _save_delivered(self) -> None:
         try:
             self.cfg.data_dir.mkdir(parents=True, exist_ok=True)
-            items = list(self.delivered.items())[-300:]
-            self.delivered = dict(items)
+            slots = list(self.slots.items())[-300:]
+            self.slots = dict(slots)
             (self.cfg.data_dir / "replies.json").write_text(
-                json.dumps(dict(items)), encoding="utf-8"
+                json.dumps(
+                    {"slots": dict(slots), "answered": sorted(self.answered)[-300:]},
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
             )
         except OSError:
             log.exception("delivered-replies save failed")
@@ -186,6 +192,30 @@ class App:
         task = asyncio.create_task(coro)
         self._tasks.add(task)
         task.add_done_callback(self._tasks.discard)
+
+    def client_for(self, st: RoomState, session: str) -> ServeClient | None:
+        """The client of one named brain: main or a report's own session.
+        Clients are cached per room — each keeps its own feed cursor."""
+        if st.room.serve is None:
+            return None
+        client = st.clients.get(session)
+        if client is None:
+            client = ServeClient(st.room.serve.url, st.room.serve.token, session=session)
+            st.clients[session] = client
+        return client
+
+    def release_report(self, st: RoomState, session: str) -> None:
+        """A report is filed: the reporter goes back to the main session and
+        the report's own brain is wiped."""
+        owner = st.session_owner.pop(session, None)
+        if owner is not None:
+            st.report_of.pop(owner, None)
+        client = st.clients.pop(session, None)
+        if client is not None and self.http is not None:
+            try:
+                asyncio.ensure_future(client.reset(self.http))
+            except Exception:
+                log.warning("report session %s reset failed", session)
 
     async def _send(self, make: "Callable[[], Awaitable[Message]]") -> Message:
         """One Telegram send, honouring the flood clock: Telegram says
@@ -226,11 +256,11 @@ class App:
                 for ev in stale:
                     if (
                         ev.type == "reply"
-                        and ev.message_id not in self.delivered
+                        and ev.message_id not in self.answered
                         and (ev.text or "").strip()
                     ):
                         log.info("delivering in-flight reply to msg:%s", ev.message_id)
-                        await self._deliver_reply(st, st.room.chat_id, ev.message_id, ev.text)
+                        await self._deliver_reply(st.room.chat_id, ev.message_id, ev.text)
         if self.gh is not None:
             try:
                 self.gh_login = await self.gh.whoami(self.http)
@@ -381,24 +411,29 @@ class App:
         chat_id: int,
         reply_to: Message | None = None,
         deliver: bool = True,
+        session: str = "main",
     ) -> tuple[str | None, int]:
-        """One turn against the room's brain. ONE message per prompt: the
-        message that starts as 💭 and shows 🔧 as tools run is the slot the
-        answer lands in — edited in place, never deleted and re-sent.
-        `chat_reply` events go out the moment they arrive, and each target
-        message keeps exactly one evolving reply. Returns (final text,
-        replies sent); the caller only handles the sentinel. `deliver=False`
-        for service turns whose result the caller handles (drafts, pulse)."""
-        assert self.bot is not None and self.http is not None and st.brain is not None
-        if st.busy:
-            await self._steer(st, prompt, chat_id, reply_to)
+        """One turn against one of the room's brains — the main session or a
+        report's own (`session`). ONE message per prompt: the message that
+        starts as 💭 and shows 🔧 as tools run is the slot the answer lands
+        in — edited in place, never deleted and re-sent. `chat_reply` events
+        go out the moment they arrive, and each target message keeps exactly
+        one evolving reply. Returns (final text, replies sent); the caller
+        only handles the sentinel. `deliver=False` for service turns whose
+        result the caller handles (drafts, pulse)."""
+        assert self.bot is not None and self.http is not None
+        brain = self.client_for(st, session)
+        if brain is None:
+            return (None, 0)
+        if st.busy.get(session, False):
+            await self._steer(st, prompt, chat_id, reply_to, session)
             return (None, 0)
         # The brain must know which room it is talking in: the dev group
         # gets the technical voice, the users' chat the simple one.
         prompt = f"({ROOM_CONTEXT.get(st.room.kind, '')}) {prompt}"
-        st.busy = True
+        slots: dict[int, int] = {}
+        st.busy[session] = True
         status: Message | None = None
-        answered: set[int] = set()
         answer: list[str] = []
         tokens = [0, 0]
         replies = 0
@@ -414,7 +449,7 @@ class App:
                 ),
             )
             if reply_to is not None:
-                st.slots[reply_to.message_id] = status.message_id
+                slots[reply_to.message_id] = status.message_id
 
             async def stage(text: str) -> None:
                 if status is not None:
@@ -423,7 +458,7 @@ class App:
                     except Exception:
                         pass
 
-            err = await st.brain.start_turn(self.http, prompt)
+            err = await brain.start_turn(self.http, prompt)
             if err:
                 await stage(f"⚠️ {escape_html(err)}")
                 status = None  # the error stays; the finally must not eat it
@@ -438,7 +473,7 @@ class App:
                     except Exception:
                         pass
                 try:
-                    events = await st.brain.poll(self.http)
+                    events = await brain.poll(self.http)
                     poll_errors = 0
                 except httpx.HTTPError:
                     poll_errors += 1
@@ -455,7 +490,7 @@ class App:
                         # first reply to a prompt IS the answer: later calls
                         # to the same message never clobber it — the model
                         # likes to follow its answer with a state report.
-                        if ev.message_id in answered:
+                        if ev.message_id in self.answered:
                             continue
                         if replies >= self.cfg.replies_per_turn:
                             log.warning(
@@ -464,8 +499,7 @@ class App:
                                 ev.message_id,
                             )
                             continue
-                        if await self._deliver_reply(st, chat_id, ev.message_id, ev.text):
-                            answered.add(ev.message_id)
+                        if await self._deliver_reply(chat_id, ev.message_id, ev.text):
                             replies += 1
                             if reply_to is not None and ev.message_id == reply_to.message_id:
                                 # The slot that just became the answer IS the
@@ -488,7 +522,7 @@ class App:
                                 f"⚠️ {escape_html(ev.text)}"
                                 f"\nповторяю ({retries}/{RETRIES})…"
                             )
-                            err = await st.brain.start_turn(self.http, prompt)
+                            err = await brain.start_turn(self.http, prompt)
                             if err:
                                 await stage(f"⚠️ повтор не вышел: {escape_html(err)}")
                                 status = None
@@ -511,19 +545,24 @@ class App:
                 # go 💭 → 🔧 → text, no delete-and-resent.
                 await self._deliver_text(chat_id, status, result)
                 status = None
+                if trigger is not None:
+                    self.answered.add(trigger)
+                    self._save_delivered()
                 return (result, replies)
             if (
                 replies
                 and deliver
                 and result
                 and trigger is not None
-                and trigger not in answered
+                and trigger not in self.answered
             ):
                 # The model tool-replied somewhere else (or emitted stubs):
                 # this prompt's own slot gets the final text instead of
                 # silence and a "Deleted message".
                 await self._deliver_text(chat_id, status, result)
                 status = None
+                self.answered.add(trigger)
+                self._save_delivered()
                 return (result, replies)
             if replies and result:
                 log.info(
@@ -533,8 +572,7 @@ class App:
                 )
             return (result or None, replies)
         finally:
-            st.busy = False
-            st.slots.clear()
+            st.busy[session] = False
             if tokens[0] or tokens[1]:
                 self.usage.add(st.room.name, tokens[0], tokens[1])
             if status is not None:
@@ -544,7 +582,7 @@ class App:
                     pass
 
     async def _deliver_reply(
-        self, st: RoomState, chat_id: int, target: int, text: str
+        self, chat_id: int, target: int, text: str
     ) -> bool:
         """One message per target prompt, for good: the first chat_reply
         fills the prompt's slot (the 💭 status, or a fresh reply), and the
@@ -554,10 +592,10 @@ class App:
         assert self.bot is not None
         if is_stub_reply(text):
             return False
-        if target in self.delivered:
+        if target in self.answered:
             return False
         parts = split_reply(text)
-        slot_id = st.slots.get(target)
+        slot_id = self.slots.get(target)
         if slot_id is None:
             try:
                 msg = await self._send(lambda: self.bot.send_message(
@@ -572,7 +610,7 @@ class App:
                 except Exception:
                     log.exception("reply to msg:%s failed", target)
                     return False
-            st.slots[target] = msg.message_id
+            self.slots[target] = msg.message_id
             slot_id = msg.message_id
         else:
             try:
@@ -587,7 +625,7 @@ class App:
                 except Exception:
                     log.exception("edit reply to msg:%s failed", target)
                     return False
-        self.delivered[target] = slot_id
+        self.answered.add(target)
         self._save_delivered()
         for part in parts[1:]:
             try:
@@ -616,16 +654,24 @@ class App:
                 await self._send(lambda: self.bot.send_message(chat_id, plain_text(part)))
 
     async def _steer(
-        self, st: RoomState, prompt: str, chat_id: int, reply_to: Message | None
+        self,
+        st: RoomState,
+        prompt: str,
+        chat_id: int,
+        reply_to: Message | None,
+        session: str = "main",
     ) -> None:
         """A prompt while the brain answers is a steer by itself: the bot
         just posts /turn, serve flies it into the running answer, and the
         loop rides it in the same request as the next tool results. The ack
         message is the prompt's slot — it morphs into the answer when the
         running brain gets to it."""
-        assert self.bot is not None and self.http is not None and st.brain is not None
+        assert self.bot is not None and self.http is not None
+        brain = self.client_for(st, session)
+        if brain is None:
+            return
         try:
-            err = await st.brain.start_turn(self.http, prompt)
+            err = await brain.start_turn(self.http, prompt)
         except httpx.HTTPError:
             err = "мозг не отвечает"
         if err:
@@ -644,7 +690,7 @@ class App:
                     "⚡ влетело в текущий ответ",
                     reply_parameters=ReplyParameters(message_id=reply_to.message_id),
                 )
-                st.slots[reply_to.message_id] = ack.message_id
+                self.slots[reply_to.message_id] = ack.message_id
             except Exception:
                 pass
 
@@ -678,9 +724,11 @@ class App:
             await message.answer("как пользоваться: /remember <факт>")
             return
         prompt = f"{self._msg(message)} просит: запиши в валт памяти проекта: {fact}"
-        text, replies = await self._run_turn(st, prompt, message.chat.id, reply_to=message)
+        text, replies = await self._run_turn(
+            st, prompt, message.chat.id, reply_to=message, session=session
+        )
         if text:
-            await self._answer_room(st, text, message.chat.id, message, replies)
+            await self._answer_room(st, text, message.chat.id, message, replies, session)
 
     async def cmd_post(self, message: Message, command: CommandObject) -> None:
         st = self.state_by_chat(message.chat.id)
@@ -872,6 +920,18 @@ class App:
         who = self._who(message)
         if st.journal is not None:
             st.journal.append(who, report, kind="report", msg_id=message.message_id)
+        # The discussion gets its own brain session: the reporter's follow-ups
+        # land there and the room's other traffic cannot interfere. A new
+        # report replaces the user's old one.
+        user_id = message.from_user.id if message.from_user else None
+        session = "main"
+        if user_id is not None:
+            old = st.report_of.get(user_id)
+            if old is not None:
+                self.release_report(st, old)
+            session = f"report-{message.message_id}"
+            st.report_of[user_id] = session
+            st.session_owner[session] = user_id
         if not self.is_admin(message.from_user.id if message.from_user else None):
             verdict, secs = self.limiter.check(
                 message.from_user.id,
@@ -983,10 +1043,17 @@ class App:
                     await self._show_draft(st, new_text)
                 return
 
+        # The reporter talks to their report's own brain; everyone else to
+        # the main one. A session of another member is never touched.
+        session = "main"
+        if room.kind == "users" and message.from_user is not None:
+            session = st.report_of.get(message.from_user.id, "main")
         prompt = f"{self._msg(message)}: {text}{lang_hint(text)}{BREVITY}"
-        text_out, replies = await self._run_turn(st, prompt, message.chat.id, reply_to=message)
+        text_out, replies = await self._run_turn(
+            st, prompt, message.chat.id, reply_to=message, session=session
+        )
         if text_out:
-            await self._answer_room(st, text_out, message.chat.id, message, replies)
+            await self._answer_room(st, text_out, message.chat.id, message, replies, session)
 
     async def _answer_room(
         self,
@@ -995,6 +1062,7 @@ class App:
         chat_id: int,
         reply_to: Message | None,
         replies: int = 0,
+        session: str = "main",
     ) -> None:
         """The sentinel bookkeeping. The answer itself already went out —
         through the reply slots (replies > 0) or as the status message
@@ -1010,7 +1078,7 @@ class App:
                     chat_id, "📌 [github] в bot.toml не настроен — issue не завёл"
                 )
             else:
-                self._spawn(self._file_issue(st, issue_title, chat_id))
+                self._spawn(self._file_issue(st, issue_title, chat_id, session))
 
     def _journal_tail(self, st: RoomState, n: int) -> str:
         if st.journal is None:
@@ -1020,10 +1088,14 @@ class App:
         ]
         return "\n".join(lines) or "(журнал пуст)"
 
-    async def _file_issue(self, st: RoomState, title: str, chat_id: int) -> None:
+    async def _file_issue(
+        self, st: RoomState, title: str, chat_id: int, session: str = "main"
+    ) -> None:
         """The report pipeline: the users' brain decided the problem is
         clear (the sentinel), so dedup against the repo and file or amend.
-        The dev brain — the one that knows the project — writes the body."""
+        The dev brain — the one that knows the project — writes the body.
+        When the issue lands, the reporter is released back to the main
+        session and the report's own brain is wiped."""
         assert self.http is not None and self.gh is not None
         dev = self.dev_state()
         if dev is None or dev.brain is None:
@@ -1072,6 +1144,8 @@ class App:
             else:
                 issue = await self.gh.create(self.http, title, body)
                 await self._say(chat_id, f"📌 завёл issue #{issue['number']}: {issue['url']}")
+            if session != "main":
+                self.release_report(st, session)
         except GithubError as e:
             await self._say(chat_id, f"⚠️ GitHub не вышел: {e}")
 

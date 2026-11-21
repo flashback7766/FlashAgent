@@ -25,13 +25,19 @@ class Event:
 
 
 class ServeClient:
-    def __init__(self, url: str, token: str):
+    def __init__(self, url: str, token: str, session: str = "main"):
         self.url = url.rstrip("/")
         self.token = token
+        # Which named brain of the serve this client talks to: "main" or a
+        # report's own session ("report-<id>") — isolated feeds and history.
+        self.session = session
         self.since = 0
 
     def _headers(self) -> dict[str, str]:
         return {"Authorization": f"Bearer {self.token}"} if self.token else {}
+
+    def _session(self) -> dict:
+        return {"session": self.session} if self.session and self.session != "main" else {}
 
     async def health(self, http: httpx.AsyncClient) -> bool:
         try:
@@ -43,7 +49,9 @@ class ServeClient:
             return False
 
     async def status(self, http: httpx.AsyncClient) -> dict:
-        r = await http.get(f"{self.url}/status", headers=self._headers())
+        r = await http.get(
+            f"{self.url}/status", headers=self._headers(), params=self._session()
+        )
         return r.json()
 
     async def start_turn(self, http: httpx.AsyncClient, text: str) -> str:
@@ -51,7 +59,9 @@ class ServeClient:
         runs is a steer by itself (serve flies it into the running answer).
         Returns "" on acceptance, the error text otherwise."""
         r = await http.post(
-            f"{self.url}/turn", headers=self._headers(), json={"text": text}
+            f"{self.url}/turn",
+            headers=self._headers(),
+            json={"text": text, **self._session()},
         )
         if r.status_code == 200:
             return ""
@@ -59,14 +69,20 @@ class ServeClient:
 
     async def approve(self, http: httpx.AsyncClient, allow: bool) -> None:
         await http.post(
-            f"{self.url}/approve", headers=self._headers(), json={"allow": allow}
+            f"{self.url}/approve",
+            headers=self._headers(),
+            json={"allow": allow, **self._session()},
         )
 
     async def cancel(self, http: httpx.AsyncClient) -> None:
-        await http.post(f"{self.url}/cancel", headers=self._headers())
+        await http.post(
+            f"{self.url}/cancel", headers=self._headers(), json=self._session()
+        )
 
     async def reset(self, http: httpx.AsyncClient) -> None:
-        await http.post(f"{self.url}/reset", headers=self._headers())
+        await http.post(
+            f"{self.url}/reset", headers=self._headers(), json=self._session()
+        )
 
     async def catch_up(self, http: httpx.AsyncClient) -> list[Event]:
         """The feed events accumulated before this process started. The
@@ -83,7 +99,7 @@ class ServeClient:
         r = await http.get(
             f"{self.url}/events",
             headers=self._headers(),
-            params={"since": self.since},
+            params={"since": self.since, **self._session()},
         )
         body = r.json()
         events = body.get("events", [])

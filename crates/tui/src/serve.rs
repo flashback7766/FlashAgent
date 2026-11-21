@@ -156,6 +156,83 @@ fn event_to_json(event: &flashagent_core::LoopEvent) -> serde_json::Value {
     }
 }
 
+/// What every session shares: the backend, the permission layer, the prompt.
+/// A session adds its own feed, history, approvals and cancellation on top.
+struct ServeBase {
+    source: Arc<crate::backend::BackendSource>,
+    source_dyn: Arc<dyn flashagent_core::LlmSource>,
+    perm: &'static flashagent_core::permissions::PermissionedTools,
+    config: flashagent_core::AppConfig,
+    model: String,
+    effort: String,
+    cwd_display: String,
+    system_prompt: String,
+    /// `(capacity, fixed, threshold_pct)` when the operator bounded the
+    /// window with `--compact-at`; `None` keeps every session uncompacted.
+    compactor: Option<(usize, usize, usize)>,
+}
+
+/// One named brain of the serve: `main`, `report-1234`, ... A room's busy
+/// hour cannot bleed into a /report discussion — the discussion runs in its
+/// own feed and history.
+struct Session {
+    session_id: String,
+    state: SharedState,
+    gate: Arc<ServeGate>,
+    app: Arc<Mutex<ServeApp>>,
+}
+
+impl Session {
+    fn new(base: &ServeBase, key: &str) -> Self {
+        let state: SharedState = Arc::new(Mutex::new(ServeState::default()));
+        let gate = Arc::new(ServeGate {
+            state: state.clone(),
+            responders: Mutex::new(Vec::new()),
+            counter: AtomicU64::new(0),
+            timeout: Duration::from_secs(300),
+        });
+        let session_id = format!("{key}-{}", crate::sessions::new_session_id());
+        let app = Arc::new(Mutex::new(ServeApp::new(
+            base,
+            state.clone(),
+            session_id.clone(),
+        )));
+        Self { session_id, state, gate, app }
+    }
+}
+
+/// The named session a request addresses: the `session` query parameter for
+/// GETs, the `session` body field for POSTs, `main` when nothing is named.
+fn session_key_of(query: &str, body: &serde_json::Value) -> String {
+    let candidates = [
+        query
+            .split('&')
+            .find_map(|p| p.strip_prefix("session="))
+            .map(str::to_string),
+        body.get("session")
+            .and_then(|s| s.as_str())
+            .map(str::to_string),
+    ];
+    for key in candidates.into_iter().flatten() {
+        if !key.trim().is_empty() {
+            return key;
+        }
+    }
+    "main".to_string()
+}
+
+/// Get-or-create the named session.
+fn session_for(
+    sessions: &Mutex<std::collections::HashMap<String, Arc<Session>>>,
+    base: &ServeBase,
+    key: &str,
+) -> Arc<Session> {
+    let mut map = sessions.lock().expect("serve sessions");
+    map.entry(key.to_string())
+        .or_insert_with(|| Arc::new(Session::new(base, key)))
+        .clone()
+}
+
 /// The headless session: history, tools and the loop, behind the HTTP API.
 struct ServeApp {
     state: SharedState,
@@ -176,6 +253,36 @@ struct ServeApp {
 }
 
 impl ServeApp {
+    /// One fresh brain for the named session: empty feed, empty history,
+    /// its own approvals and cancellation.
+    fn new(base: &ServeBase, state: SharedState, session_id: String) -> Self {
+        let compactor = base.compactor.map(|(capacity, fixed, threshold_pct)| {
+            Arc::new(crate::compact::TurnCompactor {
+                source: base.source_dyn.clone(),
+                archive: crate::sessions::session_path(&session_id),
+                capacity,
+                fixed,
+                threshold_pct,
+                report: Arc::new(Mutex::new(None)),
+                sink: None,
+                model: base.model.clone(),
+            })
+        });
+        Self {
+            state,
+            source: base.source.clone(),
+            perm: base.perm,
+            cancel: Arc::new(AtomicBool::new(false)),
+            session_id,
+            cwd_display: base.cwd_display.clone(),
+            config: base.config.clone(),
+            model: base.model.clone(),
+            effort: base.effort.clone(),
+            system_prompt: base.system_prompt.clone(),
+            compactor,
+        }
+    }
+
     fn start_turn(&mut self, text: &str) -> Result<(), String> {
         {
             let st = self.state.lock().expect("serve state");
@@ -453,13 +560,15 @@ fn turn_path(state: &SharedState, text: &str) -> TurnPath {
 }
 
 /// The whole API: small on purpose. The bot polls `/events`, starts turns,
-/// answers approvals, and that is all a Telegram client needs.
+/// answers approvals, and that is all a Telegram client needs. Every route
+/// addresses a session: the `session` query parameter or body field, `main`
+/// when unnamed — a /report discussion lives in its own session and a busy
+/// room cannot bleed into it.
 async fn handle(
     stream: &mut tokio::net::TcpStream,
     req: HttpRequest,
-    app: &Mutex<ServeApp>,
-    state: &SharedState,
-    gate: &Arc<ServeGate>,
+    sessions: &Mutex<std::collections::HashMap<String, Arc<Session>>>,
+    base: &ServeBase,
     token: &Option<String>,
 ) {
     // Every arm computes its answer while the guards are held, drops them, and
@@ -469,15 +578,20 @@ async fn handle(
         if !authorized(token, &req.headers) && req.path != "/health" {
             (401u16, serde_json::json!({"error": "unauthorized"}))
         } else {
+            let body_value = serde_json::from_slice::<serde_json::Value>(&req.body)
+                .ok()
+                .unwrap_or_default();
+            let key = session_key_of(&req.query, &body_value);
+            let session = session_for(sessions, base, &key);
             match (req.method.as_str(), req.path.as_str()) {
                 ("GET", "/health") => (
                     200u16,
                     serde_json::json!({"ok": true, "version": flashagent_svc::updater::current_version()}),
                 ),
                 ("GET", "/status") => {
-                    let (running, events_len, text_chars, turns_done, last_error, session, model) = {
-                        let st = state.lock().expect("serve state");
-                        let app = app.lock().expect("serve app");
+                    let (running, events_len, text_chars, turns_done, last_error, session_id, model) = {
+                        let st = session.state.lock().expect("serve state");
+                        let app = session.app.lock().expect("serve app");
                         (
                             st.running,
                             st.events.len(),
@@ -488,11 +602,14 @@ async fn handle(
                             app.model.clone(),
                         )
                     };
+                    let total = sessions.lock().expect("serve sessions").len();
                     (
                         200u16,
                         serde_json::json!({
                             "running": running,
-                            "session": session,
+                            "session": session_id,
+                            "key": key,
+                            "sessions": total,
                             "model": model,
                             "events": events_len,
                             "text_chars": text_chars,
@@ -503,7 +620,7 @@ async fn handle(
                 }
                 ("GET", "/events") => {
                     let since = since_of(&req.query);
-                    let st = state.lock().expect("serve state");
+                    let st = session.state.lock().expect("serve state");
                     (
                         200u16,
                         serde_json::json!({
@@ -516,10 +633,11 @@ async fn handle(
                     )
                 }
                 ("POST", "/turn") => {
-                    let text = serde_json::from_slice::<serde_json::Value>(&req.body)
-                        .ok()
-                        .and_then(|v| v.get("text").and_then(|t| t.as_str()).map(str::to_string));
-                    let text = text.unwrap_or_default();
+                    let text = body_value
+                        .get("text")
+                        .and_then(|t| t.as_str())
+                        .unwrap_or_default()
+                        .to_string();
                     if text.trim().is_empty() {
                         return respond(
                             stream,
@@ -528,7 +646,7 @@ async fn handle(
                         )
                         .await;
                     }
-                    match turn_path(state, &text) {
+                    match turn_path(&session.state, &text) {
                         TurnPath::Steered => {
                             (200u16, serde_json::json!({"ok": true, "steered": true}))
                         }
@@ -537,7 +655,7 @@ async fn handle(
                             serde_json::json!({"error": "a turn is already running"}),
                         ),
                         TurnPath::Start => {
-                            let mut app = app.lock().expect("serve app");
+                            let mut app = session.app.lock().expect("serve app");
                             match app.start_turn(&text) {
                                 Ok(()) => (200u16, serde_json::json!({"ok": true})),
                                 Err(why) => (409u16, serde_json::json!({"error": why})),
@@ -546,26 +664,26 @@ async fn handle(
                     }
                 }
                 ("POST", "/approve") => {
-                    let allow = serde_json::from_slice::<serde_json::Value>(&req.body)
-                        .ok()
-                        .and_then(|v| v.get("allow").and_then(|a| a.as_bool()))
+                    let allow = body_value
+                        .get("allow")
+                        .and_then(|a| a.as_bool())
                         .unwrap_or(false);
-                    (200u16, serde_json::json!({"answered": gate.answer(allow)}))
+                    (200u16, serde_json::json!({"answered": session.gate.answer(allow)}))
                 }
                 ("POST", "/cancel") => {
-                    let app = app.lock().expect("serve app");
+                    let app = session.app.lock().expect("serve app");
                     app.cancel.store(true, Ordering::Relaxed);
                     (200u16, serde_json::json!({"ok": true}))
                 }
                 ("POST", "/reset") => {
-                    let mut app = app.lock().expect("serve app");
+                    let mut app = session.app.lock().expect("serve app");
                     if app.reset() {
                         (200u16, serde_json::json!({"ok": true, "session": app.session_id}))
                     } else {
                         (409u16, serde_json::json!({"error": "a turn is running"}))
                     }
                 }
-                ("POST", "/steer") => steer_answer(state, &req.body),
+                ("POST", "/steer") => steer_answer(&session.state, &req.body),
                 _ => (404u16, serde_json::json!({"error": "no such route"})),
             }
         }
@@ -634,7 +752,6 @@ pub(crate) async fn run_serve(mut config: flashagent_core::AppConfig, opts: Serv
     let source = Arc::new(crate::backend::BackendSource(flashagent_llm::Client::new(endpoint.clone(), "")));
     source.0.set_max_retries(config.network_retries);
     source.0.set_session_id(crate::sessions::new_session_id());
-    let session_id = crate::sessions::new_session_id();
 
     // What the model can do decides the prompt's detail and the thinking
     // section. A server that does not answer in ten seconds runs without that
@@ -769,64 +886,55 @@ pub(crate) async fn run_serve(mut config: flashagent_core::AppConfig, opts: Serv
     trace("serve: prompt ready");
 
     // Mid-turn compaction for rooms with a bounded window: the TUI's
-    // TurnCompactor over the same session archive. Off unless the operator
+    // TurnCompactor over the session archive. Off unless the operator
     // asked for it with `--compact-at` — a serve the owner did not cap keeps
     // its whole history and never summarizes it behind his back.
     // `--compact-at` turns the trigger into an absolute token count; the
     // fixed estimate covers the system prompt (memory included), the schemas
     // ride within the room.
     let compactor = if capacity > 0 && config.auto_compact_context && opts.compact_at.is_some() {
-        let source_dyn: Arc<dyn flashagent_core::LlmSource> = source.clone();
         let fixed = flashagent_llm::count_tokens(&model, &system_prompt) + 4;
         let threshold_pct =
             threshold_pct_of(opts.compact_at, config.context_compact_threshold, capacity);
-        Some(Arc::new(crate::compact::TurnCompactor {
-            source: source_dyn,
-            archive: crate::sessions::session_path(&session_id),
-            capacity,
-            fixed,
-            threshold_pct,
-            report: Arc::new(Mutex::new(None)),
-            sink: None,
-            model: model.clone(),
-        }))
+        Some((capacity, fixed, threshold_pct))
     } else {
         None
     };
 
-    let mut app = ServeApp {
-        state: state.clone(),
-        source,
+    let source_dyn: Arc<dyn flashagent_core::LlmSource> = source.clone();
+    let base = ServeBase {
+        source: source.clone(),
+        source_dyn,
         perm,
-        cancel: Arc::new(AtomicBool::new(false)),
-        session_id,
-        cwd_display,
         config: config.clone(),
         model: model.clone(),
         effort,
+        cwd_display,
         system_prompt,
         compactor,
     };
-    let _ = &mut app;
+
+    // Sessions are created lazily: `main` exists from the start, every
+    // /report discussion spawns its own on the first turn addressed to it.
+    let sessions: Arc<Mutex<std::collections::HashMap<String, Arc<Session>>>> =
+        Arc::new(Mutex::new(std::collections::HashMap::new()));
+    let main = session_for(&sessions, &base, "main");
 
     let addr = format!("127.0.0.1:{}", opts.port);
     let listener = tokio::net::TcpListener::bind(&addr).await?;
     let token = std::env::var("FLASHAGENT_SERVE_TOKEN").ok().filter(|t| !t.trim().is_empty());
-    println!("FlashAgent serve on http://{addr} (session {})", app.session_id);
+    println!("FlashAgent serve on http://{addr} (session {})", main.session_id);
     trace("serve: listening");
-    let app = Arc::new(Mutex::new(app));
-    let server_app = app.clone();
-    let server_state = state.clone();
-    let server_gate = gate.clone();
+    let server_sessions = sessions.clone();
+    let server_base = Arc::new(base);
     loop {
         let (mut stream, _) = listener.accept().await?;
-        let app = server_app.clone();
-        let state = server_state.clone();
-        let gate = server_gate.clone();
+        let sessions = server_sessions.clone();
+        let base = server_base.clone();
         let token = token.clone();
         tokio::spawn(async move {
             match read_request(&mut stream).await {
-                Ok(req) => handle(&mut stream, req, &app, &state, &gate, &token).await,
+                Ok(req) => handle(&mut stream, req, &sessions, &base, &token).await,
                 Err(_) => respond(&mut stream, 400, &serde_json::json!({"error": "bad request"})).await,
             }
         });
@@ -968,6 +1076,92 @@ mod tests {
         assert_eq!(st.events[0]["type"], "reply");
         assert_eq!(st.events[0]["message_id"], 42);
         assert_eq!(st.events[0]["text"], "держи");
+    }
+
+    /// A minimal base for the session tests: real tools and permissions, no
+    /// network — a session never calls the server from these paths.
+    fn test_base() -> ServeBase {
+        let tools = Arc::new(flashagent_tools::BuiltinTools::new(Default::default()).unwrap());
+        let st: SharedState = Arc::new(Mutex::new(ServeState::default()));
+        let gate: Arc<ServeGate> = Arc::new(ServeGate {
+            state: st,
+            responders: Mutex::new(Vec::new()),
+            counter: AtomicU64::new(0),
+            timeout: Duration::from_secs(10),
+        });
+        let perm: &'static flashagent_core::permissions::PermissionedTools =
+            Box::leak(Box::new(flashagent_core::permissions::PermissionedTools::new(
+                tools.clone(),
+                Some(tools.clone()),
+                Arc::new(flashagent_core::permissions::PermissionState::new(
+                    flashagent_core::PermissionMode::Manual,
+                    gate,
+                )),
+            )));
+        ServeBase {
+            source: Arc::new(crate::backend::BackendSource(flashagent_llm::Client::new(
+                flashagent_core::AppConfig::default().endpoint(),
+                "",
+            ))),
+            source_dyn: {
+                let src: Arc<dyn flashagent_core::LlmSource> = Arc::new(
+                    crate::backend::BackendSource(flashagent_llm::Client::new(
+                        flashagent_core::AppConfig::default().endpoint(),
+                        "",
+                    )),
+                );
+                src
+            },
+            perm,
+            config: flashagent_core::AppConfig::default(),
+            model: "test-model".into(),
+            effort: "off".into(),
+            cwd_display: std::env::temp_dir().display().to_string(),
+            system_prompt: "test prompt".into(),
+            compactor: None,
+        }
+    }
+
+    #[test]
+    fn the_session_key_comes_from_query_or_body() {
+        assert_eq!(session_key_of("", &serde_json::json!({})), "main");
+        assert_eq!(
+            session_key_of("since=3&session=report-7", &serde_json::json!({})),
+            "report-7"
+        );
+        assert_eq!(
+            session_key_of("", &serde_json::json!({"session": "report-9"})),
+            "report-9"
+        );
+        assert_eq!(session_key_of("session=", &serde_json::json!({})), "main");
+    }
+
+    #[test]
+    fn sessions_are_reused_by_key_and_isolated_by_feed() {
+        let base = test_base();
+        let sessions: Mutex<std::collections::HashMap<String, Arc<Session>>> =
+            Mutex::new(std::collections::HashMap::new());
+        let main = session_for(&sessions, &base, "main");
+        let main_again = session_for(&sessions, &base, "main");
+        assert!(Arc::ptr_eq(&main, &main_again), "same key, same session");
+        let report = session_for(&sessions, &base, "report-42");
+        assert!(!Arc::ptr_eq(&main, &report), "a report is its own brain");
+        // A feed entry in one session never shows in the other.
+        report
+            .state
+            .lock()
+            .unwrap()
+            .events
+            .push(serde_json::json!({"type": "turn_started"}));
+        assert!(main.state.lock().unwrap().events.is_empty());
+        assert_eq!(report.state.lock().unwrap().events.len(), 1);
+        // Each session carries its own id, prefixed by its key.
+        assert!(report.session_id.starts_with("report-42-"));
+        assert_eq!(
+            sessions.lock().unwrap().len(),
+            2,
+            "main + one report: no hidden sessions"
+        );
     }
 
     #[test]
