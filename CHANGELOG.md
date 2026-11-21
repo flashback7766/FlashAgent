@@ -1,5 +1,43 @@
 # Changelog
 
+## b735 — A room of hundreds stays calm (tgbot phase 3)
+
+- **The bot has its own reflexes.** A brand name or an invite link in a
+  complaint is cut mechanically — deleted, and the author banned if they
+  are a newcomer or walked up the ladder if they are a veteran (F2/F3/F15) —
+  no model call, the dev room gets the alert. Known questions are answered
+  from `[faq]` without a turn (H12). `/issue` is stricter than talk
+  (3/hour), and the refusals now speak without emoji like the rest.
+- **The judge itself has a fuse (F24).** More than `protect_threshold`
+  mutes and bans in an hour and moderation drops to alerts only until a
+  human sends `/protect off`; the mechanical path and the bridge's own
+  guards both honour it.
+- **Members get profiles, not dossiers (J1/J8).** `data/users.json` keeps
+  the nick, first seen, message count, violations, a tech hint and their
+  issues — never a conversation. The tech level rides every turn's
+  `[TURN_CONTEXT]` so the depth adapts (I17/L6). `/my` lists a member's
+  own issues; `/features` is a button menu in the dev chat (pins,
+  reactions, /my) that gates the bridge actions (I19).
+- **A newcomer flood is a raid (E13):** many messages a minute from
+  newcomers switch the mechanical ad cutting on for `cool_minutes` of
+  quiet, with one dev alert.
+- **The bot survives its brain.** Three failed turns in a row pause the
+  brain for five minutes — the honest line goes out and the question
+  stays in the pending queue for the recovery drain (G5). A watchdog
+  checks every brain each minute; two minutes of silence is a dev alert
+  and one honest line to the room, recovery is reported too (G4/G12).
+- **Everything is paced and bounded (E17/G19):** sends leave at ~25 a
+  second with 429 honoured in place; in-memory answer sets, raid windows
+  and fuse hit lists are trimmed on use. The digest now reads the journal
+  through the junk filter and thread marks, so it pays for words, not
+  flood letters (B14), in a phone-readable format (I9).
+- **State is archived daily (G21):** one `data/snapshots/data-YYYYMMDD.tgz`
+  at 04:00, fourteen kept, the folder 0700. The version handshake (G15):
+  a serve that never heard of profiles is named at startup. The repo now
+  carries the production units and a one-command deploy with staged
+  import-check, staging pytest, ordered restarts and a smoke gate
+  (G11/K9/G22/G23/G17).
+
 ## b735 — The bot speaks through tools (tgbot phase 2)
 
 - **Every verdict marker is dead.** `ISSUE:`/`NO_ISSUE`/`MUTE:`/`BAN:`/
