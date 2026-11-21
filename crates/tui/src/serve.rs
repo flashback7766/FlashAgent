@@ -178,6 +178,102 @@ impl flashagent_core::permissions::ApprovalGate for ServeGate {
     }
 }
 
+/// A question waiting for the chat (`user_interaction` mode ask). The tool
+/// blocks, the client answers through `POST /answer`, and the answer is the
+/// client's formatted vote result — the model reads the tally, not a lone
+/// option, when several people voted.
+struct PendingQuestion {
+    id: u64,
+    session: usize,
+    respond: tokio::sync::oneshot::Sender<String>,
+}
+
+#[derive(Default)]
+struct ServeQuestions {
+    pending: Mutex<Vec<PendingQuestion>>,
+    counter: AtomicU64,
+    /// The hard backstop: the bot's own card policy closes earlier; this only
+    /// keeps a forgetful or restarted client from hanging the turn forever.
+    timeout: std::sync::OnceLock<Duration>,
+}
+
+impl ServeQuestions {
+    fn with_timeout(timeout: Duration) -> Self {
+        let q = Self::default();
+        let _ = q.timeout.set(timeout);
+        q
+    }
+
+    fn answer_for(&self, state: &SharedState, id: u64, answer: String) -> bool {
+        let key = session_key(state);
+        let pending = {
+            let mut pending = self.pending.lock().expect("questions");
+            // An ask whose tool already timed out is dead: drop it.
+            pending.retain(|p| !p.respond.is_closed());
+            match pending.iter().position(|p| p.id == id && p.session == key) {
+                Some(pos) => pending.remove(pos),
+                None => return false,
+            }
+        };
+        let _ = pending.respond.send(answer);
+        true
+    }
+}
+
+#[async_trait::async_trait]
+impl flashagent_tools::ask_user::QuestionGate for ServeQuestions {
+    async fn ask(
+        &self,
+        question: &str,
+        options: Option<&[String]>,
+        multi_select: bool,
+        _deadline: Option<std::time::Instant>,
+    ) -> Result<(String, bool), String> {
+        let state = current_session()
+            .ok_or_else(|| "no session is running this question".to_string())?;
+        let id = self.counter.fetch_add(1, Ordering::Relaxed) + 1;
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        {
+            let mut st = state.lock().expect("serve state");
+            st.push_event(serde_json::json!({
+                "type": "ask",
+                "id": id,
+                "question": question,
+                "options": options,
+                "multi_select": multi_select,
+            }));
+        }
+        self.pending.lock().expect("questions").push(PendingQuestion {
+            id,
+            session: session_key(&state),
+            respond: tx,
+        });
+        let wait = self
+            .timeout
+            .get()
+            .copied()
+            .unwrap_or(Duration::from_secs(360));
+        match tokio::time::timeout(wait, rx).await {
+            Ok(Ok(answer)) => Ok((answer, false)),
+            _ => {
+                self.pending.lock().expect("questions").retain(|p| p.id != id);
+                Err("nobody answered in the chat before the deadline".into())
+            }
+        }
+    }
+
+    async fn notify(&self, level: &str, text: &str) -> Result<(), String> {
+        let state = current_session()
+            .ok_or_else(|| "no session is running this notice".to_string())?;
+        state.lock().expect("serve state").push_event(serde_json::json!({
+            "type": "notice",
+            "level": level,
+            "text": text,
+        }));
+        Ok(())
+    }
+}
+
 /// The map from a loop event to what the client polls.
 fn event_to_json(event: &flashagent_core::LoopEvent) -> serde_json::Value {
     use flashagent_core::LoopEvent;
@@ -233,6 +329,8 @@ struct ServeBase {
     /// One gate for the whole serve: it routes each approval to the session
     /// whose turn called the tool, through the task-local.
     gate: Arc<ServeGate>,
+    /// The inline question card, routed the same way.
+    questions: Arc<ServeQuestions>,
     config: flashagent_core::AppConfig,
     model: String,
     effort: String,
@@ -776,6 +874,24 @@ async fn handle(
                         serde_json::json!({"answered": session.gate.answer_for(&session.state, allow)}),
                     )
                 }
+                ("POST", "/answer") => {
+                    // The card in the chat is resolved: hand the formatted
+                    // vote result (or the chosen option) to the waiting
+                    // user_interaction call of this session.
+                    let id = body_value
+                        .get("id")
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(0);
+                    let answer = body_value
+                        .get("answer")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or_default()
+                        .to_string();
+                    let answered = id > 0
+                        && !answer.trim().is_empty()
+                        && base.questions.answer_for(&session.state, id, answer);
+                    (200u16, serde_json::json!({"answered": answered}))
+                }
                 ("POST", "/cancel") => {
                     let app = session.app.lock().expect("serve app");
                     app.cancel.store(true, Ordering::Relaxed);
@@ -910,10 +1026,15 @@ pub(crate) async fn run_serve(mut config: flashagent_core::AppConfig, opts: Serv
                 .map(str::to_string),
         );
     }
+    // The bot closes its card by itself; this timeout is only the backstop
+    // that keeps a restarted or silent client from hanging the turn forever.
+    let questions = Arc::new(ServeQuestions::with_timeout(Duration::from_secs(360)));
     let tools = Arc::new(flashagent_tools::BuiltinTools::new(flashagent_tools::BuiltinToolsConfig {
         cwd: cwd.clone(),
         brave_api_key: std::env::var("BRAVE_API_KEY").ok().filter(|k| !k.trim().is_empty()),
-        question_gate: None,
+        // `user_interaction` reaches the chat card: the model asks the room
+        // and gets the vote result back in the same turn.
+        question_gate: Some(questions.clone() as Arc<dyn flashagent_tools::QuestionGate>),
         is_goal_mode: None,
         web_enabled: Some(config.web_tools),
         context_window: Some(capacity),
@@ -1002,7 +1123,7 @@ pub(crate) async fn run_serve(mut config: flashagent_core::AppConfig, opts: Serv
             plan: Some(outline),
             uses_emoji: false,
             subagents_available: false,
-            ask_user_available: false,
+            ask_user_available: true,
             goal_mode: false,
             detail,
             reasoning_supported,
@@ -1034,6 +1155,7 @@ pub(crate) async fn run_serve(mut config: flashagent_core::AppConfig, opts: Serv
         source_dyn,
         perm,
         gate,
+        questions,
         config: config.clone(),
         model: model.clone(),
         effort,
@@ -1139,6 +1261,50 @@ mod tests {
         assert!(matches!(waiter.await.unwrap(), flashagent_core::permissions::Decision::Allow));
     }
 
+    #[tokio::test]
+    async fn a_question_reaches_the_feed_and_the_answer_resolves_it() {
+        use flashagent_tools::ask_user::QuestionGate as _;
+
+        let state: SharedState = Arc::new(Mutex::new(ServeState::default()));
+        let questions = Arc::new(ServeQuestions::with_timeout(Duration::from_secs(5)));
+        let gate = questions.clone();
+        let waiter = {
+            let state = state.clone();
+            tokio::spawn(async move {
+                CURRENT_SESSION
+                    .scope(state, async {
+                        let options = vec!["Плеер".to_string(), "Очередь".to_string()];
+                        gate.ask("Что чинить?", Some(&options), false, None).await
+                    })
+                    .await
+            })
+        };
+        let mut ask = None;
+        for _ in 0..50 {
+            if let Some(found) = state
+                .lock()
+                .unwrap()
+                .events
+                .iter()
+                .find(|e| e.get("type") == Some(&serde_json::json!("ask")))
+                .cloned()
+            {
+                ask = Some(found);
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        let ask = ask.expect("the ask event is in the session feed");
+        assert_eq!(ask["question"], "Что чинить?");
+        assert_eq!(ask["options"][0], "Плеер");
+        assert_eq!(ask["multi_select"], false);
+        let id = ask["id"].as_u64().expect("an ask id");
+        assert!(questions.answer_for(&state, id, "Плеер=2, Очередь=1".into()));
+        let (answer, write_in) = waiter.await.unwrap().unwrap();
+        assert_eq!(answer, "Плеер=2, Очередь=1");
+        assert!(!write_in);
+    }
+
     #[test]
     fn the_token_is_checked_on_every_route_but_health() {
         let token = Some("secret".to_string());
@@ -1216,6 +1382,7 @@ mod tests {
             counter: AtomicU64::new(0),
             timeout: Duration::from_secs(10),
         });
+        let questions = Arc::new(ServeQuestions::with_timeout(Duration::from_secs(10)));
         let perm: &'static flashagent_core::permissions::PermissionedTools =
             Box::leak(Box::new(flashagent_core::permissions::PermissionedTools::new(
                 tools.clone(),
@@ -1241,6 +1408,7 @@ mod tests {
             },
             perm,
             gate,
+            questions,
             config: flashagent_core::AppConfig::default(),
             model: "test-model".into(),
             effort: "off".into(),
