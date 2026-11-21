@@ -450,7 +450,7 @@ pub static TOOLS: &[ToolDef] = &[
     },
     ToolDef {
         name: "user_interaction",
-        description: "Reach the person at the keyboard. mode ask asks 1-10 questions with 2-6 concrete options each, and the user may type their own; attach asks for files and returns their paths; handoff opens one text file for the user to edit and returns the diff; open shows a URL or a file in its default application; form collects several fields in one call; steps walks the user through a short list with Next/Back/Stop; notify posts a one-way notice. Ask just before you need the answer, never for your own progress.",
+        description: "Reach the person at the keyboard. mode ask asks 1-10 questions with 2-6 concrete options each, and the user may type their own; options in one question are mutually exclusive and at one level — no nested or overlapping choices, and a multi-select question lists independent items, one per option. attach asks for files and returns their paths; handoff opens one text file for the user to edit and returns the diff; open shows a URL or a file in its default application; form collects several fields in one call; steps walks the user through a short list with Next/Back/Stop; notify posts a one-way notice. Ask just before you need the answer, never for your own progress.",
         params: &[
             INTERACTION_MODE,
             INTERACTION_WHY,

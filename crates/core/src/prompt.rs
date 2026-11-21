@@ -289,7 +289,7 @@ const COMPACT_MEMORY: &str = "MEMORY:\n\
      - Save a durable user preference, project decision or external pointer with the memory tool when it appears. Correct an existing memory instead of duplicating it. Never save a secret. The index is already in your context.";
 
 const COMPACT_ASK: &str = "ASKING:\n\
-     - When a real decision belongs to the user, use user_interaction mode ask with 2-6 concrete options and a one-line why. Do not ask for secrets.";
+     - When a real decision belongs to the user, use user_interaction mode ask with 2-6 concrete options and a one-line why. Options must be mutually exclusive and at one level: a multi-select question lists independent items, one per option — no nested sets and no 'all of the above'. Do not ask for secrets.";
 
 const COMPACT_AGENTS: &str = "AGENTS:\n\
      - Use agent spawn only for wide, separable work. Give it the whole task. A report is a claim: check it before you act on it.";
@@ -486,6 +486,7 @@ pub fn build_system_prompt(config: &SystemPromptConfig) -> String {
         sections.push(
             "ASKING THE USER (MANDATORY user_interaction):\n\
              - Every question to the user goes through user_interaction with mode ask, with 2-6 concrete options for each question. Several questions go in one call's questions array.\n\
+             - Options in a question are mutually exclusive and at one level: no option may contain another, no \"all of the above\" beside a subset. A multi-select question lists independent items (one gesture, one screen, one file per option), not bundles. Ask one thing per question.\n\
              - Never write a question or a list of questions to the user as plain text.\n\
              - Why the user is asked goes in why, in one line.\n\
              - mode attach asks for screenshots, logs or files when you need to see what you cannot read. It returns paths; read one before acting.\n\

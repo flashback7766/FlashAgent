@@ -6,7 +6,9 @@
   now one editable message with option buttons and a live tally. In a
   /report only the author's answer counts and a single click closes the
   card at once; in the dev room everyone votes and Готово closes the
-  round. The model gets the tally and the majority, not a lone option.
+  round. The model gets the tally and the majority, not a lone option;
+  the options must be mutually exclusive and at one level (a multi-select
+  question lists atomic items, not nested sets).
   A short, small GIF or video sticker becomes a 3 fps contact sheet, so
   the brain sees the motion instead of one frame.
 - **A restarted bot never replays an old answer.** Each room's `main` turn
