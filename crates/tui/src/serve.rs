@@ -867,6 +867,12 @@ pub(crate) async fn run_serve(mut config: flashagent_core::AppConfig, opts: Serv
         // `reply` events — the outbox is the feed itself, per session.
         chat_enabled: true,
     })?);
+    // The same rule the TUI applies: a model the server reports as seeing
+    // images gets `read mode=image`; a model it never mentioned is assumed to
+    // see, and the server's own error is better than a wrong refusal. Serve
+    // forgot this, so every screenshot came back as "the current model
+    // cannot see images" — even on a vision model.
+    tools.set_vision_supported(crate::attachments::sees_images(discovery.as_ref(), &model));
     trace("serve: tools ready");
 
     let gate = Arc::new(ServeGate {
