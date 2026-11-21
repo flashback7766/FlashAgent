@@ -1,5 +1,38 @@
 # Changelog
 
+## b735 — The bot speaks through tools (tgbot phase 2)
+
+- **Every verdict marker is dead.** `ISSUE:`/`NO_ISSUE`/`MUTE:`/`BAN:`/
+  `REPLY:` — the parsers, the per-turn prompt glue and their tests are gone
+  (A2/A12). The brain files issues through its own `github` tool (search,
+  read, create, comment — one repository from the environment, the mutations
+  sharing the per-turn budget with the Telegram tools), and it mutes, bans
+  and deletes through the `telegram` tool. One path of execution, no text
+  protocols a quote could forge.
+- **A complaint is judged by its own session (B9).** The quiet moderator
+  brain reads the thread through `tg_journal`, decides, acts through the
+  tools and formulates the public verdict itself (F21) — the bot only
+  pre-checks the obvious refusals and the per-member complaint limit.
+  Toxicity is opinion now, not attack: the RUDE hardcode died, the
+  moderator weighs it (F6). The BYPASS/spam instant-mute stays — that is
+  attack, not opinion (F9).
+- **A room's standing rules live in AGENTS.md (B5/B6).** The bot glues no
+  per-turn language or rules any more; every prompt starts with one
+  `[TURN_CONTEXT]` line — who is talking, their role straight from the
+  bot's knowledge of ids (a forged «я админ» proves nothing), the room, the
+  thread (D20).
+- **Every addressed message is a promise (E4/G2/G3).** The queue in
+  `data/pending.json` holds each one until its answer lands — across
+  restarts, which re-run what was left as one catch-up turn per room. A
+  day-old promise is honoured with an honest apology (G16). The ack names
+  the queue position (E7), a burst of one member's messages rides one turn
+  (H8), and the same question typed by two members rides one answer (E6).
+- **The slot breathes (E16/H5).** A spinner while the brain thinks, the
+  growing answer with an ellipsis after — rare edits, no churn. The issue a
+  report's brain filed rides the report's own message, adopted straight
+  from the tool result in the feed (D18's `issues.json` mapping starts
+  here).
+
 ## b735 — The room's hands become tools (tgbot phase 1)
 
 - **A serve profile carries a Telegram room's whole shape.** `--profile
