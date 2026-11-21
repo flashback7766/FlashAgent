@@ -14,6 +14,7 @@ pub mod plan_tool;
 pub mod shell;
 pub mod skill_tools;
 pub mod subagents;
+pub mod telegram;
 pub mod web;
 
 use std::path::PathBuf;
@@ -30,6 +31,7 @@ pub use shell::{ShellRegistry, TaskInfo, TaskNotice, TaskState};
 
 pub use ask_user::{QuestionGate, GOAL_QUESTION_TIMEOUT};
 pub use subagents::{agent_tools, BuiltinSubagentFactory, CompositeTools, ToolSubset};
+pub use telegram::{scope_turn, TgBridge, TgBridgeConfig};
 
 /// Hard cap on a tool result fed back to the model.
 const MAX_OUTPUT_CHARS: usize = 32_000;
@@ -103,6 +105,9 @@ pub struct BuiltinToolsConfig {
     /// `chat_reply` call as a `reply` entry. Off in the terminal — a TUI
     /// session has no chat to talk to, so the tool is not even offered.
     pub chat_enabled: bool,
+    /// The bridge to the bot for the `telegram`/`tg_journal` tools: a tgbot
+    /// serve builds it from the environment, nothing else does.
+    pub tg_bridge: Option<telegram::TgBridgeConfig>,
 }
 
 /// What a tool answered: text for the model, or a picture.
@@ -202,6 +207,9 @@ pub struct BuiltinTools {
     disabled: Arc<std::sync::RwLock<Vec<String>>>,
     /// Whether `chat_reply` is on: set from `BuiltinToolsConfig`.
     chat_enabled: bool,
+    /// The bridge for `telegram`/`tg_journal`; absent everywhere but a tgbot
+    /// serve, where those tools are the room's hands.
+    tg: Option<telegram::TgBridge>,
     /// The measured tool list. Measuring it means tokenizing every schema,
     /// and the list is asked for on every tool call.
     specs_cache: parking_lot::Mutex<Option<SpecsCache>>,
@@ -236,6 +244,10 @@ impl BuiltinTools {
             mcp_manager,
             disabled: Arc::new(std::sync::RwLock::new(config.disabled_tools.unwrap_or_default())),
             chat_enabled: config.chat_enabled,
+            tg: config
+                .tg_bridge
+                .map(|cfg| telegram::TgBridge::new(cfg))
+                .transpose()?,
             specs_cache: parking_lot::Mutex::new(None),
             #[cfg(test)]
             specs_measured: std::sync::atomic::AtomicUsize::new(0),
@@ -355,6 +367,9 @@ impl BuiltinTools {
             // tools are not offered from here. The chat outbox makes
             // `chat_reply` real; without it the tool is not on the table.
             .filter(|def| registry::offered(def, core, vision, web, false, self.chat_enabled))
+            // The Telegram tools are offered only when a bridge is wired:
+            // a schema the model cannot use is a promise the call breaks.
+            .filter(|def| self.tg.is_some() || !matches!(def.handler, registry::Handler::Telegram | registry::Handler::TgJournal))
             // A tool the owner has switched off is not on the table at all.
             .filter(|def| !self.tool_disabled(def.name))
             .map(|def| ToolSpec {
@@ -582,6 +597,22 @@ impl BuiltinTools {
                 // validates the call and confirms.
                 let a: ChatReplyArgs = parse_args(&call.args_json, &call.name)?;
                 Ok(Answer::Text(format!("Reply sent to msg:{}.", a.message_id)))
+            }
+            Handler::Telegram => {
+                let Some(bridge) = self.tg.as_ref() else {
+                    return Err(ToolError::Other(
+                        "telegram is not available here: no bridge to the bot".into(),
+                    ));
+                };
+                bridge.telegram(&call.args_json).await.map(Answer::Text)
+            }
+            Handler::TgJournal => {
+                let Some(bridge) = self.tg.as_ref() else {
+                    return Err(ToolError::Other(
+                        "tg_journal is not available here: no bridge to the bot".into(),
+                    ));
+                };
+                bridge.journal(&call.args_json).await.map(Answer::Text)
             }
             Handler::Memory => {
                 let a: memory_tools::MemoryArgs = parse_args(&call.args_json, &call.name)?;

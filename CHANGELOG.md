@@ -1,5 +1,37 @@
 # Changelog
 
+## b735 — The room's hands become tools (tgbot phase 1)
+
+- **A serve profile carries a Telegram room's whole shape.** `--profile
+  tgbot-dev` / `--profile tgbot-users` sets the prompt tier, the permission
+  mode, the thinking effort, the toolset, the window caps, the vision flag
+  and one language directive in the system prompt — one flag in the unit
+  instead of a flag scatter, with the constants as code in `serve.rs` (B4,
+  B7). The operator's explicit flags still win over the profile's defaults
+  (B3). The dev room keeps its bypass — its shell stays whole, the owner's
+  call; the users' room runs planning behind an allowlist gate (B1): its own
+  tools pass silently, everything else is refused outright, with no card in
+  the chat, because no card can ever be pressed. `/status` names the
+  profile.
+- **The brain acts in Telegram through native tools.** `telegram {action}`
+  — reply, delete, ban/unban, mute/unmute, pin/unpin, react, room_info,
+  resolve, publish — and `tg_journal` (window, author, substring, threads)
+  ride a localhost bridge to the bot behind a bearer secret. The Rust tool
+  guards first (argument shape, cross-room power, a mute capped at thirty
+  days), charges a per-turn budget — 8 mutating calls, at least 2 seconds
+  apart, task-local so parallel report threads never share their counters —
+  and answers with the bot's verdict line. A bridge that is down is said
+  aloud, not queued. The bot re-checks what only it can see: protected
+  targets (owner, admins, chat admins, itself, the rooms), room existence,
+  message ids it actually saw in its journal. Every moderation call is
+  logged and alerted to the dev room. The tools are offered only when a
+  bridge is wired — a schema the model cannot use is a promise the call
+  breaks.
+- **The journal remembers threads.** Every reply carries `reply_to` into
+  the record; the `tg_journal` `threads` filter marks `↩ msg:N`, and the
+  junk filter (flood letters, hammered words) separates noise on the way
+  out without ever rewriting the file.
+
 ## b734 — The feed has one truth
 
 - **A restart resumes the conversation, and a stop finishes the turn.** Each

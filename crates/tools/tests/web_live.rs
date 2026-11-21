@@ -25,6 +25,7 @@ async fn call(name: &str, args: serde_json::Value) -> ToolOutput {
         disabled_tools: None,
         home: None,
         chat_enabled: false,
+        tg_bridge: None,
     })
     .unwrap();
     tools

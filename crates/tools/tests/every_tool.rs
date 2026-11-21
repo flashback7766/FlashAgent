@@ -22,6 +22,23 @@ struct Project {
 
 impl Project {
     fn new() -> Self {
+        // The default room carries a dead bridge: the telegram tools must be
+        // OFFERED here so the sync guards below see the full set the model
+        // is offered in a tgbot serve. Tests that really call them wire a
+        // mock through `with_bridge`.
+        Self::build(Some(flashagent_tools::TgBridgeConfig {
+            base_url: "http://127.0.0.1:1".into(),
+            token: "test".into(),
+            cross_room: true,
+        }))
+    }
+
+    /// The same room with a working mock bridge: what a tgbot serve builds.
+    fn with_bridge(cfg: flashagent_tools::TgBridgeConfig) -> Self {
+        Self::build(Some(cfg))
+    }
+
+    fn build(tg: Option<flashagent_tools::TgBridgeConfig>) -> Self {
         // A counter, not the clock: on Windows two tests could read the same time
         // and share a folder.
         static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
@@ -47,6 +64,7 @@ impl Project {
                 context_window: Some(200_000),
                 home: Some(home),
                 chat_enabled: true,
+                tg_bridge: tg,
                 ..Default::default()
             })
             .unwrap(),
@@ -135,6 +153,8 @@ fn really_invoked() -> BTreeSet<String> {
         "user_interaction",
         "plan",
         "chat_reply",
+        "telegram",
+        "tg_journal",
         "agent",
     ]
     .iter()
@@ -255,6 +275,134 @@ async fn a_chat_reply_confirms_the_call() {
         )
         .await;
     assert!(out.contains("msg:42"), "{out}");
+}
+
+/// A bridge that answers ok to everything: enough HTTP/1.1 for the tool's
+/// reqwest client, one request per connection.
+async fn mock_bridge(result: &'static str) -> String {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        loop {
+            let Ok((mut sock, _)) = listener.accept().await else { break };
+            // Read until the headers end, then until the body is complete.
+            let mut buf = Vec::new();
+            loop {
+                let head_end = buf.windows(4).position(|w| w == b"\r\n\r\n");
+                let complete = match head_end {
+                    Some(pos) => {
+                        let cl = buf
+                            .split(|b| *b == b'\n')
+                            .find_map(|line| {
+                                let line = line.trim_ascii();
+                                line.to_ascii_lowercase()
+                                    .strip_prefix(b"content-length:")
+                                    .map(|rest| {
+                                        std::str::from_utf8(rest)
+                                            .unwrap_or("0")
+                                            .trim()
+                                            .parse::<usize>()
+                                            .unwrap_or(0)
+                                    })
+                            })
+                            .unwrap_or(0);
+                        buf.len() >= pos + 4 + cl
+                    }
+                    None => false,
+                };
+                if complete { break; }
+                let mut chunk = [0u8; 4096];
+                let n = sock.read(&mut chunk).await.unwrap_or(0);
+                if n == 0 { break; }
+                buf.extend_from_slice(&chunk[..n]);
+            }
+            let body = format!("{{\"ok\":true,\"result\":\"{result}\"}}");
+            let resp = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            let _ = sock.write_all(resp.as_bytes()).await;
+            let _ = sock.shutdown().await;
+        }
+    });
+    format!("http://{addr}")
+}
+
+#[tokio::test]
+async fn a_telegram_reply_travels_the_bridge() {
+    // The tool guards, then posts; the bot's verdict line is the answer.
+    let url = mock_bridge("ok: msg_id=77").await;
+    let project = Project::with_bridge(flashagent_tools::TgBridgeConfig {
+        base_url: url,
+        token: "test-token".into(),
+        cross_room: true,
+    });
+    let out = project
+        .call(
+            "telegram",
+            serde_json::json!({"action": "reply", "msg_id": 77, "text": "держи"}),
+        )
+        .await;
+    assert!(out.contains("ok: msg_id=77"), "{out}");
+}
+
+#[tokio::test]
+async fn a_pin_outside_a_turn_scope_is_refused() {
+    // Mutating actions are charged to the turn's budget; no scope, no call.
+    let url = mock_bridge("ok").await;
+    let project = Project::with_bridge(flashagent_tools::TgBridgeConfig {
+        base_url: url,
+        token: "t".into(),
+        cross_room: false,
+    });
+    let out = project
+        .raw("telegram", serde_json::json!({"action": "pin", "msg_id": 5}))
+        .await;
+    assert!(out.is_error, "{}", out.content);
+    assert!(out.content.contains("ход не размечен"), "{}", out.content);
+}
+
+#[tokio::test]
+async fn mutations_in_one_turn_are_charged_and_throttled() {
+    // Реальный путь: пин проходит, второй пин застревает на троттлинге,
+    // реплай (не мутация) идёт сразу. Сам потолок 8/ход — юнит-тестом в
+    // telegram.rs, где счётчик можно прогреть без ожидания.
+    let url = mock_bridge("ok").await;
+    let project = Project::with_bridge(flashagent_tools::TgBridgeConfig {
+        base_url: url,
+        token: "t".into(),
+        cross_room: false,
+    });
+    let outs = flashagent_tools::scope_turn(async move {
+        let mut outs = Vec::new();
+        outs.push(project.raw("telegram", serde_json::json!({"action": "pin", "msg_id": 1})).await);
+        outs.push(project.raw("telegram", serde_json::json!({"action": "pin", "msg_id": 2})).await);
+        outs.push(project.raw("telegram", serde_json::json!({"action": "reply", "msg_id": 3, "text": "держи"})).await);
+        outs
+    })
+    .await;
+    assert!(!outs[0].is_error, "the first pin goes through: {}", outs[0].content);
+    assert!(outs[1].is_error, "{}", outs[1].content);
+    assert!(outs[1].content.contains("подожди"), "{}", outs[1].content);
+    assert!(!outs[2].is_error, "a reply is speech, not charged: {}", outs[2].content);
+}
+
+#[tokio::test]
+async fn tg_journal_reads_through_the_bridge() {
+    let url = mock_bridge("id:5 @bublik Бублик: очередь не чистится").await;
+    let project = Project::with_bridge(flashagent_tools::TgBridgeConfig {
+        base_url: url,
+        token: "t".into(),
+        cross_room: false,
+    });
+    let out = project
+        .call(
+            "tg_journal",
+            serde_json::json!({"last": 40, "user": "@bublik", "query": "очередь"}),
+        )
+        .await;
+    assert!(out.contains("id:5 @bublik"), "{out}");
 }
 
 #[tokio::test]

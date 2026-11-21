@@ -603,6 +603,7 @@ async fn main() -> Result<()> {
         let mut disable = None;
         let mut no_ask = false;
         let mut vision = false;
+        let mut profile = None;
         let mut args = std::env::args().skip(1).peekable();
         while let Some(a) = args.next() {
             match a.as_str() {
@@ -628,6 +629,10 @@ async fn main() -> Result<()> {
                 // The gateway's model list can be stale about images; the
                 // room still needs its stickers and GIFs seen.
                 "--vision" => vision = true,
+                // One flag for a Telegram room: tier, gate, toolset, caps and
+                // language come from the profile's constants, the scattered
+                // flags stay for overrides.
+                "--profile" => profile = args.next(),
                 _ => {}
             }
         }
@@ -644,6 +649,7 @@ async fn main() -> Result<()> {
                 disable,
                 no_ask,
                 vision,
+                profile,
             },
         )
         .await
@@ -737,6 +743,8 @@ async fn main() -> Result<()> {
         home: None,
         // The terminal has no chat to reply into; only `--serve` enables it.
         chat_enabled: false,
+        // The terminal talks to nobody's bot: the bridge is a serve-profile thing.
+        tg_bridge: None,
     })?);
     trace("main: tools built");
     // A closed terminal window (SIGHUP) or a kill (SIGTERM) skips the normal

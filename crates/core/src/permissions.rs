@@ -179,6 +179,34 @@ impl ApprovalGate for DenyAllGate {
     }
 }
 
+/// The room's own tools pass, everything else is refused outright.
+///
+/// An unattended room with strangers in it can never show a card: what the
+/// permission mode would ask about is either a tool the room lives by
+/// (`telegram`, `github`, `tg_journal`, `memory`...) and passes silently, or
+/// it is not, and the call dies before anything moves. No third state — the
+/// third state is a five-minute wait for a button nobody will press.
+pub struct AllowlistGate {
+    allowed: std::collections::HashSet<&'static str>,
+}
+
+impl AllowlistGate {
+    pub fn new(allowed: &'static [&'static str]) -> Self {
+        Self { allowed: allowed.iter().copied().collect() }
+    }
+}
+
+#[async_trait]
+impl ApprovalGate for AllowlistGate {
+    async fn approve(&self, req: &ApprovalRequest) -> Decision {
+        if self.allowed.contains(req.tool.as_str()) {
+            Decision::Allow
+        } else {
+            Decision::Deny
+        }
+    }
+}
+
 #[cfg(test)]
 struct AllowAllGate;
 
@@ -1267,10 +1295,12 @@ impl PermissionState {
             Category::Read | Category::Net => Verdict::Allow,
             Category::Write => match mode {
                 PermissionMode::Yolo | PermissionMode::Bypass | PermissionMode::AcceptEdits => Verdict::Allow,
-                // A standing allow is the operator's decision, not a question
-                // for the person: in a serve the memory vault stays writable
-                // even in read-only planning, without a card.
-                PermissionMode::Planning if always => Verdict::Allow,
+                // The one standing allow that may cross planning: the memory
+                // vault is the brain's own store, and the unattended rooms
+                // (planning by policy) keep it writable without a card. Any
+                // other tool's standing rule skips the card in Manual — never
+                // the read-only rail of planning.
+                PermissionMode::Planning if always && call.name == "memory" => Verdict::Allow,
                 PermissionMode::Planning => Verdict::Deny("planning mode is read-only".into()),
                 PermissionMode::Manual if always => Verdict::Allow,
                 PermissionMode::Manual => Verdict::NeedApproval { diff: diff() },
@@ -1963,8 +1993,29 @@ mod tests {
         }
     }
 
+    /// The room's gate: its own tools pass silently, the rest is refused.
+    /// There is no third state — that state is a card nobody will press.
+    #[test]
+    fn the_allowlist_gate_passes_the_rooms_own_tools_only() {
+        let gate = AllowlistGate::new(&["telegram", "tg_journal", "github", "memory"]);
+        let allowed = |tool: &str| {
+            futures::executor::block_on(gate.approve(&ApprovalRequest {
+                tool: tool.into(),
+                args_json: "{}".into(),
+                category: Category::Write,
+                diff: None,
+            }))
+        };
+        assert_eq!(allowed("telegram"), Decision::Allow);
+        assert_eq!(allowed("memory"), Decision::Allow);
+        assert_eq!(allowed("run_shell"), Decision::Deny);
+        assert_eq!(allowed("edit"), Decision::Deny);
+        assert_eq!(allowed("mcp__srv__tool"), Decision::Deny);
+    }
+
     /// A standing "Always" skips the card, never a rail: planning stays
-    /// read-only and the blacklist still asks.
+    /// read-only (memory is the one deliberate hole — the vault) and the
+    /// blacklist still asks.
     #[test]
     fn a_standing_always_rule_does_not_unlock_planning_or_the_blacklist() {
         let planning = PermissionState::new(PermissionMode::Planning, Arc::new(DenyAllGate));
@@ -1977,6 +2028,13 @@ mod tests {
         assert!(
             matches!(planning.decide(&call("mcp__srv__tool", "{}"), || None), Verdict::Deny(_)),
             "a standing rule let an external tool run in planning"
+        );
+
+        let vault = PermissionState::new(PermissionMode::Planning, Arc::new(DenyAllGate));
+        vault.allow_tool_always("memory");
+        assert!(
+            matches!(vault.decide(&call("memory", r#"{"command":"write","content":"fact"}"#), || None), Verdict::Allow),
+            "the memory vault stays writable in planning: that is the one hole"
         );
 
         let manual = PermissionState::new(PermissionMode::Manual, Arc::new(DenyAllGate));

@@ -59,6 +59,11 @@ pub struct SystemPromptConfig {
     pub effort: Option<String>,
     /// The voice section, when a non-default style was chosen.
     pub personality: Option<String>,
+    /// A room's standing rules (a Telegram profile's language and tone), set
+    /// once at start and never per turn: the prefix must stay stable for the
+    /// provider's cache (H2). It lands right after the voice, the same place
+    /// in both detail levels.
+    pub room_directive: Option<String>,
     /// Project and user memory, loaded before the first request. It belongs in
     /// the system prompt: it is an instruction, not something the user said.
     pub memory: Option<String>,
@@ -96,6 +101,7 @@ impl Default for SystemPromptConfig {
             model: None,
             effort: None,
             personality: None,
+            room_directive: None,
             memory: None,
             plan: None,
             uses_emoji: false,
@@ -412,6 +418,9 @@ pub fn build_system_prompt(config: &SystemPromptConfig) -> String {
         if let Some(ref personality) = config.personality {
             sections.push(personality.clone());
         }
+        if let Some(ref directive) = config.room_directive {
+            sections.push(directive.clone());
+        }
         let mut tail = Vec::new();
         if let Some(ref model) = config.model {
             tail.push(format!("Model: {model}"));
@@ -691,6 +700,9 @@ pub fn build_system_prompt(config: &SystemPromptConfig) -> String {
     // Last, so it reads as the final word on everything above.
     if let Some(ref personality) = config.personality {
         sections.push(personality.clone());
+    }
+    if let Some(ref directive) = config.room_directive {
+        sections.push(directive.clone());
     }
 
     // The model and the thinking mode go last, and that is not a matter of

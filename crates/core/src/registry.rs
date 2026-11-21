@@ -130,6 +130,11 @@ pub enum Handler {
     /// The chat this session serves: the headless mode's room. The tool only
     /// exists when the host wired an outbox (serve does, the TUI does not).
     ChatReply,
+    /// Telegram actions through the bridge to the bot: reply, moderation,
+    /// pins, reactions. The bot owns the token and re-checks every call.
+    Telegram,
+    /// The room's journal read back with filters: who wrote what, when.
+    TgJournal,
     Agent,
     /// The old three names are kept for the subagent internals, which still
     /// execute one verb each; the app offers `agent` instead.
@@ -157,6 +162,8 @@ impl Handler {
             Handler::Plan => "plan",
             Handler::Memory => "memory",
             Handler::ChatReply => "chat_reply",
+            Handler::Telegram => "telegram",
+            Handler::TgJournal => "tg_journal",
             Handler::Agent => "agent",
             Handler::SpawnAgent => "spawn_agent",
             Handler::SendMessage => "send_message",
@@ -332,6 +339,15 @@ const SKILL_NAME: Param = opt_str("name", "For action run: the skill name, witho
 
 const TASK_ACTION: Param = one_of("action", "list background tasks, read one's output, or stop one.", &["list", "output", "stop"]);
 const TASK_ID: Param = opt_int("task_id", "The id run_shell returned when it started the task.");
+
+const TG_ACTION: Param = one_of(
+    "action",
+    "reply — ответить на сообщение; delete — удалить сообщение; ban/unban — бан и разбан; mute/unmute — мут и размут; pin/unpin — закрепить и открепить; react — реакция; room_info — состав и статусы комнаты; resolve — ник в id; forget_user — забыть данные юзера; publish — пост в канал.",
+    &[
+        "reply", "delete", "ban", "unban", "mute", "unmute", "pin", "unpin", "react", "room_info",
+        "resolve", "forget_user", "publish",
+    ],
+);
 const PLAN_ACTION: Param = one_of(
     "action",
     "create starts a plan and change edits the list (send `items`); done and in_progress move named steps' status (send `steps`); clear empties the plan.",
@@ -616,6 +632,47 @@ pub static TOOLS: &[ToolDef] = &[
         required: &["message_id", "text"],
         has_header: true,
         handler: Handler::ChatReply,
+        category: Category::Read,
+        touches: Touches::Nothing,
+        preview: Preview::None,
+        availability: Availability::Serve,
+    },
+    ToolDef {
+        name: "telegram",
+        description: "Действия в Telegram через бот-мост. reply — ответ на сообщение (msg_id, text, HTML); delete — удалить (msg_id); ban/unban/mute/unmute берут user (id или @ник), длительность мута решай сам (minutes); pin/unpin/react (emoji) берут msg_id; room_info — состав, муты, активность за сутки; resolve — @ник в id и имя; publish — пост в канал по согласованному драфту. Чужая комната — только через target и если разрешено. Публичный вердикт модерации формулируешь сам через reply. Мутирующие действия: не больше 8 за ход, раз в 2 секунды.",
+        params: &[
+            TG_ACTION,
+            opt_str("target", "Чужая комната для действия: users или channel; без него действие идёт в свою комнату"),
+            opt_int("msg_id", "Telegram id сообщения для reply/delete/pin/unpin/react"),
+            opt_str("text", "Текст для reply или publish; Telegram HTML разрешён"),
+            opt_str("user", "Кого касается ban/unban/mute/unmute/forget_user: числовой id или @ник"),
+            opt_int("minutes", "Длительность мута в минутах (решение модели)"),
+            opt_str("reason", "Причина бана для аудита; необязательно, но аудит всё запишет"),
+            opt_str("emoji", "Реакция для react"),
+        ],
+        required: &["action"],
+        has_header: true,
+        handler: Handler::Telegram,
+        // Разговор с комнатой не пишет файлов и не гоняет процессов: риск
+        // ловят двойные гарды (тул и бот) и аудит, а не карточка одобрения.
+        category: Category::Read,
+        touches: Touches::Nothing,
+        preview: Preview::None,
+        availability: Availability::Serve,
+    },
+    ToolDef {
+        name: "tg_journal",
+        description: "Журнал комнаты: кто что писал, с фильтрами. minutes ограничивает окно (последние N минут), last берёт последние N сообщений, user фильтрует по автору (id или @ник), query ищет подстроку, threads показывает структуру ответов. Каждая строка несёт автора как id:число @ник Имя — бери id прямо из журнала. Мусор (чистые стикеры, повторы, флуд-буквы) отделён от содержательного; медиа помечены метками [стикер], [гифка], [скрин]. Читай его, чтобы понять контекст спора перед вердиктом или найти, откуда началась тема.",
+        params: &[
+            opt_int("minutes", "Окно в минутах от сейчас назад"),
+            opt_int("last", "Сколько последних сообщений взять (по умолчанию 40)"),
+            opt_str("user", "Только этот автор: id или @ник"),
+            opt_str("query", "Только сообщения с этой подстрокой"),
+            opt_bool("threads", "Показать структуру тредов (кто на что отвечал)"),
+        ],
+        required: &[],
+        has_header: true,
+        handler: Handler::TgJournal,
         category: Category::Read,
         touches: Touches::Nothing,
         preview: Preview::None,

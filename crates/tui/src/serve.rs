@@ -343,6 +343,9 @@ struct ServeBase {
     /// `(capacity, fixed, threshold_pct)` when the operator bounded the
     /// window with `--compact-at`; `None` keeps every session uncompacted.
     compactor: Option<(usize, usize, usize)>,
+    /// The room's profile, for `/status` and nothing else: the constants it
+    /// brought were already poured into the base at start.
+    profile: Option<&'static TgbotProfile>,
 }
 
 /// One named brain of the serve: `main`, `report-1234`, ... A room's busy
@@ -626,13 +629,19 @@ impl ServeApp {
                 st.push_event(event_to_json(&event));
             };
             // The approval gate finds this session through the task-local:
-            // the tools are shared by every session, the feed is not.
+            // the tools are shared by every session, the feed is not. The
+            // turn's mutation budget (telegram/github caps) rides the same
+            // way: each turn starts with a fresh one, parallel turns of
+            // parallel sessions never share it.
             let run_state = state.clone();
-            let res = CURRENT_SESSION
-                .scope(run_state, async move {
-                    loop_.run(source.as_ref(), perm, shared, &mut on_event).await
-                })
-                .await;
+            let res = flashagent_tools::scope_turn(async move {
+                CURRENT_SESSION
+                    .scope(run_state, async move {
+                        loop_.run(source.as_ref(), perm, shared, &mut on_event).await
+                    })
+                    .await
+            })
+            .await;
             let mut st = state.lock().expect("serve state");
             st.running = false;
             st.steer_tx = None;
@@ -922,6 +931,7 @@ async fn handle(
                             "session": session_id,
                             "key": key,
                             "sessions": total,
+                            "profile": base.profile.map(|p| p.name),
                             "model": model,
                             "events": events_len,
                             "text_chars": text_chars,
@@ -1057,6 +1067,102 @@ pub(crate) struct ServeOpts {
     /// not say it supports them. The gateway's metadata is sometimes stale;
     /// the room needs stickers and GIFs seen.
     pub vision: bool,
+    /// A room bundle (`--profile tgbot-dev`): tier, gate, toolset, caps,
+    /// language — every constant a Telegram serve needs, in one place, so the
+    /// unit carries one flag instead of a scatter (B4/B7/B8).
+    pub profile: Option<String>,
+}
+
+/// One Telegram room's constants. The unit names the profile; the flags the
+/// operator still passes win over the profile's defaults (B3).
+pub(crate) struct TgbotProfile {
+    pub name: &'static str,
+    /// B2: the dev room reads the Full tier, the users' room Standard.
+    pub prompt_detail: &'static str,
+    /// H9: the dev room reasons at full length, the users' room at low.
+    pub effort: &'static str,
+    /// The dev room runs bypass (its shell stays whole — the owner's call);
+    /// the users' room is planning with an allowlist gate (B1).
+    pub permission_mode: &'static str,
+    /// B1: the users' room's own tools pass the gate silently, everything
+    /// else is refused without a card.
+    pub allowlist: &'static [&'static str],
+    /// Tools that are not even offered: every extra schema is a failure mode
+    /// and a token the room pays for on every turn (H13).
+    pub disabled: &'static [&'static str],
+    /// B3/H15: the users' room sits in a 256k window with compaction at 200k;
+    /// the dev room keeps its whole history.
+    pub context_cap: Option<usize>,
+    pub compact_at: Option<usize>,
+    /// Rooms see stickers and screenshots (the units passed --vision for it).
+    pub vision: bool,
+    /// A13: only the dev session acts outside its own room.
+    pub cross_room: bool,
+    /// B5: language and tone, said once here and never glued per turn.
+    pub language_directive: &'static str,
+}
+
+const TG_LANGUAGE: &str = "ЯЗЫК И ТОН КОМНАТЫ: отвечай только по-русски, независимо от языка собеседника. Живой, дружелюбный тон без официоза; эмодзи не используй. На провокации и не по теме — короткий живой юмор, одна-две фразы, без холодных отписок.";
+
+static TG_BOT_DEV: TgbotProfile = TgbotProfile {
+    name: "tgbot-dev",
+    prompt_detail: "full",
+    effort: "high",
+    permission_mode: "bypass",
+    allowlist: &[],
+    disabled: &["edit", "plan", "skill", "agent", "spawn_agent", "send_message", "review_agent"],
+    context_cap: None,
+    compact_at: None,
+    vision: true,
+    cross_room: true,
+    language_directive: TG_LANGUAGE,
+};
+
+static TG_BOT_USERS: TgbotProfile = TgbotProfile {
+    name: "tgbot-users",
+    prompt_detail: "standard",
+    effort: "low",
+    permission_mode: "planning",
+    allowlist: &[
+        "telegram",
+        "tg_journal",
+        "github",
+        "memory",
+        "chat_reply",
+        "user_interaction",
+        "read",
+        "search",
+        "git",
+        "env_info",
+        "web",
+        "plan",
+        "task",
+        "view_image",
+    ],
+    disabled: &[
+        "run_shell",
+        "edit",
+        "http_request",
+        "skill",
+        "agent",
+        "spawn_agent",
+        "send_message",
+        "review_agent",
+    ],
+    context_cap: Some(256_000),
+    compact_at: Some(200_000),
+    vision: true,
+    cross_room: false,
+    language_directive: TG_LANGUAGE,
+};
+
+/// The profile a `--profile` flag names, or None when it names nothing.
+fn parse_profile(raw: &str) -> Option<&'static TgbotProfile> {
+    match raw.trim().to_lowercase().as_str() {
+        "tgbot-dev" => Some(&TG_BOT_DEV),
+        "tgbot-users" => Some(&TG_BOT_USERS),
+        _ => None,
+    }
 }
 
 /// The permission mode a `--mode` flag names, or None when it names nothing.
@@ -1075,11 +1181,27 @@ fn parse_mode(raw: &str) -> Option<flashagent_core::PermissionMode> {
 /// config must already be set up (`flashagent --setup`); a missing model is
 /// an error, because a server with no brain is a blank screen with a port.
 pub(crate) async fn run_serve(mut config: flashagent_core::AppConfig, opts: ServeOpts) -> Result<()> {
+    // The profile is resolved once, here: an unknown name is a typo in the
+    // unit, and a room that starts without its constants starts wrong (G14).
+    let profile = match opts.profile.as_deref() {
+        None => None,
+        Some(raw) => match parse_profile(raw) {
+            Some(p) => Some(p),
+            None => anyhow::bail!(
+                "неизвестный профиль '{raw}': бывают tgbot-dev и tgbot-users"
+            ),
+        },
+    };
     if let Some(detail) = &opts.prompt {
         config.prompt_detail = detail.clone();
+    } else if let Some(p) = profile {
+        config.prompt_detail = p.prompt_detail.to_string();
     }
     if let Some(mode) = &opts.mode {
         config.permission_mode = parse_mode(mode)
+            .unwrap_or(flashagent_core::PermissionMode::AcceptEdits);
+    } else if let Some(p) = profile {
+        config.permission_mode = parse_mode(p.permission_mode)
             .unwrap_or(flashagent_core::PermissionMode::AcceptEdits);
     }
     flashagent_tui::i18n::set(flashagent_tui::i18n::Lang::from_code(&config.interface_language));
@@ -1109,6 +1231,7 @@ pub(crate) async fn run_serve(mut config: flashagent_core::AppConfig, opts: Serv
     trace("serve: discovery done");
     let capacity = opts
         .context_cap
+        .or_else(|| profile.and_then(|p| p.context_cap))
         .unwrap_or(
             discovery
                 .as_ref()
@@ -1123,7 +1246,11 @@ pub(crate) async fn run_serve(mut config: flashagent_core::AppConfig, opts: Serv
         source.0.adopt_discovery(disc);
     }
     source.0.set_model(&model);
-    let effort = opts.effort.clone().unwrap_or_else(|| config.thinking_effort.clone());
+    let effort = opts
+        .effort
+        .clone()
+        .or_else(|| profile.map(|p| p.effort.to_string()))
+        .unwrap_or_else(|| config.thinking_effort.clone());
 
     // The working folder is read three times, each read behind a clock: a slow
     // folder costs its rules and its outline, not the server.
@@ -1138,6 +1265,13 @@ pub(crate) async fn run_serve(mut config: flashagent_core::AppConfig, opts: Serv
     };
     trace("serve: mcp manager ready");
     let mut disabled = config.disabled_tools.clone();
+    if let Some(p) = profile {
+        for name in p.disabled {
+            if !disabled.iter().any(|n| n == name) {
+                disabled.push(name.to_string());
+            }
+        }
+    }
     if let Some(list) = opts.disable.as_deref() {
         disabled.extend(
             list.split(',')
@@ -1149,6 +1283,32 @@ pub(crate) async fn run_serve(mut config: flashagent_core::AppConfig, opts: Serv
     // The bot closes its card by itself; this timeout is only the backstop
     // that keeps a restarted or silent client from hanging the turn forever.
     let questions = Arc::new(ServeQuestions::with_timeout(Duration::from_secs(360)));
+    // A tgbot room reaches the bot through the bridge; no secret in the
+    // environment means the hands of the room cannot be built (G14: refuse to
+    // start rather than start mute). The URL stays a local default.
+    let tg_bridge = match profile {
+        None => None,
+        Some(p) => {
+            let token = std::env::var("FLASHAGENT_TG_BRIDGE_TOKEN")
+                .ok()
+                .filter(|t| !t.trim().is_empty());
+            let Some(token) = token else {
+                anyhow::bail!(
+                    "профиль {} требует секрет моста: положи FLASHAGENT_TG_BRIDGE_TOKEN в окружение юнита",
+                    p.name
+                );
+            };
+            let base_url = std::env::var("FLASHAGENT_TG_BRIDGE_URL")
+                .ok()
+                .filter(|u| !u.trim().is_empty())
+                .unwrap_or_else(|| "http://127.0.0.1:8777".to_string());
+            Some(flashagent_tools::TgBridgeConfig {
+                base_url,
+                token,
+                cross_room: p.cross_room,
+            })
+        }
+    };
     let tools = Arc::new(flashagent_tools::BuiltinTools::new(flashagent_tools::BuiltinToolsConfig {
         cwd: cwd.clone(),
         brave_api_key: std::env::var("BRAVE_API_KEY").ok().filter(|k| !k.trim().is_empty()),
@@ -1164,6 +1324,7 @@ pub(crate) async fn run_serve(mut config: flashagent_core::AppConfig, opts: Serv
         // Every session's event stream carries its own `chat_reply` calls as
         // `reply` events — the outbox is the feed itself, per session.
         chat_enabled: true,
+        tg_bridge,
     })?);
     // The same rule the TUI applies: a model the server reports as seeing
     // images gets `read mode=image`; a model it never mentioned is assumed to
@@ -1171,7 +1332,9 @@ pub(crate) async fn run_serve(mut config: flashagent_core::AppConfig, opts: Serv
     // forgot this, so every screenshot came back as "the current model
     // cannot see images" — even on a vision model.
     tools.set_vision_supported(
-        opts.vision || crate::attachments::sees_images(discovery.as_ref(), &model),
+        opts.vision
+            || profile.is_some_and(|p| p.vision)
+            || crate::attachments::sees_images(discovery.as_ref(), &model),
     );
     trace("serve: tools ready");
 
@@ -1182,8 +1345,17 @@ pub(crate) async fn run_serve(mut config: flashagent_core::AppConfig, opts: Serv
     });
     // With --no-ask the permission layer never reaches the card gate: what it
     // would ask about is denied at once, so an unattended turn can never wait
-    // five minutes for a button nobody will press.
-    let approval_gate: Arc<dyn flashagent_core::permissions::ApprovalGate> = if opts.no_ask {
+    // five minutes for a button nobody will press. A tgbot profile needs no
+    // flag: the users' room carries an allowlist gate (its own tools pass,
+    // the rest is refused without a card — B1), and the dev room's bypass
+    // never asks, so the deny-all gate only catches the blacklisted shell.
+    let approval_gate: Arc<dyn flashagent_core::permissions::ApprovalGate> = if profile
+        .is_some_and(|p| p.permission_mode == "planning")
+    {
+        Arc::new(flashagent_core::permissions::AllowlistGate::new(
+            profile.unwrap().allowlist,
+        ))
+    } else if opts.no_ask || profile.is_some() {
         Arc::new(flashagent_core::permissions::DenyAllGate)
     } else {
         gate.clone()
@@ -1250,6 +1422,9 @@ pub(crate) async fn run_serve(mut config: flashagent_core::AppConfig, opts: Serv
             detail,
             reasoning_supported,
             local: !remote,
+            // B5: the room's language and tone, said once. The bot glues no
+            // per-turn language lines any more — the prefix carries them.
+            room_directive: profile.map(|p| p.language_directive.to_string()),
         }
         .with_personality(&config.personality),
     );
@@ -1258,14 +1433,17 @@ pub(crate) async fn run_serve(mut config: flashagent_core::AppConfig, opts: Serv
     // Mid-turn compaction for rooms with a bounded window: the TUI's
     // TurnCompactor over the session archive. Off unless the operator
     // asked for it with `--compact-at` — a serve the owner did not cap keeps
-    // its whole history and never summarizes it behind his back.
+    // its whole history and never summarizes it behind his back. A tgbot
+    // profile brings its own trigger (the users' room compacts at 200k, B3);
+    // an explicit flag still wins.
     // `--compact-at` turns the trigger into an absolute token count; the
     // fixed estimate covers the system prompt (memory included), the schemas
     // ride within the room.
-    let compactor = if capacity > 0 && config.auto_compact_context && opts.compact_at.is_some() {
+    let compact_at = opts.compact_at.or_else(|| profile.and_then(|p| p.compact_at));
+    let compactor = if capacity > 0 && config.auto_compact_context && compact_at.is_some() {
         let fixed = flashagent_llm::count_tokens(&model, &system_prompt) + 4;
         let threshold_pct =
-            threshold_pct_of(opts.compact_at, config.context_compact_threshold, capacity);
+            threshold_pct_of(compact_at, config.context_compact_threshold, capacity);
         Some((capacity, fixed, threshold_pct))
     } else {
         None
@@ -1298,6 +1476,7 @@ pub(crate) async fn run_serve(mut config: flashagent_core::AppConfig, opts: Serv
         cwd_display,
         system_prompt,
         compactor,
+        profile,
     };
 
     // Sessions are created lazily: `main` exists from the start, every
@@ -1611,6 +1790,7 @@ mod tests {
             cwd_display: std::env::temp_dir().display().to_string(),
             system_prompt: "test prompt".into(),
             compactor: None,
+            profile: None,
         }
     }
 
