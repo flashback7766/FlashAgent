@@ -22,11 +22,19 @@ struct PendingApproval {
     respond: tokio::sync::oneshot::Sender<flashagent_core::permissions::Decision>,
 }
 
+/// How many feed entries stay readable. The bot polls every second, so a
+/// few thousand cover a long stall; the rest is dead weight in RSS forever.
+const FEED_RETAIN: usize = 4096;
+
 /// What the HTTP API reads. One guard over everything the bot polls.
 #[derive(Default)]
 struct ServeState {
     running: bool,
     events: Vec<serde_json::Value>,
+    /// How many events were dropped off the front of `events`. The feed is
+    /// addressed by an absolute cursor (`events_base + index`), so trimming
+    /// the head never renumbers what the client already consumed.
+    events_base: usize,
     /// The turn's answer so far: every `TurnDelta` in order.
     text: String,
     pending: Option<serde_json::Value>,
@@ -38,6 +46,32 @@ struct ServeState {
     /// The live turn's steering channel. Gone between turns: a steer into an
     /// idle brain is a 409 the bot shows the room, not a queue nobody drains.
     steer_tx: Option<tokio::sync::mpsc::UnboundedSender<flashagent_core::Steer>>,
+}
+
+impl ServeState {
+    /// Append one feed entry, trimming the head once the feed doubles the
+    /// retention floor — amortized, not a drain on every push.
+    fn push_event(&mut self, event: serde_json::Value) {
+        self.events.push(event);
+        if self.events.len() > FEED_RETAIN * 2 {
+            let drop = self.events.len() - FEED_RETAIN;
+            self.events.drain(..drop);
+            self.events_base += drop;
+        }
+    }
+
+    fn total_events(&self) -> usize {
+        self.events_base + self.events.len()
+    }
+
+    /// The entries the client has not consumed yet, by absolute cursor. A
+    /// cursor older than the retained window gets the window from its start:
+    /// replies are deduplicated by the bot, and the turn's text is read from
+    /// the feed's `text` field, so a gap is harmless.
+    fn events_since(&self, since: usize) -> Vec<serde_json::Value> {
+        let start = since.saturating_sub(self.events_base).min(self.events.len());
+        self.events[start..].to_vec()
+    }
 }
 
 type SharedState = Arc<Mutex<ServeState>>;
@@ -82,7 +116,7 @@ impl ServeGate {
             let _ = respond.send(if allow { Decision::Allow } else { Decision::Deny });
             let mut st = self.state.lock().expect("serve state");
             st.pending = None;
-            st.events.push(serde_json::json!({"type": "approval_answered", "allow": allow}));
+            st.push_event(serde_json::json!({"type": "approval_answered", "allow": allow}));
             true
         } else {
             false
@@ -103,7 +137,7 @@ impl flashagent_core::permissions::ApprovalGate for ServeGate {
                 // The answer never came; the feed says the wait is over.
                 let mut st = self.state.lock().expect("serve state");
                 st.pending = None;
-                st.events.push(serde_json::json!({"type": "approval_timeout", "id": id, "tool": req.tool}));
+                st.push_event(serde_json::json!({"type": "approval_timeout", "id": id, "tool": req.tool}));
                 Decision::Deny
             }
         }
@@ -303,7 +337,7 @@ impl ServeApp {
             let mut st = self.state.lock().expect("serve state");
             st.running = true;
             st.text.clear();
-            st.events.push(serde_json::json!({"type": "turn_started"}));
+            st.push_event(serde_json::json!({"type": "turn_started"}));
         }
         let turn_opts = build_turn_options(&self.config, &self.effort);
         let (steer_tx, steer_rx) = tokio::sync::mpsc::unbounded_channel();
@@ -339,14 +373,14 @@ impl ServeApp {
                 if let flashagent_core::LoopEvent::ToolStarted { name, args_json, .. } = &event {
                     if name == "chat_reply" {
                         if let Some(reply) = chat_reply_event(args_json) {
-                            st.events.push(reply);
+                            st.push_event(reply);
                         }
                     }
                 }
                 if let flashagent_core::LoopEvent::TurnDelta(text) = &event {
                     st.text.push_str(text);
                 }
-                st.events.push(event_to_json(&event));
+                st.push_event(event_to_json(&event));
             };
             let res = loop_.run(source.as_ref(), perm, shared, &mut on_event).await;
             let mut st = state.lock().expect("serve state");
@@ -357,7 +391,7 @@ impl ServeApp {
                 Ok((shared, reason)) => {
                     let snapshot = shared.snapshot();
                     st.history = Some(snapshot.clone());
-                    st.events.push(serde_json::json!({"type": "turn_finished", "reason": format!("{reason:?}")}));
+                    st.push_event(serde_json::json!({"type": "turn_finished", "reason": format!("{reason:?}")}));
                     if let Err(why) = crate::sessions::save_session_file(
                         &session_id,
                         &model,
@@ -374,7 +408,7 @@ impl ServeApp {
                     let snapshot = err.into_history();
                     st.history = Some(snapshot.clone());
                     st.last_error = Some("the turn failed".into());
-                    st.events.push(serde_json::json!({"type": "turn_failed"}));
+                    st.push_event(serde_json::json!({"type": "turn_failed"}));
                     let _ = crate::sessions::save_session_file(
                         &session_id,
                         &model,
@@ -618,7 +652,7 @@ async fn handle(
                         let app = session.app.lock().expect("serve app");
                         (
                             st.running,
-                            st.events.len(),
+                            st.total_events(),
                             st.text.chars().count(),
                             st.turns_done,
                             st.last_error.clone(),
@@ -649,7 +683,12 @@ async fn handle(
                         200u16,
                         serde_json::json!({
                             "running": st.running,
-                            "events": st.events.iter().skip(since).cloned().collect::<Vec<_>>(),
+                            // The absolute cursor: a client that saw `total`
+                            // resumes from it even after the head was trimmed,
+                            // and a smaller total than its cursor means the
+                            // feed (the process) restarted.
+                            "total": st.total_events(),
+                            "events": st.events_since(since),
                             "text": st.text,
                             "pending": st.pending,
                             "last_error": st.last_error,
@@ -1204,5 +1243,29 @@ mod tests {
         assert_eq!(since_of(""), 0);
         assert_eq!(since_of("since=12"), 12);
         assert_eq!(since_of("a=1&since=7"), 7);
+    }
+
+    #[test]
+    fn the_feed_trims_its_head_but_keeps_an_absolute_cursor() {
+        let mut st = ServeState::default();
+        for i in 0..(FEED_RETAIN * 2 + 10) {
+            st.push_event(serde_json::json!({"type": "n", "i": i}));
+        }
+        // The window is bounded even after a long-lived feed.
+        assert!(st.events.len() <= FEED_RETAIN * 2);
+        assert!(st.events_base > 0);
+        let total = st.total_events();
+        assert_eq!(st.events_base + st.events.len(), total);
+        // A current cursor gets exactly the tail.
+        let tail = st.events_since(total - 5);
+        assert_eq!(tail.len(), 5);
+        assert_eq!(tail[4]["i"], FEED_RETAIN * 2 + 9);
+        // The cursor at total means "nothing new", not "send everything".
+        assert!(st.events_since(total).is_empty());
+        // A cursor older than the window still gets the retained window, so
+        // a client that was away re-syncs instead of reading an empty feed.
+        let stale = st.events_since(0);
+        assert_eq!(stale.len(), st.events.len());
+        assert!(st.total_events() >= stale.len());
     }
 }
