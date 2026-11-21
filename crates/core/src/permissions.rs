@@ -1605,6 +1605,29 @@ mod tests {
     }
 
     #[test]
+    fn a_standing_rule_lets_memory_write_in_manual_mode() {
+        let state = PermissionState::new(PermissionMode::Manual, Arc::new(DenyAllGate));
+        let create = call(
+            "memory",
+            r#"{"command":"create","path":"x","file_text":"y","description":"z"}"#,
+        );
+        assert!(matches!(
+            state.decide(&create, || None),
+            Verdict::NeedApproval { .. }
+        ));
+        let view = call("memory", r#"{"command":"view","path":"x"}"#);
+        assert_eq!(state.decide(&view, || None), Verdict::Allow, "a view is a read");
+        let mut rules = RuleSet::default();
+        rules.always_allow_tools.push("memory".into());
+        state.set_rules(rules);
+        assert_eq!(
+            state.decide(&create, || None),
+            Verdict::Allow,
+            "the serve's standing rule skips the card"
+        );
+    }
+
+    #[test]
     fn cmd_exe_is_judged_by_its_own_quoting() {
         let cmd = &[ShellDialect::Cmd];
         let rules = RuleSet { shell_prefixes: vec!["npm test".into()], ..Default::default() };

@@ -815,6 +815,9 @@ pub(crate) struct ServeOpts {
     /// The compaction trigger as an absolute token count (`--compact-at
     /// 55000`); without it the config's or the window's percentage applies.
     pub compact_at: Option<usize>,
+    /// Tools this serve must not offer (`--disable a,b`): a room's brain does
+    /// not need the whole TUI toolbox, and every extra tool is a failure mode.
+    pub disable: Option<String>,
 }
 
 /// The permission mode a `--mode` flag names, or None when it names nothing.
@@ -895,6 +898,15 @@ pub(crate) async fn run_serve(mut config: flashagent_core::AppConfig, opts: Serv
         .and_then(|r| r.ok())
     };
     trace("serve: mcp manager ready");
+    let mut disabled = config.disabled_tools.clone();
+    if let Some(list) = opts.disable.as_deref() {
+        disabled.extend(
+            list.split(',')
+                .map(str::trim)
+                .filter(|name| !name.is_empty())
+                .map(str::to_string),
+        );
+    }
     let tools = Arc::new(flashagent_tools::BuiltinTools::new(flashagent_tools::BuiltinToolsConfig {
         cwd: cwd.clone(),
         brave_api_key: std::env::var("BRAVE_API_KEY").ok().filter(|k| !k.trim().is_empty()),
@@ -903,7 +915,7 @@ pub(crate) async fn run_serve(mut config: flashagent_core::AppConfig, opts: Serv
         web_enabled: Some(config.web_tools),
         context_window: Some(capacity),
         mcp_manager: mcp.clone(),
-        disabled_tools: Some(config.disabled_tools.clone()),
+        disabled_tools: Some(disabled),
         home: None,
         // Every session's event stream carries its own `chat_reply` calls as
         // `reply` events — the outbox is the feed itself, per session.
@@ -925,6 +937,11 @@ pub(crate) async fn run_serve(mut config: flashagent_core::AppConfig, opts: Serv
     let perm_state =
         Arc::new(flashagent_core::permissions::PermissionState::new(config.permission_mode, gate.clone()));
     perm_state.set_project_root(cwd.clone());
+    // The memory vault is the brain's own store, not a code change: a write
+    // there must never wait on an approval card (the users' room runs manual).
+    let mut rules = flashagent_core::permissions::RuleSet::default();
+    rules.always_allow_tools.push("memory".into());
+    perm_state.set_rules(rules);
     let perm: &'static flashagent_core::permissions::PermissionedTools = Box::leak(Box::new(
         flashagent_core::permissions::PermissionedTools::new(tools.clone(), Some(tools.clone()), perm_state),
     ));

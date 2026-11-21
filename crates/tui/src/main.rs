@@ -600,6 +600,7 @@ async fn main() -> Result<()> {
         let mut effort = None;
         let mut context_cap = None;
         let mut compact_at = None;
+        let mut disable = None;
         let mut args = std::env::args().skip(1).peekable();
         while let Some(a) = args.next() {
             match a.as_str() {
@@ -616,6 +617,9 @@ async fn main() -> Result<()> {
                 // day cannot blow the budget.
                 "--context-cap" => context_cap = args.next().and_then(|v| v.parse().ok()),
                 "--compact-at" => compact_at = args.next().and_then(|v| v.parse().ok()),
+                // A room's brain does not need the whole toolbox: no
+                // subagents, no plan, no edit — each one is a failure mode.
+                "--disable" => disable = args.next(),
                 _ => {}
             }
         }
@@ -629,6 +633,7 @@ async fn main() -> Result<()> {
                 effort,
                 context_cap,
                 compact_at,
+                disable,
             },
         )
         .await
