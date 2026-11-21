@@ -1177,7 +1177,8 @@ static TG_BOT_USERS: TgbotProfile = TgbotProfile {
     // A reporter files, reads and amends; closing an issue is the dev
     // room's word (D5), and the tool refuses it here.
     github_actions: Some(&[
-        "search", "get", "create", "comment", "reopen", "edit", "commits", "file", "diff",
+        "search", "get", "create", "comment", "reopen", "edit", "attach", "commits", "file",
+        "diff",
     ]),
 };
 

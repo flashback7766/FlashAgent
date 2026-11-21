@@ -23,6 +23,11 @@ pub struct GitHubConfig {
     /// Where the serve's working folder is: the screenshots the model names
     /// are paths inside it (`shots/...`), never the process cwd.
     pub cwd: std::path::PathBuf,
+    /// The bot account's own repo that holds issue attachments. Created on
+    /// first use, public: a token cannot upload files to the project repo
+    /// unless the account can push there, and the project repo stays the
+    /// owner's.
+    pub attachments_repo: Option<String>,
 }
 
 impl GitHubConfig {
@@ -39,6 +44,9 @@ impl GitHubConfig {
             base_url: "https://api.github.com".into(),
             allowed_actions: None,
             cwd: std::path::PathBuf::from("."),
+            attachments_repo: std::env::var("FLASHAGENT_ATTACHMENTS_REPO")
+                .ok()
+                .filter(|r| !r.trim().is_empty()),
         })
     }
 }
@@ -324,16 +332,16 @@ impl GitHub {
         Ok(format!("ok: заведён issue #{number} {url}"))
     }
 
-    /// Uploads one image per request into `attachments/issue-<n>/` on the
-    /// attachments branch and appends the markdown to the issue body.
-    /// GitHub's API cannot host uploads with a token; a branch of the same
-    /// repo is the one place a token can write an image to.
+    /// Uploads one image per request into the bot's own attachments repo
+    /// and returns the markdown lines for the issue. The project repo is
+    /// never written to: a token cannot upload there unless the account can
+    /// push, and the project repo belongs to its owner.
     async fn upload_images(
         &self,
         number: i64,
         images: &[String],
     ) -> Result<(String, usize), ToolError> {
-        self.ensure_branch().await?;
+        let (att_repo, _login) = self.attachments_target().await?;
         let mut lines = Vec::new();
         let mut uploaded = 0;
         for (i, path) in images.iter().enumerate() {
@@ -360,22 +368,11 @@ impl GitHub {
                 .file_name()
                 .and_then(|n| n.to_str())
                 .unwrap_or("image");
-            let remote = format!("attachments/issue-{number}/{i}-{name}");
+            let remote = format!("issue-{number}/{i}-{name}");
             let b64 = base64_encode(&bytes);
-            self.call(
-                reqwest::Method::PUT,
-                &format!("/contents/{remote}"),
-                Some(serde_json::json!({
-                    "message": format!("issue #{number}: attachment {name}"),
-                    "content": b64,
-                    "branch": "flashagent-attachments",
-                })),
-            )
-            .await?;
-            let url = format!(
-                "https://raw.githubusercontent.com/{}/flashagent-attachments/{}",
-                self.cfg.repo, remote
-            );
+            self.put_file(&att_repo, &remote, &b64, &format!("issue #{number}: {name}"))
+                .await?;
+            let url = format!("https://raw.githubusercontent.com/{att_repo}/main/{remote}");
             lines.push(format!("![скрин {i}]({url})"));
             uploaded += 1;
         }
@@ -385,48 +382,127 @@ impl GitHub {
         Ok((format!("\n\n{}", lines.join("\n")), uploaded))
     }
 
-    /// The attachments branch: created once from the default head, reused
-    /// after. A 404 on the ref is the "not yet" signal.
-    async fn ensure_branch(&self) -> Result<(), ToolError> {
-        let url = format!(
-            "{}/repos/{}/git/ref/heads/flashagent-attachments",
-            self.cfg.base_url, self.cfg.repo
-        );
+    /// The attachments repo, created on first use: `{bot}/rx-playa-attachments`,
+    /// public, auto-initialised so `main` exists.
+    async fn attachments_target(&self) -> Result<(String, String), ToolError> {
+        let login = self.call_root(reqwest::Method::GET, "/user", None).await?
+            .get("login")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("")
+            .to_string();
+        if login.is_empty() {
+            return Err(ToolError::Other("err: не вижу логин бот-аккаунта".into()));
+        }
+        let repo = self
+            .cfg
+            .attachments_repo
+            .clone()
+            .unwrap_or_else(|| format!("{login}/rx-playa-attachments"));
+        // A name without an owner belongs to the account.
+        let full = if repo.contains('/') {
+            repo.clone()
+        } else {
+            format!("{login}/{repo}")
+        };
+        let probe = format!("{}/repos/{}", self.cfg.base_url, full);
         let resp = self
             .http
-            .get(&url)
+            .get(&probe)
             .bearer_auth(&self.cfg.token)
             .header("Accept", "application/vnd.github+json")
             .send()
             .await
             .map_err(|e| ToolError::Other(format!("err: GitHub недоступен ({e})")))?;
         if resp.status().is_success() {
-            return Ok(());
+            return Ok((full, login));
         }
-        // Point the new branch at the default branch's head.
-        let repo = self.call(reqwest::Method::GET, "", None).await?;
-        let default = repo
-            .get("default_branch")
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or("main");
-        let head = self
-            .call(reqwest::Method::GET, &format!("/git/ref/heads/{default}"), None)
-            .await?;
-        let sha = head
-            .get("object")
-            .and_then(|o| o.get("sha"))
-            .and_then(serde_json::Value::as_str)
-            .ok_or_else(|| ToolError::Other("err: не вижу head для ветки вложений".into()))?;
-        self.call(
+        let name = full.split('/').next_back().unwrap_or("rx-playa-attachments");
+        self.call_root(
             reqwest::Method::POST,
-            "/git/refs",
+            "/user/repos",
             Some(serde_json::json!({
-                "ref": "refs/heads/flashagent-attachments",
-                "sha": sha,
+                "name": name,
+                "description": "Screenshots attached to RX Playa issues by the bot",
+                "private": false,
+                "auto_init": true,
             })),
         )
-        .await?;
+        .await
+        .map_err(|e| {
+            ToolError::Other(format!(
+                "err: не смог создать репо вложений у бот-аккаунта ({e})"
+            ))
+        })?;
+        Ok((full, login))
+    }
+
+    /// One file into the attachments repo via the contents API.
+    async fn put_file(
+        &self,
+        repo: &str,
+        remote: &str,
+        b64: &str,
+        message: &str,
+    ) -> Result<(), ToolError> {
+        let url = format!(
+            "{}/repos/{}/contents/{}",
+            self.cfg.base_url, repo, remote
+        );
+        let resp = self
+            .http
+            .put(&url)
+            .bearer_auth(&self.cfg.token)
+            .header("Accept", "application/vnd.github+json")
+            .json(&serde_json::json!({
+                "message": message,
+                "content": b64,
+                "branch": "main",
+            }))
+            .send()
+            .await
+            .map_err(|e| ToolError::Other(format!("err: GitHub недоступен ({e})")))?;
+        if !resp.status().is_success() {
+            return Err(ToolError::Other(format!(
+                "err: вложение не залилось (HTTP {}) — проверь права бота в репо вложений",
+                resp.status()
+            )));
+        }
         Ok(())
+    }
+
+    /// A call outside /repos/{project}: the attachments repo and /user.
+    async fn call_root(
+        &self,
+        method: reqwest::Method,
+        path: &str,
+        json: Option<serde_json::Value>,
+    ) -> Result<serde_json::Value, ToolError> {
+        let url = format!("{}{}", self.cfg.base_url, path);
+        let mut req = self
+            .http
+            .request(method, &url)
+            .bearer_auth(&self.cfg.token)
+            .header("Accept", "application/vnd.github+json");
+        if let Some(body) = json {
+            req = req.json(&body);
+        }
+        let resp = req.send().await.map_err(|e| {
+            ToolError::Other(format!("err: GitHub недоступен, повтори позже ({e})"))
+        })?;
+        let status = resp.status();
+        let value: serde_json::Value = resp.json().await.map_err(|e| {
+            ToolError::Other(format!("err: GitHub ответил не JSON (HTTP {status}) ({e})"))
+        })?;
+        if !status.is_success() {
+            let message = value
+                .get("message")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("без объяснения");
+            return Err(ToolError::Other(format!(
+                "err: GitHub отказал (HTTP {status}): {message}"
+            )));
+        }
+        Ok(value)
     }
 
     /// Dokiдывает скрины к готовому issue: картинки в ветку, markdown — комментарием.
@@ -589,6 +665,7 @@ mod tests {
             base_url: "http://127.0.0.1:1".into(),
             allowed_actions: None,
             cwd: std::env::temp_dir(),
+            attachments_repo: None,
         })
         .unwrap()
     }

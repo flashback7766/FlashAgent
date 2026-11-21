@@ -39,6 +39,7 @@ impl Project {
                 base_url: "http://127.0.0.1:1".into(),
                 allowed_actions: None,
                 cwd: std::env::temp_dir(),
+                attachments_repo: None,
             }),
         )
     }
@@ -480,6 +481,7 @@ async fn a_github_search_finds_the_similar_report() {
         base_url: url,
         allowed_actions: None,
         cwd: std::env::temp_dir(),
+        attachments_repo: None,
         });
     let out = project
         .call(
@@ -500,6 +502,7 @@ async fn an_issue_is_filed_through_the_mock_and_names_itself() {
         base_url: url,
         allowed_actions: None,
         cwd: std::env::temp_dir(),
+        attachments_repo: None,
         });
     let out = flashagent_tools::scope_turn(async {
         project
@@ -564,7 +567,15 @@ async fn mock_github_recording() -> (String, std::sync::Arc<std::sync::Mutex<Vec
             )
             .to_string();
             sink.lock().unwrap().push(format!("{} || {}", head.lines().next().unwrap_or(""), body));
-            let (status, payload) = if head.starts_with("GET /repos/own/repo ") {
+            let (status, payload) = if head.starts_with("GET /user ") {
+                (200, "{\"login\": \"flashagent-bot\"}".to_string())
+            } else if head.starts_with("GET /repos/flashagent-bot/rx-playa-attachments ") {
+                (404, "{\"message\":\"Not Found\"}".to_string())
+            } else if head.starts_with("POST /user/repos ") {
+                (201, "{\"full_name\": \"flashagent-bot/rx-playa-attachments\"}".to_string())
+            } else if head.starts_with("PUT /repos/flashagent-bot/rx-playa-attachments/contents/") {
+                (201, "{\"content\": {}}".to_string())
+            } else if head.starts_with("GET /repos/own/repo ") {
                 (200, "{\"default_branch\": \"main\"}".to_string())
             } else if head.contains("/git/ref/heads/flashagent-attachments") {
                 (404, "{\"message\":\"Not Found\"}".to_string())
@@ -601,6 +612,7 @@ async fn an_issue_with_images_uploads_them_and_embeds_the_markdown() {
         base_url: url,
         allowed_actions: None,
         cwd: std::env::temp_dir(),
+        attachments_repo: None,
         });
     std::fs::create_dir_all(project.dir.join("shots")).unwrap();
     std::fs::write(project.dir.join("shots/s1.jpg"), b"fake-jpeg-bytes").unwrap();
@@ -622,14 +634,20 @@ async fn an_issue_with_images_uploads_them_and_embeds_the_markdown() {
     assert!(out.contains("issue #7"), "{out}");
 
     let log = log.lock().unwrap().clone();
-    assert!(log.iter().any(|l| l.contains("flashagent-attachments")), "the branch was made");
     assert!(
-        log.iter().any(|l| l.starts_with("PUT /repos/own/repo/contents/attachments/issue-7/0-s1.jpg")),
-        "the image went to the attachments branch: {log:?}"
+        log.iter().any(|l| l.starts_with("POST /user/repos ")),
+        "the attachments repo was created on the bot account: {log:?}"
+    );
+    assert!(
+        log.iter().any(|l| l.starts_with("PUT /repos/flashagent-bot/rx-playa-attachments/contents/issue-7/0-s1.jpg")),
+        "the image went to the bot's attachments repo: {log:?}"
+    );
+    assert!(
+        !log.iter().any(|l| l.starts_with("PUT /repos/own/repo/contents/")),
+        "the project repo is never written to"
     );
     let patch = log.iter().find(|l| l.starts_with("PATCH /repos/own/repo/issues/7")).expect("body patched");
-    assert!(patch.contains("raw.githubusercontent.com"), "{patch}");
-    assert!(patch.contains("flashagent-attachments"), "{patch}");
+    assert!(patch.contains("raw.githubusercontent.com/flashagent-bot/rx-playa-attachments"), "{patch}");
 }
 
 #[tokio::test]
@@ -641,6 +659,7 @@ async fn an_image_path_that_escapes_the_project_is_refused() {
         base_url: url,
         allowed_actions: None,
         cwd: std::env::temp_dir(),
+        attachments_repo: None,
         });
     let out = flashagent_tools::scope_turn(async {
         project
@@ -670,6 +689,7 @@ async fn a_close_without_a_reason_is_refused_before_the_network() {
         base_url: url,
         allowed_actions: None,
         cwd: std::env::temp_dir(),
+        attachments_repo: None,
         });
     let out = flashagent_tools::scope_turn(async {
         project
@@ -691,6 +711,7 @@ async fn the_users_profile_cannot_close_an_issue() {
         base_url: url,
         allowed_actions: Some(vec!["search".into(), "create".into(), "comment".into()]),
         cwd: std::env::temp_dir(),
+        attachments_repo: None,
     });
     let out = project
         .raw(
@@ -716,6 +737,7 @@ async fn an_edit_with_nothing_to_change_is_refused() {
         base_url: url,
         allowed_actions: None,
         cwd: std::env::temp_dir(),
+        attachments_repo: None,
         });
     let out = flashagent_tools::scope_turn(async {
         project
@@ -746,6 +768,7 @@ async fn github_mutations_share_the_turn_budget_with_telegram() {
             base_url: gh_url,
             allowed_actions: None,
             cwd: std::env::temp_dir(),
+            attachments_repo: None,
         }),
     );
     let outs = flashagent_tools::scope_turn(async move {
