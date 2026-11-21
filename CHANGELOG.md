@@ -2,6 +2,13 @@
 
 ## b734 — The feed has one truth
 
+- **Questions are cards, not walls of text.** `user_interaction` ask is
+  now one editable message with option buttons and a live tally. In a
+  /report only the author's answer counts and a single click closes the
+  card at once; in the dev room everyone votes and Готово closes the
+  round. The model gets the tally and the majority, not a lone option.
+  A short, small GIF or video sticker becomes a 3 fps contact sheet, so
+  the brain sees the motion instead of one frame.
 - **A restarted bot never replays an old answer.** Each room's `main` turn
   now runs on the same serve client startup already fast-forwarded; before,
   the first turn after a restart got a fresh client at cursor zero, replayed
