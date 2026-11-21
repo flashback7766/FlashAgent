@@ -1,5 +1,42 @@
 # Changelog
 
+## b734 — The feed has one truth
+
+- **A restarted bot never replays an old answer.** Each room's `main` turn
+  now runs on the same serve client startup already fast-forwarded; before,
+  the first turn after a restart got a fresh client at cursor zero, replayed
+  the whole session feed — old replies, old text deltas and an old `done` —
+  and delivered a previous answer as the answer to a new question. A new
+  report or service session is fast-forwarded before its first turn too.
+- **The answer is the serve's own turn text.** The event deltas are only a
+  fallback; a duplicated or replayed feed entry can no longer stitch an old
+  answer onto a new one.
+- **The feed cursor is absolute.** `/events` reports `total`, the bot
+  resumes from it, and a total smaller than the cursor means the serve
+  restarted — the bot rereads instead of polling an empty feed forever. The
+  serve also trims its feed head (a bounded window), so a long-lived
+  process no longer grows its event vector without limit.
+- **Reply slots are keyed per chat.** Telegram numbers messages per chat;
+  the same id in two rooms named two different messages, so a users-chat
+  answer could be considered already-sent (or edit the dev room's slot).
+- **Service turns are quiet.** Issue bodies, digests, post drafts, dedup
+  verdicts and the pulse no longer flash a 💭/🔧 bubble that is then
+  deleted; they run in throwaway sessions and touch nothing in the room.
+- **Reports cannot be steered into service turns.** The reporter is
+  unbound before the issue body is written; a follow-up typed meanwhile
+  goes to `main`, not into the body prompt. A GitHub failure rebinds them
+  to the discussion instead of losing it.
+- **Approval buttons answer the session that waits.** A report session's
+  write approval was sent to `main`'s gate and timed out; the click now
+  reaches the right gate. Schedule loops fire on the first tick past their
+  time instead of possibly skipping the minute; the closed-issue watcher
+  looks two hours back to survive search-index lag.
+- **Small fixes:** `/remember` no longer crashes on an undefined name; the
+  pulse's busy check works after the first turn; floods during a long
+  split answer are retried; unaddressed photos in the users' chat are not
+  downloaded (with a week's retention for the ones that are); stale draft
+  buttons cannot publish or cancel the replacement draft.
+
 ## b733 — Named sessions: a report discussion runs in its own brain
 
 - **Every serve route addresses a session.** The `session` query parameter
