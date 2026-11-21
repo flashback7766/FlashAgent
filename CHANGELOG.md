@@ -22,6 +22,11 @@
 - **Service turns are quiet.** Issue bodies, digests, post drafts, dedup
   verdicts and the pulse no longer flash a 💭/🔧 bubble that is then
   deleted; they run in throwaway sessions and touch nothing in the room.
+- **The morning digest reports one day, once.** It reads the users' room
+  log for the last 24 hours instead of the whole week, its once-a-day key
+  persists across restarts (a restart after 09:00 does not re-send it), and
+  the prod config drops the 12-minute dev pulse in favour of the 09:00
+  digest.
 - **Reports cannot be steered into service turns.** The reporter is
   unbound before the issue body is written; a follow-up typed meanwhile
   goes to `main`, not into the body prompt. A GitHub failure rebinds them
