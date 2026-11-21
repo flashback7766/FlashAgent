@@ -2120,7 +2120,8 @@ mod tests {
         chat.on_event(&LoopEvent::ToolStarted { id: "c".into(), name: "run_shell".into(), args_json: r#"{"command":"ls"}"#.into() });
         // Turn 1's recap arrives while turn 2's tool is still running.
         chat.attach_turn_recap(1, "recap: one");
-        chat.on_event(&LoopEvent::ToolFinished { id: "c".into(), is_error: false, result_len: 1, result: Some("x".into()) });
+        chat.on_event(&LoopEvent::ToolFinished {
+                        name: "test".into(), id: "c".into(), is_error: false, result_len: 1, result: Some("x".into()) });
         chat.on_event(&LoopEvent::TurnDelta("answer two".into()));
         let (settled, live) = chat.render_split(100, ReasoningExpansion::default());
         let text: Vec<String> = settled.iter().chain(live.iter()).map(|(_, l)| strip_ansi(l)).collect();
@@ -2160,7 +2161,8 @@ mod tests {
             name: "grep".into(),
             args_json: r#"{"pattern":"x"}"#.into(),
         });
-        v.on_event(&LoopEvent::ToolFinished { id: "t1".into(), is_error: false, result_len: 10, result: None });
+        v.on_event(&LoopEvent::ToolFinished {
+                        name: "test".into(), id: "t1".into(), is_error: false, result_len: 10, result: None });
         v.on_event(&LoopEvent::Done(flashagent_core::DoneReason::Completed));
 
         let lines = v.render(80);
@@ -2389,7 +2391,8 @@ mod tests {
             name: "run_shell".into(),
             args_json: r#"{"command":"false"}"#.into(),
         });
-        v.on_event(&LoopEvent::ToolFinished { id: "t2".into(), is_error: true, result_len: 0, result: None });
+        v.on_event(&LoopEvent::ToolFinished {
+                        name: "test".into(), id: "t2".into(), is_error: true, result_len: 0, result: None });
         let (settled, live) = v.render_split(80, false);
         let lines: Vec<_> = settled.iter().cloned().chain(live).collect();
         assert!(lines.iter().any(|(k, t)| *k == LineKind::ToolError && t.contains("Failed") && t.contains("false") && (t.contains('›') || t.contains('>'))));
@@ -2403,7 +2406,8 @@ mod tests {
             name: "run_shell".into(),
             args_json: r#"{"command":"cargo test -p flashagent-llm"}"#.into(),
         });
-        v.on_event(&LoopEvent::ToolFinished { id: "c1".into(), is_error: false, result_len: 100, result: None });
+        v.on_event(&LoopEvent::ToolFinished {
+                        name: "test".into(), id: "c1".into(), is_error: false, result_len: 100, result: None });
         let (settled, live) = v.render_split(100, false);
         let all: Vec<_> = settled.iter().cloned().chain(live).collect();
         assert!(all.iter().any(|(_, t)| t.contains("Ran") && t.contains("cargo test -p flashagent-llm") && (t.contains('›') || t.contains('>'))));
@@ -2414,19 +2418,22 @@ mod tests {
             name: "run_shell".into(),
             args_json: r#"{"command":"cargo check"}"#.into(),
         });
-        v2.on_event(&LoopEvent::ToolFinished { id: "c1".into(), is_error: false, result_len: 10, result: None });
+        v2.on_event(&LoopEvent::ToolFinished {
+                        name: "test".into(), id: "c1".into(), is_error: false, result_len: 10, result: None });
         v2.on_event(&LoopEvent::ToolStarted {
             id: "c2".into(),
             name: "run_shell".into(),
             args_json: r#"{"command":"cargo test"}"#.into(),
         });
-        v2.on_event(&LoopEvent::ToolFinished { id: "c2".into(), is_error: false, result_len: 10, result: None });
+        v2.on_event(&LoopEvent::ToolFinished {
+                        name: "test".into(), id: "c2".into(), is_error: false, result_len: 10, result: None });
         v2.on_event(&LoopEvent::ToolStarted {
             id: "c3".into(),
             name: "run_shell".into(),
             args_json: r#"{"command":"cargo clippy"}"#.into(),
         });
-        v2.on_event(&LoopEvent::ToolFinished { id: "c3".into(), is_error: false, result_len: 10, result: None });
+        v2.on_event(&LoopEvent::ToolFinished {
+                        name: "test".into(), id: "c3".into(), is_error: false, result_len: 10, result: None });
         let (settled2, live2) = v2.render_split(100, false);
         let all2: Vec<_> = settled2.iter().cloned().chain(live2).collect();
         let text2 = all2.iter().map(|(_, t)| strip_ansi(t)).collect::<Vec<_>>().join("\n");
@@ -2440,7 +2447,8 @@ mod tests {
             name: "edit_file".into(),
             args_json: r#"{"path":"crates/tui/src/lib.rs","edits":[{"old_string":"","new_string":"line1\nline2\n"}]}"#.into(),
         });
-        v3.on_event(&LoopEvent::ToolFinished { id: "e1".into(), is_error: false, result_len: 50, result: None });
+        v3.on_event(&LoopEvent::ToolFinished {
+                        name: "test".into(), id: "e1".into(), is_error: false, result_len: 50, result: None });
         let (settled3, live3) = v3.render_split(100, false);
         let all3: Vec<_> = settled3.iter().cloned().chain(live3).collect();
         assert!(all3.iter().any(|(_, t)| t.contains("Edited") && t.contains("crates/tui/src/lib.rs") && t.contains("requested") && t.contains("+2")));
@@ -2453,14 +2461,16 @@ mod tests {
                 name: "read_file".into(),
                 args_json: format!(r#"{{"path":"file{i}.rs"}}"#),
             });
-            v4.on_event(&LoopEvent::ToolFinished { id: format!("f{i}"), is_error: false, result_len: 10, result: None });
+            v4.on_event(&LoopEvent::ToolFinished {
+                        name: "test".into(), id: format!("f{i}"), is_error: false, result_len: 10, result: None });
         }
         v4.on_event(&LoopEvent::ToolStarted {
             id: "s1".into(),
             name: "grep".into(),
             args_json: r#"{"pattern":"needle"}"#.into(),
         });
-        v4.on_event(&LoopEvent::ToolFinished { id: "s1".into(), is_error: false, result_len: 10, result: None });
+        v4.on_event(&LoopEvent::ToolFinished {
+                        name: "test".into(), id: "s1".into(), is_error: false, result_len: 10, result: None });
         let (settled4, live4) = v4.render_split(100, false);
         let all4: Vec<_> = settled4.iter().cloned().chain(live4).collect();
         assert!(all4.iter().any(|(_, t)| t.contains("Explored 4 files, 1 search") && (t.contains('›') || t.contains('>'))));
@@ -2471,7 +2481,8 @@ mod tests {
             name: "memory_read".into(),
             args_json: r#"{"scope":"project"}"#.into(),
         });
-        v5.on_event(&LoopEvent::ToolFinished { id: "m1".into(), is_error: false, result_len: 100, result: None });
+        v5.on_event(&LoopEvent::ToolFinished {
+                        name: "test".into(), id: "m1".into(), is_error: false, result_len: 100, result: None });
         let (settled5, live5) = v5.render_split(100, false);
         let all5: Vec<_> = settled5.iter().cloned().chain(live5).collect();
         assert!(all5.iter().any(|(_, t)| t.contains("Read memory") && t.contains("[project]") && (t.contains('›') || t.contains('>'))));
@@ -2484,13 +2495,15 @@ mod tests {
             name: "memory_read".into(),
             args_json: r#"{"scope":"project"}"#.into(),
         });
-        v5b.on_event(&LoopEvent::ToolFinished { id: "m1".into(), is_error: false, result_len: 50, result: None });
+        v5b.on_event(&LoopEvent::ToolFinished {
+                        name: "test".into(), id: "m1".into(), is_error: false, result_len: 50, result: None });
         v5b.on_event(&LoopEvent::ToolStarted {
             id: "m2".into(),
             name: "memory_read".into(),
             args_json: r#"{"scope":"global"}"#.into(),
         });
-        v5b.on_event(&LoopEvent::ToolFinished { id: "m2".into(), is_error: false, result_len: 50, result: None });
+        v5b.on_event(&LoopEvent::ToolFinished {
+                        name: "test".into(), id: "m2".into(), is_error: false, result_len: 50, result: None });
         let (settled5b, live5b) = v5b.render_split(100, false);
         let all5b: Vec<_> = settled5b.iter().cloned().chain(live5b).collect();
         assert_eq!(all5b.len(), 2, "memory reads remain separate");
@@ -2503,7 +2516,8 @@ mod tests {
             name: "user_interaction".into(),
             args_json: r#"{"question":"Deploy now?"}"#.into(),
         });
-        v6.on_event(&LoopEvent::ToolFinished { id: "u1".into(), is_error: false, result_len: 5, result: None });
+        v6.on_event(&LoopEvent::ToolFinished {
+                        name: "test".into(), id: "u1".into(), is_error: false, result_len: 5, result: None });
         let (settled6, live6) = v6.render_split(100, false);
         let all6: Vec<_> = settled6.iter().cloned().chain(live6).collect();
         assert!(all6.iter().any(|(_, t)| t.contains("Asked user:") && t.contains("Deploy now?") && (t.contains('›') || t.contains('>'))));
@@ -2797,7 +2811,8 @@ mod tests {
             name: "edit_file".into(),
             args_json: r#"{"header":"Add a second println to main","path":"src/main.rs","edits":[{"old_string":"one","new_string":"one\ntwo"}]}"#.into(),
         });
-        chat.on_event(&LoopEvent::ToolFinished { id: "e".into(), is_error: false, result_len: 1, result: Some("ok".into()) });
+        chat.on_event(&LoopEvent::ToolFinished {
+                        name: "test".into(), id: "e".into(), is_error: false, result_len: 1, result: Some("ok".into()) });
         let (settled, live) = chat.render_split(110, ReasoningExpansion::none());
         let dump = settled.iter().chain(live.iter()).map(|(_, t)| strip_ansi(t)).collect::<Vec<_>>().join("\n");
         assert!(dump.contains("Edited src/main.rs") && dump.contains("requested +2 -1"), "{dump}");
@@ -2849,7 +2864,8 @@ mod tests {
         let mut chat = ChatView::default();
         chat.push_user("look around");
         chat.on_event(&LoopEvent::ToolStarted { id: "a".into(), name: "list_dir".into(), args_json: "{}".into() });
-        chat.on_event(&LoopEvent::ToolFinished { id: "a".into(), is_error: false, result_len: 1, result: Some("x".into()) });
+        chat.on_event(&LoopEvent::ToolFinished {
+                        name: "test".into(), id: "a".into(), is_error: false, result_len: 1, result: Some("x".into()) });
         let (settled, live) = chat.render_split(100, ReasoningExpansion::default());
         let dump: String = settled.iter().chain(live.iter()).map(|(_, t)| strip_ansi(t)).collect::<Vec<_>>().join("\n");
         assert!(dump.contains("Analyzed . · 1 entry"), "the exact directory and its result stay visible: {dump}");
@@ -3339,6 +3355,7 @@ hm".into()));
         assert!(running.contains("Editing src/parser.rs"), "{running}");
         assert!(!running.contains("Add the missing null check"), "the model's intent stays in the body");
         v.on_event(&LoopEvent::ToolFinished {
+                        name: "test".into(),
             id: "1".into(),
             is_error: true,
             result_len: 5,
@@ -3831,6 +3848,7 @@ hm".into()));
             args_json: r#"{"command":"cargo check"}"#.into(),
         });
         chat.on_event(&LoopEvent::ToolFinished {
+                        name: "test".into(),
             id: "t1".into(),
             is_error: false,
             result_len: 20,
@@ -3842,6 +3860,7 @@ hm".into()));
             args_json: r#"{"path":"src/main.rs"}"#.into(),
         });
         chat.on_event(&LoopEvent::ToolFinished {
+                        name: "test".into(),
             id: "t2".into(),
             is_error: false,
             result_len: 25,
@@ -3853,6 +3872,7 @@ hm".into()));
             args_json: r#"{"path":".audit"}"#.into(),
         });
         chat.on_event(&LoopEvent::ToolFinished {
+                        name: "test".into(),
             id: "t3".into(),
             is_error: false,
             result_len: 30,

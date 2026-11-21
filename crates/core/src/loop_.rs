@@ -114,6 +114,9 @@ pub enum LoopEvent {
     },
     ToolFinished {
         id: String,
+        /// The tool this result belongs to — the feed's reader needs to know
+        /// which result a line is about (e.g. a github issue adoption).
+        name: String,
         is_error: bool,
         /// In characters.
         result_len: usize,
@@ -992,6 +995,7 @@ impl AgentLoop {
                     events(LoopEvent::ToolStarted { id: call.id.clone(), name: call.name.clone(), args_json: call.args_json.clone() });
                     events(LoopEvent::ToolFinished {
                         id: call.id.clone(),
+                        name: call.name.clone(),
                         is_error: true,
                         result_len: TRUNCATED_RESULT.len(),
                         result: Some(TRUNCATED_RESULT.to_string()),
@@ -1047,6 +1051,7 @@ impl AgentLoop {
                         let (content, is_error) = finished.map_or((STOPPED_RESULT.to_string(), true), |out| (out.content, out.is_error));
                         events(LoopEvent::ToolFinished {
                             id: call.id.clone(),
+                            name: call.name.clone(),
                             is_error,
                             result_len: content.chars().count(),
                             result: Some(content.clone()),
@@ -1061,6 +1066,7 @@ impl AgentLoop {
                 };
                 events(LoopEvent::ToolFinished {
                     id: call.id.clone(),
+                    name: call.name.clone(),
                     is_error: out.is_error,
                     result_len: out.content.chars().count(),
                     result: Some(out.content.clone()),

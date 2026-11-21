@@ -16,6 +16,7 @@ fn tool(chat: &mut ChatView, name: &str, args: serde_json::Value, result: &str) 
     });
     chat.on_event(&LoopEvent::ToolFinished {
         id: "t".into(),
+        name: name.into(),
         is_error: false,
         result_len: result.len(),
         result: Some(result.into()),

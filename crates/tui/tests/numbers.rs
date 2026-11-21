@@ -20,7 +20,7 @@ fn session(turns: usize) -> ChatView {
             name: "read_file".into(),
             args_json: r#"{"header":"Reading the file","path":"src/main.rs"}"#.into(),
         });
-        chat.on_event(&LoopEvent::ToolFinished { id: format!("t{n}"), is_error: false, result_len: 900, result: Some("fn main() {}".into()) });
+        chat.on_event(&LoopEvent::ToolFinished { id: format!("t{n}"), name: "test".into(), is_error: false, result_len: 900, result: Some("fn main() {}".into()) });
         chat.on_event(&LoopEvent::TurnDelta(
             "It parses the arguments, **opens the config** and starts the loop:\n\n- one\n- two\n\n```rust\nfn main() {}\n```\n".into(),
         ));

@@ -38,6 +38,7 @@ impl Project {
                 repo: "own/repo".into(),
                 base_url: "http://127.0.0.1:1".into(),
                 allowed_actions: None,
+                cwd: std::env::temp_dir(),
             }),
         )
     }
@@ -73,6 +74,12 @@ impl Project {
         // Memory resolves through this home, never the owner's.
         let home = dir.join("home");
         std::fs::create_dir_all(&home).unwrap();
+        // The github tool resolves image paths against the project folder,
+        // exactly as the serve does.
+        let gh = gh.map(|mut cfg| {
+            cfg.cwd = dir.clone();
+            cfg
+        });
 
         let tools = Arc::new(
             BuiltinTools::new(BuiltinToolsConfig {
@@ -472,7 +479,8 @@ async fn a_github_search_finds_the_similar_report() {
         repo: "own/repo".into(),
         base_url: url,
         allowed_actions: None,
-    });
+        cwd: std::env::temp_dir(),
+        });
     let out = project
         .call(
             "github",
@@ -491,7 +499,8 @@ async fn an_issue_is_filed_through_the_mock_and_names_itself() {
         repo: "own/repo".into(),
         base_url: url,
         allowed_actions: None,
-    });
+        cwd: std::env::temp_dir(),
+        });
     let out = flashagent_tools::scope_turn(async {
         project
             .call(
@@ -506,6 +515,151 @@ async fn an_issue_is_filed_through_the_mock_and_names_itself() {
 }
 
 
+
+/// A mock that records every request: the attachments flow needs several
+/// endpoints answered differently.
+async fn mock_github_recording() -> (String, std::sync::Arc<std::sync::Mutex<Vec<String>>>) {
+    use std::sync::{Arc, Mutex};
+    let log: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let sink = log.clone();
+    tokio::spawn(async move {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        loop {
+            let Ok((mut sock, _)) = listener.accept().await else { break };
+            let mut buf = Vec::new();
+            loop {
+                let head_end = buf.windows(4).position(|w| w == b"\r\n\r\n");
+                let complete = match head_end {
+                    Some(pos) => {
+                        let cl = buf
+                            .split(|b| *b == b'\n')
+                            .find_map(|line| {
+                                let line = line.trim_ascii();
+                                line.to_ascii_lowercase()
+                                    .strip_prefix(b"content-length:")
+                                    .map(|rest| {
+                                        std::str::from_utf8(rest)
+                                            .unwrap_or("0")
+                                            .trim()
+                                            .parse::<usize>()
+                                            .unwrap_or(0)
+                                    })
+                            })
+                            .unwrap_or(0);
+                        buf.len() >= pos + 4 + cl
+                    }
+                    None => false,
+                };
+                if complete { break; }
+                let mut chunk = [0u8; 8192];
+                let n = sock.read(&mut chunk).await.unwrap_or(0);
+                if n == 0 { break; }
+                buf.extend_from_slice(&chunk[..n]);
+            }
+            let head = String::from_utf8_lossy(&buf).to_string();
+            let body = String::from_utf8_lossy(
+                &buf[head.find("\r\n\r\n").map(|p| p + 4).unwrap_or(buf.len())..],
+            )
+            .to_string();
+            sink.lock().unwrap().push(format!("{} || {}", head.lines().next().unwrap_or(""), body));
+            let (status, payload) = if head.starts_with("GET /repos/own/repo ") {
+                (200, "{\"default_branch\": \"main\"}".to_string())
+            } else if head.contains("/git/ref/heads/flashagent-attachments") {
+                (404, "{\"message\":\"Not Found\"}".to_string())
+            } else if head.contains("/git/ref/heads/main") {
+                (200, "{\"object\": {\"sha\": \"abc123\"}}".to_string())
+            } else if head.starts_with("POST /repos/own/repo/git/refs") {
+                (201, "{\"ref\": \"refs/heads/flashagent-attachments\"}".to_string())
+            } else if head.starts_with("PUT /repos/own/repo/contents/") {
+                (201, "{\"content\": {}}".to_string())
+            } else if head.starts_with("POST /repos/own/repo/issues ") {
+                (201, "{\"number\": 7, \"html_url\": \"https://github.com/own/repo/issues/7\"}".to_string())
+            } else if head.starts_with("PATCH /repos/own/repo/issues/7") {
+                (200, "{\"number\": 7}".to_string())
+            } else {
+                (200, "{}".to_string())
+            };
+            let resp = format!(
+                "HTTP/1.1 {status} X\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{payload}",
+                payload.len()
+            );
+            let _ = sock.write_all(resp.as_bytes()).await;
+            let _ = sock.shutdown().await;
+        }
+    });
+    (format!("http://{addr}"), log)
+}
+
+#[tokio::test]
+async fn an_issue_with_images_uploads_them_and_embeds_the_markdown() {
+    let (url, log) = mock_github_recording().await;
+    let project = Project::with_github(flashagent_tools::GitHubConfig {
+        token: "t".into(),
+        repo: "own/repo".into(),
+        base_url: url,
+        allowed_actions: None,
+        cwd: std::env::temp_dir(),
+        });
+    std::fs::create_dir_all(project.dir.join("shots")).unwrap();
+    std::fs::write(project.dir.join("shots/s1.jpg"), b"fake-jpeg-bytes").unwrap();
+
+    let out = flashagent_tools::scope_turn(async {
+        project
+            .call(
+                "github",
+                serde_json::json!({
+                    "action": "create",
+                    "title": "Тест",
+                    "body": "Репортёр: @u (Юзер)\n\nтело",
+                    "images": ["shots/s1.jpg"],
+                }),
+            )
+            .await
+    })
+    .await;
+    assert!(out.contains("issue #7"), "{out}");
+
+    let log = log.lock().unwrap().clone();
+    assert!(log.iter().any(|l| l.contains("flashagent-attachments")), "the branch was made");
+    assert!(
+        log.iter().any(|l| l.starts_with("PUT /repos/own/repo/contents/attachments/issue-7/0-s1.jpg")),
+        "the image went to the attachments branch: {log:?}"
+    );
+    let patch = log.iter().find(|l| l.starts_with("PATCH /repos/own/repo/issues/7")).expect("body patched");
+    assert!(patch.contains("raw.githubusercontent.com"), "{patch}");
+    assert!(patch.contains("flashagent-attachments"), "{patch}");
+}
+
+#[tokio::test]
+async fn an_image_path_that_escapes_the_project_is_refused() {
+    let (url, _log) = mock_github_recording().await;
+    let project = Project::with_github(flashagent_tools::GitHubConfig {
+        token: "t".into(),
+        repo: "own/repo".into(),
+        base_url: url,
+        allowed_actions: None,
+        cwd: std::env::temp_dir(),
+        });
+    let out = flashagent_tools::scope_turn(async {
+        project
+            .raw(
+                "github",
+                serde_json::json!({
+                    "action": "create",
+                    "title": "x",
+                    "body": "y",
+                    "images": ["../../etc/passwd"],
+                }),
+            )
+            .await
+    })
+    .await;
+    assert!(out.is_error, "{}", out.content);
+    assert!(out.content.contains("относительным"), "{}", out.content);
+}
+
 #[tokio::test]
 async fn a_close_without_a_reason_is_refused_before_the_network() {
     // D9: the reason lands in the issue; a silent close is a lost sentence.
@@ -515,7 +669,8 @@ async fn a_close_without_a_reason_is_refused_before_the_network() {
         repo: "own/repo".into(),
         base_url: url,
         allowed_actions: None,
-    });
+        cwd: std::env::temp_dir(),
+        });
     let out = flashagent_tools::scope_turn(async {
         project
             .raw("github", serde_json::json!({"action": "close", "number": 7}))
@@ -535,6 +690,7 @@ async fn the_users_profile_cannot_close_an_issue() {
         repo: "own/repo".into(),
         base_url: url,
         allowed_actions: Some(vec!["search".into(), "create".into(), "comment".into()]),
+        cwd: std::env::temp_dir(),
     });
     let out = project
         .raw(
@@ -559,7 +715,8 @@ async fn an_edit_with_nothing_to_change_is_refused() {
         repo: "own/repo".into(),
         base_url: url,
         allowed_actions: None,
-    });
+        cwd: std::env::temp_dir(),
+        });
     let out = flashagent_tools::scope_turn(async {
         project
             .raw("github", serde_json::json!({"action": "edit", "number": 7}))
@@ -588,6 +745,7 @@ async fn github_mutations_share_the_turn_budget_with_telegram() {
             repo: "own/repo".into(),
             base_url: gh_url,
             allowed_actions: None,
+            cwd: std::env::temp_dir(),
         }),
     );
     let outs = flashagent_tools::scope_turn(async move {

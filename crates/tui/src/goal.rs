@@ -473,6 +473,7 @@ mod tests {
     fn ev_finished(id: &str, is_error: bool, result: &str) -> LoopEvent {
         LoopEvent::ToolFinished {
             id: id.into(),
+            name: "test".into(),
             is_error,
             result_len: result.len(),
             result: Some(result.into()),

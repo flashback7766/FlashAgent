@@ -304,12 +304,13 @@ fn event_to_json(event: &flashagent_core::LoopEvent) -> serde_json::Value {
                 })
                 .unwrap_or_default(),
         }),
-        LoopEvent::ToolFinished { is_error, result_len, result, .. } => {
+        LoopEvent::ToolFinished { name, is_error, result_len, result, .. } => {
             // The verdict line rides along, capped: the bot watches a
             // `github` result for the issue it just adopted, and a log line
             // beats a bare length when a room asks what happened.
             serde_json::json!({
                 "type": "tool_end",
+                "name": name,
                 "ok": !is_error,
                 "result_len": result_len,
                 "result": result
@@ -1340,6 +1341,9 @@ pub(crate) async fn run_serve(mut config: flashagent_core::AppConfig, opts: Serv
         cfg.allowed_actions = profile
             .and_then(|p| p.github_actions)
             .map(|list| list.iter().map(|s| s.to_string()).collect());
+        // The screenshots the model names are paths inside the room's
+        // folder, not the process cwd.
+        cfg.cwd = cwd.clone();
         cfg
     });
     let tools = Arc::new(flashagent_tools::BuiltinTools::new(flashagent_tools::BuiltinToolsConfig {

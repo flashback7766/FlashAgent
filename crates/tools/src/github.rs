@@ -20,6 +20,9 @@ pub struct GitHubConfig {
     /// Actions this serve may use; None = all. The users' room files and
     /// amends but does not close (D5): closing is the dev room's word.
     pub allowed_actions: Option<Vec<String>>,
+    /// Where the serve's working folder is: the screenshots the model names
+    /// are paths inside it (`shots/...`), never the process cwd.
+    pub cwd: std::path::PathBuf,
 }
 
 impl GitHubConfig {
@@ -35,6 +38,7 @@ impl GitHubConfig {
             repo: repo.trim().to_string(),
             base_url: "https://api.github.com".into(),
             allowed_actions: None,
+            cwd: std::path::PathBuf::from("."),
         })
     }
 }
@@ -50,6 +54,7 @@ pub struct GitHubArgs {
     pub labels: Option<String>,
     pub path: Option<String>,
     pub sha: Option<String>,
+    pub images: Option<Vec<String>>,
 }
 
 /// GitHub answers within seconds or the turn is stalling on it (H14).
@@ -109,7 +114,20 @@ impl GitHub {
                 let title = Self::need("title", &a.title, "create")?;
                 let body = Self::need("body", &a.body, "create")?;
                 charge()?;
-                self.create(title, body, a.labels.as_deref()).await
+                self.create(title, body, a.labels.as_deref(), a.images.as_deref())
+                    .await
+            }
+            "attach" => {
+                let number = a
+                    .number
+                    .ok_or_else(|| ToolError::Other("err: attach требует number".into()))?;
+                let images = a
+                    .images
+                    .as_deref()
+                    .filter(|list| !list.is_empty())
+                    .ok_or_else(|| ToolError::Other("err: attach требует images".into()))?;
+                charge()?;
+                self.attach(number, images).await
             }
             "comment" => {
                 let number = a
@@ -274,7 +292,13 @@ impl GitHub {
         Ok(format!("ok: issue #{number} обновлён"))
     }
 
-    async fn create(&self, title: &str, body: &str, labels: Option<&str>) -> Result<String, ToolError> {
+    async fn create(
+        &self,
+        title: &str,
+        body: &str,
+        labels: Option<&str>,
+        images: Option<&[String]>,
+    ) -> Result<String, ToolError> {
         let mut payload = serde_json::json!({ "title": title, "body": body });
         if let Some(labels) = labels.map(str::trim).filter(|l| !l.is_empty()) {
             let list: Vec<&str> = labels.split(',').map(str::trim).filter(|l| !l.is_empty()).collect();
@@ -283,7 +307,136 @@ impl GitHub {
         let value = self.call(reqwest::Method::POST, "/issues", Some(payload)).await?;
         let number = value.get("number").and_then(serde_json::Value::as_i64).unwrap_or(0);
         let url = value.get("html_url").and_then(serde_json::Value::as_str).unwrap_or("");
+        if let Some(images) = images.filter(|list| !list.is_empty()) {
+            // The body already exists; the images are appended as markdown
+            // so the issue renders them and a human can download them.
+            let (markdown, uploaded) = self.upload_images(number, images).await?;
+            if uploaded > 0 {
+                let full = format!("{body}{markdown}");
+                self.call(
+                    reqwest::Method::PATCH,
+                    &format!("/issues/{number}"),
+                    Some(serde_json::json!({ "body": full })),
+                )
+                .await?;
+            }
+        }
         Ok(format!("ok: заведён issue #{number} {url}"))
+    }
+
+    /// Uploads one image per request into `attachments/issue-<n>/` on the
+    /// attachments branch and appends the markdown to the issue body.
+    /// GitHub's API cannot host uploads with a token; a branch of the same
+    /// repo is the one place a token can write an image to.
+    async fn upload_images(
+        &self,
+        number: i64,
+        images: &[String],
+    ) -> Result<(String, usize), ToolError> {
+        self.ensure_branch().await?;
+        let mut lines = Vec::new();
+        let mut uploaded = 0;
+        for (i, path) in images.iter().enumerate() {
+            let local = path.trim().trim_start_matches("./");
+            if local.is_empty() {
+                continue;
+            }
+            // Project-relative only: the model names the file the journal
+            // named; an absolute path is not this tool's business.
+            if std::path::Path::new(local).is_absolute() || local.contains("..") {
+                return Err(ToolError::Other(format!(
+                    "err: картинка '{path}' — путь должен быть относительным путём проекта"
+                )));
+            }
+            let bytes = std::fs::read(self.cfg.cwd.join(local)).map_err(|e| {
+                ToolError::Other(format!("err: картинка '{path}' не читается ({e})"))
+            })?;
+            if bytes.len() > 5_000_000 {
+                return Err(ToolError::Other(format!(
+                    "err: картинка '{path}' больше 5 МБ — GitHub API это не примет"
+                )));
+            }
+            let name = std::path::Path::new(local)
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("image");
+            let remote = format!("attachments/issue-{number}/{i}-{name}");
+            let b64 = base64_encode(&bytes);
+            self.call(
+                reqwest::Method::PUT,
+                &format!("/contents/{remote}"),
+                Some(serde_json::json!({
+                    "message": format!("issue #{number}: attachment {name}"),
+                    "content": b64,
+                    "branch": "flashagent-attachments",
+                })),
+            )
+            .await?;
+            let url = format!(
+                "https://raw.githubusercontent.com/{}/flashagent-attachments/{}",
+                self.cfg.repo, remote
+            );
+            lines.push(format!("![скрин {i}]({url})"));
+            uploaded += 1;
+        }
+        if uploaded == 0 {
+            return Ok((String::new(), 0));
+        }
+        Ok((format!("\n\n{}", lines.join("\n")), uploaded))
+    }
+
+    /// The attachments branch: created once from the default head, reused
+    /// after. A 404 on the ref is the "not yet" signal.
+    async fn ensure_branch(&self) -> Result<(), ToolError> {
+        let url = format!(
+            "{}/repos/{}/git/ref/heads/flashagent-attachments",
+            self.cfg.base_url, self.cfg.repo
+        );
+        let resp = self
+            .http
+            .get(&url)
+            .bearer_auth(&self.cfg.token)
+            .header("Accept", "application/vnd.github+json")
+            .send()
+            .await
+            .map_err(|e| ToolError::Other(format!("err: GitHub недоступен ({e})")))?;
+        if resp.status().is_success() {
+            return Ok(());
+        }
+        // Point the new branch at the default branch's head.
+        let repo = self.call(reqwest::Method::GET, "", None).await?;
+        let default = repo
+            .get("default_branch")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("main");
+        let head = self
+            .call(reqwest::Method::GET, &format!("/git/ref/heads/{default}"), None)
+            .await?;
+        let sha = head
+            .get("object")
+            .and_then(|o| o.get("sha"))
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| ToolError::Other("err: не вижу head для ветки вложений".into()))?;
+        self.call(
+            reqwest::Method::POST,
+            "/git/refs",
+            Some(serde_json::json!({
+                "ref": "refs/heads/flashagent-attachments",
+                "sha": sha,
+            })),
+        )
+        .await?;
+        Ok(())
+    }
+
+    /// Dokiдывает скрины к готовому issue: картинки в ветку, markdown — комментарием.
+    async fn attach(&self, number: i64, images: &[String]) -> Result<String, ToolError> {
+        let (markdown, uploaded) = self.upload_images(number, images).await?;
+        if uploaded == 0 {
+            return Err(ToolError::Other("err: ни одна картинка не загрузилась".into()));
+        }
+        self.comment(number, markdown.trim()).await?;
+        Ok(format!("ok: {uploaded} скрин(ов) прикреплено к #{number}"))
     }
 
     async fn commits(&self) -> Result<String, ToolError> {
@@ -363,6 +516,20 @@ impl GitHub {
     }
 }
 
+fn base64_encode(input: &[u8]) -> String {
+    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(input.len().div_ceil(3) * 4);
+    for chunk in input.chunks(3) {
+        let b = [chunk[0], *chunk.get(1).unwrap_or(&0), *chunk.get(2).unwrap_or(&0)];
+        let n = ((b[0] as u32) << 16) | ((b[1] as u32) << 8) | b[2] as u32;
+        out.push(TABLE[(n >> 18) as usize & 63] as char);
+        out.push(TABLE[(n >> 12) as usize & 63] as char);
+        out.push(if chunk.len() > 1 { TABLE[(n >> 6) as usize & 63] as char } else { '=' });
+        out.push(if chunk.len() > 2 { TABLE[n as usize & 63] as char } else { '=' });
+    }
+    out
+}
+
 fn base64_decode(input: &str) -> Result<Vec<u8>, ToolError> {
     const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut lookup = [255u8; 256];
@@ -421,6 +588,7 @@ mod tests {
             repo: "own/repo".into(),
             base_url: "http://127.0.0.1:1".into(),
             allowed_actions: None,
+            cwd: std::env::temp_dir(),
         })
         .unwrap()
     }

@@ -273,7 +273,8 @@ mod tests {
         let mut tree = AgentTree::default();
         tree.apply(&ev("sub1", "researcher", LoopEvent::StepStarted { step: 1, max_steps: Some(8) }));
         tree.apply(&ev("sub1", "researcher", LoopEvent::ToolStarted { id: "a".into(), name: "read".into(), args_json: "{\"path\":\"src/main.rs\"}".into() }));
-        tree.apply(&ev("sub1", "researcher", LoopEvent::ToolFinished { id: "a".into(), is_error: false, result: Some("fn main() {}".into()), result_len: 12 }));
+        tree.apply(&ev("sub1", "researcher", LoopEvent::ToolFinished {
+                        name: "test".into(), id: "a".into(), is_error: false, result: Some("fn main() {}".into()), result_len: 12 }));
         tree.apply(&ev("sub1", "researcher", LoopEvent::TurnDelta("Found it in src/main.rs.".into())));
         tree.apply(&ev("sub1", "researcher", LoopEvent::Done(DoneReason::Completed)));
         tree.record_answer("sub1", "The bug is in src/main.rs:12.");
@@ -308,7 +309,8 @@ mod tests {
         let mut tree = AgentTree::default();
         for i in 0..600 {
             tree.apply(&ev("sub1", "coder", LoopEvent::ToolStarted { id: format!("t{i}"), name: "read".into(), args_json: "{\"path\":\"a\"}".into() }));
-            tree.apply(&ev("sub1", "coder", LoopEvent::ToolFinished { id: format!("t{i}"), is_error: false, result: Some("ok".into()), result_len: 2 }));
+            tree.apply(&ev("sub1", "coder", LoopEvent::ToolFinished {
+                        name: "test".into(), id: format!("t{i}"), is_error: false, result: Some("ok".into()), result_len: 2 }));
         }
         let view = AgentsView::new(&tree, 100);
         assert!(view.transcript_len() <= 400, "the child's transcript is unbounded: {}", view.transcript_len());

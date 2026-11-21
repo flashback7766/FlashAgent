@@ -696,7 +696,7 @@ pub static TOOLS: &[ToolDef] = &[
     },
     ToolDef {
         name: "github",
-        description: "Issues и код репозитория проекта. search ищет существующие по строке — всегда ищи, прежде чем создавать: похожий баг уходит комментарием, а закрытый — reopen'ом с комментарием. get читает один issue (number). create заводит новый (title, body по-русски, labels). comment пишет комментарий (number, body). close/reopen требуют comment (причина остаётся в issue). edit правит заголовок/тело (number, title?, body?). commits, file (path) и diff (sha) читают код. Репозиторий один, параметра нет.",
+        description: "Issues и код репозитория проекта. search ищет существующие по строке — всегда ищи, прежде чем создавать: похожий баг уходит комментарием, а закрытый — reopen'ом с комментарием. get читает один issue (number). create заводит новый (title, body по-русски, labels, images — скрины прикрепляются к issue и видны на GitHub). comment пишет комментарий (number, body). close/reopen требуют comment (причина остаётся в issue). edit правит заголовок/тело (number, title?, body?). commits, file (path) и diff (sha) читают код. attach докидывает скрины к готовому issue. Репозиторий один, параметра нет.",
         params: &[
             GH_ACTION,
             opt_str("query", "Для search: слова, которые заведомо есть в похожем issue"),
@@ -707,6 +707,7 @@ pub static TOOLS: &[ToolDef] = &[
             opt_str("labels", "Для create: метки через запятую (bug, enhancement)"),
             opt_str("path", "Для file: путь файла в репозитории"),
             opt_str("sha", "Для diff: хеш коммита (по умолчанию последний)"),
+            strings("images", "Для create/attach: локальные пути картинок (shots/...) — будут загружены в ветку вложений и показаны в issue"),
         ],
         required: &["action"],
         has_header: true,

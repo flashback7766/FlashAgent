@@ -762,6 +762,7 @@ pub(crate) fn restore_session(
                     chat.on_event(&LoopEvent::ToolStarted { id: call.id.clone(), name: call.name.clone(), args_json: call.args_json.clone() });
                     chat.on_event(&LoopEvent::ToolFinished {
                         id: call.id,
+                        name: call.name,
                         is_error: result_was_an_error(&msg.content),
                         result_len: msg.content.chars().count(),
                         result: Some(msg.content.clone()),
