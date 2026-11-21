@@ -253,3 +253,27 @@ mod tests {
         println!("{total:>6}  TOTAL over {} tools", crate::registry::TOOLS.len());
     }
 }
+
+#[cfg(test)]
+mod tg_costs {
+    use super::{tool_cost, Budget};
+
+    #[test]
+    fn the_tgbot_toolset_fits_the_floor() {
+        // The tgbot rooms run the full list; the floor allowance must carry
+        // telegram, tg_journal and github, or the model loses its hands and
+        // nobody notices until a room asks for a ban.
+        let names = ["telegram", "tg_journal", "github"];
+        let set = crate::registry::TOOLS
+            .iter()
+            .filter(|d| names.contains(&d.name) || !matches!(d.handler, crate::registry::Handler::Telegram | crate::registry::Handler::TgJournal | crate::registry::Handler::GitHub))
+            .map(|d| d.schema_json())
+            .collect::<Vec<_>>()
+            .join("");
+        let b = Budget::for_window(None);
+        let allowance = b.tool_allowance(b.prompt);
+        let total = tool_cost("deepseek-v4.1-flash", "", &set, "");
+        println!("tgbot toolset: {total} tokens against {allowance}");
+        assert!(total < allowance, "the tgbot toolset {total} exceeds the floor {allowance}");
+    }
+}

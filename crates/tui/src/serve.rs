@@ -275,6 +275,8 @@ impl flashagent_tools::ask_user::QuestionGate for ServeQuestions {
 }
 
 /// The map from a loop event to what the client polls.
+use flashagent_core::loop_::ToolExec as _;
+
 fn event_to_json(event: &flashagent_core::LoopEvent) -> serde_json::Value {
     use flashagent_core::LoopEvent;
     match event {
@@ -934,6 +936,8 @@ async fn handle(
                         )
                     };
                     let total = sessions.lock().expect("serve sessions").len();
+                    let tool_names: Vec<String> =
+                        base.perm.specs().into_iter().map(|s| s.name).collect();
                     (
                         200u16,
                         serde_json::json!({
@@ -942,6 +946,7 @@ async fn handle(
                             "key": key,
                             "sessions": total,
                             "profile": base.profile.map(|p| p.name),
+                            "tools": tool_names,
                             "model": model,
                             "events": events_len,
                             "text_chars": text_chars,
