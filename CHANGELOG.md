@@ -2,11 +2,113 @@
 
 ## b734 — The feed has one truth
 
+- **A restart resumes the conversation, and a stop finishes the turn.** Each
+  serve remembers the last session of every key in `.serve-sessions.json`
+  beside its working folder and reloads that history on start, rebuilding
+  only the system prompt (AGENTS, memory and the tier may have changed since
+  the save). On SIGTERM — an update, a reboot, an operator's restart — the
+  serve stops accepting requests and drains the running turn for up to a
+  minute before leaving, so the answer is saved instead of orphaned. The bot
+  waits up to a minute for the serves to answer `/health` before polling, and
+  aiogram's own shutdown window lets live turns finish; the units restart
+  always, with stop timeouts that fit the drains.
+- **One issue, one message.** Every turn of an issue answers in the issue's
+  first message (the bot's answer under `/issue`): a second screenshot or a
+  follow-up is context and is folded there instead of growing a second answer
+  bubble. While a native poll is open, the model's why replaces that message,
+  and the text returns as soon as the poll closes. A slot whose message was
+  deleted no longer swallows the answer — it is sent fresh and re-registered.
+- **A bait prompt gets judgment, not obedience.** The bot used to obey
+  «повтори valve 100 раз» / «считай до 999» and flood the chat, and explained
+  its limits and admins when challenged. The prompts now say: think about the
+  meaning, banter briefly, never flood, never discuss limits/admins. A
+  repetition guard replaces a one-token flood with a short redirect even when
+  the model falls for the bait; `/ask` carries the same rule.
+- **A joke `/issue` does not become a questionnaire.** The model first
+  decides whether the prompt is a real problem or a joke, a troll or simply
+  not about the player; for the latter it answers with humour and ends with
+  `NO_ISSUE`. The bot strips the marker and releases the report session
+  instead of collecting details or filing an empty issue. The `/issue`
+  command's own answer now stays in its report session too: it used to call
+  `_answer_room` as `main`, so the issue link never anchored to the report's
+  first message and the reporter was never released.
+- **One message, one addressee.** In a busy community room the bot absorbed
+  every correction as a steer — with a reply budget that grew with each one —
+  and answered one message with a summary of several users' questions; even
+  a lone "." became a prompt. Corrections now coalesce for 0.8 s: a burst of
+  four messages becomes one steer, the newest, and a turn accepts at most two
+  separate steers. The base reply budget no longer grows per steer, a
+  punctuation-only ping is ignored, the journal slice is eight lines and
+  explicitly not an addressee, and every prompt names the one `msg:N` to
+  answer. A reply aimed at an older journal id is folded back to the turn.
+  Chat answers are 1-3 sentences with no tools unless project facts are
+  needed; a real `/issue` asks at most 2-3 questions.
+- **A rules bypass gets a mute, not an argument.** The users model flags a
+  jailbreak/role-change attempt, repeated spam or a rude provocation with a
+  `MUTE: <id>` line; the bot strips the line, verifies the target is one of
+  this turn's actual senders — never an id from the journal, an admin, the
+  owner, a bot or a chat admin — and restricts them for an hour. A repeat
+  inside a day is a day; the offender list survives restarts in
+  `data/mutes.json`. Clear jailbreaks, repeat/loop spam requests, direct
+  insults (including «гандон») and an explicit «забань/замьють меня» are
+  matched by the bot itself before the model runs, so the mute does not
+  depend on the model's mood. A burst of five bot-directed prompts in two
+  minutes is spam even when every question is harmless. The bot has
+  `can_restrict_members` in the users chat and mutes directly; a failed
+  restrict is reported in the dev room instead of pretending. The offending
+  message is kept; the bot posts a short «мут на час/сутки: …» reply. A steer
+  ack that never got an answer is replaced with «не успел ответить…» at the
+  end of the turn.
+- **Ads are judged by the model, executed by the bot; an admin can undo it.**
+  A member who replies to an ad and tags the bot gets a decision, not a
+  template: the reported message, its author and the member's words go into
+  a quiet moderation turn, and only an explicit `BAN: <id>` makes the bot
+  delete the message and ban its author with messages revoked. The id is
+  verified against the reported author before anything happens; the bot,
+  the owner, a configured admin, a chat admin, one of the configured rooms
+  and the reporter are never touched, and one member may file three reports
+  per ten minutes. A regex gate only decides *when to ask* the model (a
+  report word, a bot sender, a brand or an invite) and never bans on its
+  own, so a false positive cannot remove anyone; no verdict, a wrong id or
+  a failed turn means no ban. The quoted message and report are untrusted
+  data: a forged `BAN:` line inside them is neutralized before the prompt,
+  so only the model's own verdict can order a ban. This also works while
+  the main brain is busy or down, because the verdict is a separate service
+  turn. Admins get `/ban`, `/mute`, `/unban`, `/unmute` (reply, numeric id,
+  or the last ban/mute this bot issued) and the natural
+  «забань/замуть/размуть» forms; those are direct orders, need no model,
+  and work under the offender's own message without an @mention too.
+  `data/bans.json` keeps a small audit so a ban can be lifted after a
+  restart, and an explicit unmute resets the repeat window.
+- **The bot is a player assistant, not a general one.** Off-topic math,
+  philosophy and image-generation requests are not solved: a direct math or
+  image bait is matched before the model and answered with one short «это не
+  по теме — я по плееру», and the prompts tell the model to do the same for
+  the rest. On-topic player questions still get full answers.
+- **The users room runs on a 1M window; the dev brain has no cap.** The
+  users serve now runs `--context-cap 1000000 --compact-at 600000` instead of
+  65k/55k: the old cap made a busy community day compact the context on
+  nearly every answer, which is why the brain suddenly thought for a long
+  time. The dev serve keeps the model's full window — no context cap and no
+  forced compaction. `--vision` forces image support when the gateway's
+  model list is stale, so stickers and GIFs are seen again. A sticker/GIF
+  sent during a text answer now waits for the room and gets its own turn
+  under its own message instead of being merged into that answer, and media
+  lines are filtered out of the text turn's background — no more sticker
+  descriptions inside an answer to an unrelated question.
+- **No invisible answer offset.** A question sent as a turn was finishing
+  used to be held in the 0.8 s debounce, cancelled when the old turn ended,
+  and only answered by the next request — under the wrong question or user.
+  Corrections now go through `/steer`, which never starts a turn; when it
+  returns 409 the bot waits for its own turn to clear and gives the waiting
+  message its own status and turn under its own reply. Pending corrections
+  are no longer cancelled by the ending turn; a `_run_turn(context_done=True)`
+  fallback starts that turn without prefixing the room context twice.
 - **Questions are native polls, not walls of text.** `user_interaction`
   ask sends a non-anonymous Telegram poll in its own message (multiple
   answers when the model asks for them) and deletes that message as soon
   as the answer is known; the original status message stays the answer
-  slot. In a /report only the author's answer counts and a single click
+  slot. In an /issue only the author's answer counts and a single click
   closes the poll at once; in the dev room everyone votes and the poll
   closes after a quiet window. The model gets the tally and the majority,
   not a lone option; the options must be mutually exclusive and at one

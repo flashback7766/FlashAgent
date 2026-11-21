@@ -602,6 +602,7 @@ async fn main() -> Result<()> {
         let mut compact_at = None;
         let mut disable = None;
         let mut no_ask = false;
+        let mut vision = false;
         let mut args = std::env::args().skip(1).peekable();
         while let Some(a) = args.next() {
             match a.as_str() {
@@ -624,6 +625,9 @@ async fn main() -> Result<()> {
                 // The bot runs unattended: an approval card nobody answers is
                 // a hang, so a would-be question becomes a refusal.
                 "--no-ask" => no_ask = true,
+                // The gateway's model list can be stale about images; the
+                // room still needs its stickers and GIFs seen.
+                "--vision" => vision = true,
                 _ => {}
             }
         }
@@ -639,6 +643,7 @@ async fn main() -> Result<()> {
                 compact_at,
                 disable,
                 no_ask,
+                vision,
             },
         )
         .await

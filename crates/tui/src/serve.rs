@@ -331,6 +331,10 @@ struct ServeBase {
     gate: Arc<ServeGate>,
     /// The inline question card, routed the same way.
     questions: Arc<ServeQuestions>,
+    /// The last saved session id per key, so a restarted serve (a reboot, an
+    /// update) resumes the conversation it was having instead of a blank one.
+    session_map: Arc<Mutex<std::collections::HashMap<String, String>>>,
+    session_map_path: PathBuf,
     config: flashagent_core::AppConfig,
     model: String,
     effort: String,
@@ -354,15 +358,109 @@ struct Session {
 impl Session {
     fn new(base: &ServeBase, key: &str) -> Self {
         let state: SharedState = Arc::new(Mutex::new(ServeState::default()));
-        let session_id = format!("{key}-{}", crate::sessions::new_session_id());
+        // A restarted serve resumes the last saved conversation of this key.
+        // A throwaway service session has nothing worth resuming.
+        let saved_id = if key.starts_with("svc-") {
+            None
+        } else {
+            base.session_map
+                .lock()
+                .expect("session map")
+                .get(key)
+                .cloned()
+        };
+        let session_id = saved_id
+            .clone()
+            .unwrap_or_else(|| format!("{key}-{}", crate::sessions::new_session_id()));
+        if let Some(id) = &saved_id {
+            if let Some(dir) = crate::sessions::sessions_dir() {
+                if let Some(history) = load_serve_history(&dir, id, &base.system_prompt) {
+                    state.lock().expect("serve state").history = Some(history);
+                }
+            }
+        }
         let app = Arc::new(Mutex::new(ServeApp::new(
             base,
             state.clone(),
             session_id.clone(),
+            key.to_string(),
         )));
         // The approval buttons answer the same process-wide gate the
         // permission layer calls; the state names the session.
         Self { session_id, state, gate: base.gate.clone(), app }
+    }
+}
+
+/// The saved conversation of a session, with the system prompt rebuilt: the
+/// prompt, AGENTS and memory may have changed since the save, the turns have
+/// not. None when there is no readable session or it holds only its prompt.
+fn load_serve_history(
+    dir: &std::path::Path,
+    id: &str,
+    system_prompt: &str,
+) -> Option<Vec<ChatMessage>> {
+    let saved = crate::sessions::read_session(dir, id).ok()?;
+    let mut messages: Vec<ChatMessage> = saved
+        .messages
+        .into_iter()
+        .map(ChatMessage::from)
+        .collect();
+    if messages
+        .first()
+        .is_some_and(|m| m.role == flashagent_llm::Role::System)
+    {
+        messages.remove(0);
+    }
+    if messages.is_empty() {
+        return None;
+    }
+    messages.insert(0, ChatMessage::system(system_prompt.to_string()));
+    Some(messages)
+}
+
+fn save_session_map(
+    map: &Mutex<std::collections::HashMap<String, String>>,
+    path: &std::path::Path,
+) {
+    let guard = map.lock().expect("session map");
+    if let Ok(text) = serde_json::to_string_pretty(&*guard) {
+        let _ = std::fs::write(path, text);
+    }
+}
+
+fn remember_session(
+    map: &Mutex<std::collections::HashMap<String, String>>,
+    path: &std::path::Path,
+    key: &str,
+    id: &str,
+) {
+    if key.starts_with("svc-") {
+        return;
+    }
+    {
+        let mut guard = map.lock().expect("session map");
+        if guard.get(key).is_some_and(|v| v == id) {
+            return;
+        }
+        guard.insert(key.to_string(), id.to_string());
+    }
+    save_session_map(map, path);
+}
+
+fn forget_session(
+    map: &Mutex<std::collections::HashMap<String, String>>,
+    path: &std::path::Path,
+    key: &str,
+) {
+    if key.starts_with("svc-") {
+        return;
+    }
+    let changed = {
+        let mut guard = map.lock().expect("session map");
+        guard.remove(key).is_some()
+    };
+    if changed {
+        save_session_map(map, path);
     }
 }
 
@@ -405,6 +503,9 @@ struct ServeApp {
     perm: &'static flashagent_core::permissions::PermissionedTools,
     cancel: Arc<AtomicBool>,
     session_id: String,
+    session_key: String,
+    session_map: Arc<Mutex<std::collections::HashMap<String, String>>>,
+    session_map_path: PathBuf,
     cwd_display: String,
     config: flashagent_core::AppConfig,
     model: String,
@@ -420,7 +521,12 @@ struct ServeApp {
 impl ServeApp {
     /// One fresh brain for the named session: empty feed, empty history,
     /// its own approvals and cancellation.
-    fn new(base: &ServeBase, state: SharedState, session_id: String) -> Self {
+    fn new(
+        base: &ServeBase,
+        state: SharedState,
+        session_id: String,
+        session_key: String,
+    ) -> Self {
         let compactor = base.compactor.map(|(capacity, fixed, threshold_pct)| {
             Arc::new(crate::compact::TurnCompactor {
                 source: base.source_dyn.clone(),
@@ -439,6 +545,9 @@ impl ServeApp {
             perm: base.perm,
             cancel: Arc::new(AtomicBool::new(false)),
             session_id,
+            session_key,
+            session_map: base.session_map.clone(),
+            session_map_path: base.session_map_path.clone(),
             cwd_display: base.cwd_display.clone(),
             config: base.config.clone(),
             model: base.model.clone(),
@@ -487,6 +596,9 @@ impl ServeApp {
         let model = self.model.clone();
         let perm = self.perm;
         let compactor = self.compactor.clone();
+        let session_map = self.session_map.clone();
+        let session_map_path = self.session_map_path.clone();
+        let session_key = self.session_key.clone();
         tokio::spawn(async move {
             let loop_config =
                 flashagent_core::loop_::LoopConfig { base_turn_options: turn_opts, ..Default::default() };
@@ -558,6 +670,9 @@ impl ServeApp {
                     );
                 }
             }
+            // The conversation is on disk and its id is remembered before the
+            // next request can arrive: a restart from here resumes this turn.
+            remember_session(&session_map, &session_map_path, &session_key, &session_id);
         });
         Ok(())
     }
@@ -569,6 +684,7 @@ impl ServeApp {
         }
         self.session_id = crate::sessions::new_session_id();
         self.state.lock().expect("serve state").history = None;
+        forget_session(&self.session_map, &self.session_map_path, &self.session_key);
         true
     }
 }
@@ -937,6 +1053,10 @@ pub(crate) struct ServeOpts {
     /// Never ask a human: whatever the mode would send to an approval card is
     /// denied outright. The bot runs unattended; safety is policy, not Q&A.
     pub no_ask: bool,
+    /// Trust this model with pictures even when the server's model list does
+    /// not say it supports them. The gateway's metadata is sometimes stale;
+    /// the room needs stickers and GIFs seen.
+    pub vision: bool,
 }
 
 /// The permission mode a `--mode` flag names, or None when it names nothing.
@@ -1050,7 +1170,9 @@ pub(crate) async fn run_serve(mut config: flashagent_core::AppConfig, opts: Serv
     // see, and the server's own error is better than a wrong refusal. Serve
     // forgot this, so every screenshot came back as "the current model
     // cannot see images" — even on a vision model.
-    tools.set_vision_supported(crate::attachments::sees_images(discovery.as_ref(), &model));
+    tools.set_vision_supported(
+        opts.vision || crate::attachments::sees_images(discovery.as_ref(), &model),
+    );
     trace("serve: tools ready");
 
     let gate = Arc::new(ServeGate {
@@ -1150,12 +1272,26 @@ pub(crate) async fn run_serve(mut config: flashagent_core::AppConfig, opts: Serv
     };
 
     let source_dyn: Arc<dyn flashagent_core::LlmSource> = source.clone();
+    // The last session of every key lives next to the serve's cwd: a reboot
+    // or an update resumes the rooms mid-conversation. An unreadable map is
+    // an empty one — the rooms simply start fresh, as they did before.
+    let session_map_path = cwd.join(".serve-sessions.json");
+    let session_map = Arc::new(Mutex::new(
+        std::fs::read_to_string(&session_map_path)
+            .ok()
+            .and_then(|text| {
+                serde_json::from_str::<std::collections::HashMap<String, String>>(&text).ok()
+            })
+            .unwrap_or_default(),
+    ));
     let base = ServeBase {
         source: source.clone(),
         source_dyn,
         perm,
         gate,
         questions,
+        session_map,
+        session_map_path,
         config: config.clone(),
         model: model.clone(),
         effort,
@@ -1177,17 +1313,75 @@ pub(crate) async fn run_serve(mut config: flashagent_core::AppConfig, opts: Serv
     trace("serve: listening");
     let server_sessions = sessions.clone();
     let server_base = Arc::new(base);
+    // A stop — an update, a reboot, an operator's restart — must not orphan
+    // the answer being written. Stop taking requests, let the running turns
+    // finish and save their session, then leave; the next process resumes
+    // those conversations from disk.
+    let shutdown = shutdown_signal();
+    tokio::pin!(shutdown);
     loop {
-        let (mut stream, _) = listener.accept().await?;
-        let sessions = server_sessions.clone();
-        let base = server_base.clone();
-        let token = token.clone();
-        tokio::spawn(async move {
-            match read_request(&mut stream).await {
-                Ok(req) => handle(&mut stream, req, &sessions, &base, &token).await,
-                Err(_) => respond(&mut stream, 400, &serde_json::json!({"error": "bad request"})).await,
+        tokio::select! {
+            _ = &mut shutdown => {
+                trace("serve: shutting down, draining turns");
+                break;
             }
-        });
+            accepted = listener.accept() => {
+                let (mut stream, _) = accepted?;
+                let sessions = server_sessions.clone();
+                let base = server_base.clone();
+                let token = token.clone();
+                tokio::spawn(async move {
+                    match read_request(&mut stream).await {
+                        Ok(req) => handle(&mut stream, req, &sessions, &base, &token).await,
+                        Err(_) => respond(&mut stream, 400, &serde_json::json!({"error": "bad request"})).await,
+                    }
+                });
+            }
+        }
+    }
+    drain_sessions(&sessions, SHUTDOWN_DRAIN).await;
+    Ok(())
+}
+
+/// How long a stop waits for the turn in flight. It also bounds the drain
+/// before systemd's TimeoutStopSec would kill the process anyway.
+const SHUTDOWN_DRAIN: Duration = Duration::from_secs(60);
+
+/// SIGTERM (systemd, a reboot) or SIGINT (Ctrl+C) asks for the drain above.
+async fn shutdown_signal() {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{signal, SignalKind};
+        if let (Ok(mut term), Ok(mut int)) =
+            (signal(SignalKind::terminate()), signal(SignalKind::interrupt()))
+        {
+            tokio::select! {
+                _ = term.recv() => {}
+                _ = int.recv() => {}
+            }
+            return;
+        }
+    }
+    let _ = tokio::signal::ctrl_c().await;
+}
+
+/// Waits until no session has a turn running, or the limit runs out. A turn
+/// that outlives the limit is killed by systemd, exactly as before.
+async fn drain_sessions(
+    sessions: &Mutex<std::collections::HashMap<String, Arc<Session>>>,
+    limit: Duration,
+) {
+    let deadline = tokio::time::Instant::now() + limit;
+    loop {
+        let running = {
+            let map = sessions.lock().expect("sessions");
+            map.values()
+                .any(|s| s.state.lock().expect("serve state").running)
+        };
+        if !running || tokio::time::Instant::now() >= deadline {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
     }
 }
 
@@ -1409,6 +1603,8 @@ mod tests {
             perm,
             gate,
             questions,
+            session_map: Arc::new(Mutex::new(std::collections::HashMap::new())),
+            session_map_path: std::env::temp_dir().join("flashagent-serve-test-sessions.json"),
             config: flashagent_core::AppConfig::default(),
             model: "test-model".into(),
             effort: "off".into(),
@@ -1458,6 +1654,87 @@ mod tests {
             2,
             "main + one report: no hidden sessions"
         );
+    }
+
+    #[test]
+    fn a_restarted_serve_resumes_the_saved_conversation() {
+        let dir = tempfile::tempdir().unwrap();
+        let history = vec![
+            ChatMessage::system("старый промпт"),
+            ChatMessage::user("вопрос"),
+            ChatMessage::assistant("ответ"),
+        ];
+        crate::sessions::save_session_in(
+            dir.path(),
+            "main-session_1",
+            "test-model",
+            "/tmp",
+            &history,
+            &[],
+            false,
+            None,
+        )
+        .unwrap();
+        // The turns come back, the system prompt is rebuilt from the current
+        // one: AGENTS, memory and the tier may have changed since the save.
+        let restored =
+            load_serve_history(dir.path(), "main-session_1", "новый промпт").expect("restored");
+        assert_eq!(restored.len(), 3);
+        assert_eq!(restored[0].role, flashagent_llm::Role::System);
+        assert_eq!(restored[0].content, "новый промпт");
+        assert_eq!(restored[1].content, "вопрос");
+        assert_eq!(restored[2].content, "ответ");
+        // A missing session, or one that holds only its prompt, starts fresh.
+        assert!(load_serve_history(dir.path(), "main-session_404", "x").is_none());
+        crate::sessions::save_session_in(
+            dir.path(),
+            "main-session_2",
+            "test-model",
+            "/tmp",
+            &[ChatMessage::system("только промпт")],
+            &[],
+            false,
+            None,
+        )
+        .unwrap();
+        assert!(load_serve_history(dir.path(), "main-session_2", "x").is_none());
+    }
+
+    #[tokio::test]
+    async fn stopping_waits_for_the_running_turn() {
+        let base = test_base();
+        let sessions: Mutex<std::collections::HashMap<String, Arc<Session>>> =
+            Mutex::new(std::collections::HashMap::new());
+        let session = session_for(&sessions, &base, "main");
+        session.state.lock().unwrap().running = true;
+        let state = session.state.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            state.lock().unwrap().running = false;
+        });
+        let started = std::time::Instant::now();
+        drain_sessions(&sessions, Duration::from_secs(2)).await;
+        assert!(
+            started.elapsed() >= Duration::from_millis(40),
+            "the drain did not wait for the turn"
+        );
+    }
+
+    #[test]
+    fn the_session_map_survives_and_forgets() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(".serve-sessions.json");
+        let map = Mutex::new(std::collections::HashMap::new());
+        remember_session(&map, &path, "main", "main-session_1");
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("main-session_1"));
+        // A throwaway service key is never remembered: its session is wiped.
+        remember_session(&map, &path, "svc-abc", "svc-abc-session_2");
+        assert!(map.lock().unwrap().get("svc-abc").is_none());
+        // A reset forgets the key, so the next turn starts a fresh session.
+        forget_session(&map, &path, "main");
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(!text.contains("main-session_1"));
     }
 
     #[test]
