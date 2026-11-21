@@ -87,6 +87,18 @@ pub fn has_turn_scope() -> bool {
     TURN_BUDGET.try_with(|_| ()).is_ok()
 }
 
+/// Charges one mutation against the current turn's budget. The GitHub tool
+/// shares this cap with the Telegram tool (A8: ТГ и GitHub вместе).
+pub fn charge_shared_mutation() -> Result<(), ToolError> {
+    TURN_BUDGET
+        .try_with(|b| b.borrow_mut().charge())
+        .unwrap_or_else(|_| {
+            Err(ToolError::Other(
+                "err: ход не размечен — тул живёт только внутри хода serve".into(),
+            ))
+        })
+}
+
 /// The `telegram` tool's arguments. Action-specific ones are checked by hand:
 /// the schema marks them optional, and a Russian error beats a serde one.
 #[derive(Deserialize)]
@@ -252,13 +264,7 @@ impl TgBridge {
         }
 
         if is_mutation(&action) {
-            TURN_BUDGET
-                .try_with(|b| b.borrow_mut().charge())
-                .unwrap_or_else(|_| {
-                    Err(ToolError::Other(
-                        "err: ход не размечен — тул живёт только внутри хода serve".into(),
-                    ))
-                })?;
+            charge_shared_mutation()?;
         }
 
         let mut body = serde_json::json!({ "action": action });

@@ -745,6 +745,8 @@ async fn main() -> Result<()> {
         chat_enabled: false,
         // The terminal talks to nobody's bot: the bridge is a serve-profile thing.
         tg_bridge: None,
+        // The terminal keeps its own GitHub habits; the tool rides serve profiles.
+        github: None,
     })?);
     trace("main: tools built");
     // A closed terminal window (SIGHUP) or a kill (SIGTERM) skips the normal

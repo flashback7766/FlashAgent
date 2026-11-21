@@ -13,6 +13,7 @@ pub mod patch;
 pub mod plan_tool;
 pub mod shell;
 pub mod skill_tools;
+pub mod github;
 pub mod subagents;
 pub mod telegram;
 pub mod web;
@@ -31,6 +32,7 @@ pub use shell::{ShellRegistry, TaskInfo, TaskNotice, TaskState};
 
 pub use ask_user::{QuestionGate, GOAL_QUESTION_TIMEOUT};
 pub use subagents::{agent_tools, BuiltinSubagentFactory, CompositeTools, ToolSubset};
+pub use github::{GitHub, GitHubConfig};
 pub use telegram::{scope_turn, TgBridge, TgBridgeConfig};
 
 /// Hard cap on a tool result fed back to the model.
@@ -108,6 +110,9 @@ pub struct BuiltinToolsConfig {
     /// The bridge to the bot for the `telegram`/`tg_journal` tools: a tgbot
     /// serve builds it from the environment, nothing else does.
     pub tg_bridge: Option<telegram::TgBridgeConfig>,
+    /// The GitHub issues tool's connection; absent unless the environment
+    /// names a token and a repository.
+    pub github: Option<GitHubConfig>,
 }
 
 /// What a tool answered: text for the model, or a picture.
@@ -210,6 +215,9 @@ pub struct BuiltinTools {
     /// The bridge for `telegram`/`tg_journal`; absent everywhere but a tgbot
     /// serve, where those tools are the room's hands.
     tg: Option<telegram::TgBridge>,
+    /// The GitHub issues connection; absent unless the environment named a
+    /// token and a repository.
+    gh: Option<GitHub>,
     /// The measured tool list. Measuring it means tokenizing every schema,
     /// and the list is asked for on every tool call.
     specs_cache: parking_lot::Mutex<Option<SpecsCache>>,
@@ -247,6 +255,10 @@ impl BuiltinTools {
             tg: config
                 .tg_bridge
                 .map(|cfg| telegram::TgBridge::new(cfg))
+                .transpose()?,
+            gh: config
+                .github
+                .map(|cfg| GitHub::new(cfg))
                 .transpose()?,
             specs_cache: parking_lot::Mutex::new(None),
             #[cfg(test)]
@@ -367,9 +379,18 @@ impl BuiltinTools {
             // tools are not offered from here. The chat outbox makes
             // `chat_reply` real; without it the tool is not on the table.
             .filter(|def| registry::offered(def, core, vision, web, false, self.chat_enabled))
-            // The Telegram tools are offered only when a bridge is wired:
-            // a schema the model cannot use is a promise the call breaks.
-            .filter(|def| self.tg.is_some() || !matches!(def.handler, registry::Handler::Telegram | registry::Handler::TgJournal))
+            // The Telegram tools are offered only when a bridge is wired,
+            // the GitHub tool only when a token and a repo are: a schema the
+            // model cannot use is a promise the call breaks.
+            .filter(|def| {
+                let wired = self.tg.is_some()
+                    || !matches!(
+                        def.handler,
+                        registry::Handler::Telegram | registry::Handler::TgJournal
+                    );
+                let gh_wired = self.gh.is_some() || def.handler != registry::Handler::GitHub;
+                wired && gh_wired
+            })
             // A tool the owner has switched off is not on the table at all.
             .filter(|def| !self.tool_disabled(def.name))
             .map(|def| ToolSpec {
@@ -613,6 +634,18 @@ impl BuiltinTools {
                     ));
                 };
                 bridge.journal(&call.args_json).await.map(Answer::Text)
+            }
+            Handler::GitHub => {
+                let Some(gh) = self.gh.as_ref() else {
+                    return Err(ToolError::Other(
+                        "github is not available here: no token or repository configured".into(),
+                    ));
+                };
+                // The shared per-turn budget: filing issues counts against
+                // the same cap as banning, muting and deleting (A8).
+                gh.run(&call.args_json, telegram::charge_shared_mutation)
+                .await
+                .map(Answer::Text)
             }
             Handler::Memory => {
                 let a: memory_tools::MemoryArgs = parse_args(&call.args_json, &call.name)?;

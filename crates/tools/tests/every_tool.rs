@@ -22,23 +22,39 @@ struct Project {
 
 impl Project {
     fn new() -> Self {
-        // The default room carries a dead bridge: the telegram tools must be
-        // OFFERED here so the sync guards below see the full set the model
-        // is offered in a tgbot serve. Tests that really call them wire a
-        // mock through `with_bridge`.
-        Self::build(Some(flashagent_tools::TgBridgeConfig {
-            base_url: "http://127.0.0.1:1".into(),
-            token: "test".into(),
-            cross_room: true,
-        }))
+        // The default room carries a dead bridge and a dead repo config: the
+        // telegram and github tools must be OFFERED here so the sync guards
+        // below see the full set the model is offered in a tgbot serve.
+        // Tests that really call them wire mocks through `with_bridge` /
+        // `with_github`.
+        Self::build(
+            Some(flashagent_tools::TgBridgeConfig {
+                base_url: "http://127.0.0.1:1".into(),
+                token: "test".into(),
+                cross_room: true,
+            }),
+            Some(flashagent_tools::GitHubConfig {
+                token: "test".into(),
+                repo: "own/repo".into(),
+                base_url: "http://127.0.0.1:1".into(),
+            }),
+        )
     }
 
     /// The same room with a working mock bridge: what a tgbot serve builds.
     fn with_bridge(cfg: flashagent_tools::TgBridgeConfig) -> Self {
-        Self::build(Some(cfg))
+        Self::build(Some(cfg), None)
     }
 
-    fn build(tg: Option<flashagent_tools::TgBridgeConfig>) -> Self {
+    /// The same room with a working mock GitHub.
+    fn with_github(cfg: flashagent_tools::GitHubConfig) -> Self {
+        Self::build(None, Some(cfg))
+    }
+
+    fn build(
+        tg: Option<flashagent_tools::TgBridgeConfig>,
+        gh: Option<flashagent_tools::GitHubConfig>,
+    ) -> Self {
         // A counter, not the clock: on Windows two tests could read the same time
         // and share a folder.
         static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
@@ -65,6 +81,7 @@ impl Project {
                 home: Some(home),
                 chat_enabled: true,
                 tg_bridge: tg,
+                github: gh,
                 ..Default::default()
             })
             .unwrap(),
@@ -155,6 +172,7 @@ fn really_invoked() -> BTreeSet<String> {
         "chat_reply",
         "telegram",
         "tg_journal",
+        "github",
         "agent",
     ]
     .iter()
@@ -386,6 +404,139 @@ async fn mutations_in_one_turn_are_charged_and_throttled() {
     assert!(outs[1].is_error, "{}", outs[1].content);
     assert!(outs[1].content.contains("подожди"), "{}", outs[1].content);
     assert!(!outs[2].is_error, "a reply is speech, not charged: {}", outs[2].content);
+}
+
+
+/// A mock GitHub API: the search endpoint answers with one open issue,
+/// everything else answers like a created issue.
+async fn mock_github() -> String {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        loop {
+            let Ok((mut sock, _)) = listener.accept().await else { break };
+            let mut buf = Vec::new();
+            loop {
+                let head_end = buf.windows(4).position(|w| w == b"\r\n\r\n");
+                let complete = match head_end {
+                    Some(pos) => {
+                        let cl = buf
+                            .split(|b| *b == b'\n')
+                            .find_map(|line| {
+                                let line = line.trim_ascii();
+                                line.to_ascii_lowercase()
+                                    .strip_prefix(b"content-length:")
+                                    .map(|rest| {
+                                        std::str::from_utf8(rest)
+                                            .unwrap_or("0")
+                                            .trim()
+                                            .parse::<usize>()
+                                            .unwrap_or(0)
+                                    })
+                            })
+                            .unwrap_or(0);
+                        buf.len() >= pos + 4 + cl
+                    }
+                    None => false,
+                };
+                if complete { break; }
+                let mut chunk = [0u8; 4096];
+                let n = sock.read(&mut chunk).await.unwrap_or(0);
+                if n == 0 { break; }
+                buf.extend_from_slice(&chunk[..n]);
+            }
+            let head = String::from_utf8_lossy(&buf).to_string();
+            let body = if head.contains("GET /search/issues") {
+                "{\"items\": [{\"number\": 7, \"state\": \"open\", \"title\": \"Очередь не чистится\"}]}".to_string()
+            } else {
+                "{\"number\": 7, \"html_url\": \"https://github.com/own/repo/issues/7\"}".to_string()
+            };
+            let resp = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            let _ = sock.write_all(resp.as_bytes()).await;
+            let _ = sock.shutdown().await;
+        }
+    });
+    format!("http://{addr}")
+}
+
+#[tokio::test]
+async fn a_github_search_finds_the_similar_report() {
+    let url = mock_github().await;
+    let project = Project::with_github(flashagent_tools::GitHubConfig {
+        token: "t".into(),
+        repo: "own/repo".into(),
+        base_url: url,
+    });
+    let out = project
+        .call(
+            "github",
+            serde_json::json!({"action": "search", "query": "очередь не чистится"}),
+        )
+        .await;
+    assert!(out.contains("#7 [open]"), "{out}");
+    assert!(out.contains("Очередь не чистится"), "{out}");
+}
+
+#[tokio::test]
+async fn an_issue_is_filed_through_the_mock_and_names_itself() {
+    let url = mock_github().await;
+    let project = Project::with_github(flashagent_tools::GitHubConfig {
+        token: "t".into(),
+        repo: "own/repo".into(),
+        base_url: url,
+    });
+    let out = flashagent_tools::scope_turn(async {
+        project
+            .call(
+                "github",
+                serde_json::json!({"action": "create", "title": "Очередь", "body": "шаги внутри"}),
+            )
+            .await
+    })
+    .await;
+    assert!(out.contains("заведён issue #7"), "{out}");
+    assert!(out.contains("issues/7"), "{out}");
+}
+
+#[tokio::test]
+async fn github_mutations_share_the_turn_budget_with_telegram() {
+    // A8: one budget across both tools. The telegram pin charges the shared
+    // clock; a github create fired right after is throttled BY IT — if
+    // github kept its own budget, its first mutation would sail through.
+    let gh_url = mock_github().await;
+    let tg_url = mock_bridge("ok").await;
+    let project = Project::build(
+        Some(flashagent_tools::TgBridgeConfig {
+            base_url: tg_url,
+            token: "t".into(),
+            cross_room: false,
+        }),
+        Some(flashagent_tools::GitHubConfig {
+            token: "t".into(),
+            repo: "own/repo".into(),
+            base_url: gh_url,
+        }),
+    );
+    let outs = flashagent_tools::scope_turn(async move {
+        let pin = project
+            .raw("telegram", serde_json::json!({"action": "pin", "msg_id": 1}))
+            .await;
+        let create = project
+            .raw(
+                "github",
+                serde_json::json!({"action": "create", "title": "сразу после пина", "body": "тот же бюджет"}),
+            )
+            .await;
+        (pin, create)
+    })
+    .await;
+    assert!(!outs.0.is_error, "{}", outs.0.content);
+    assert!(outs.1.is_error, "{}", outs.1.content);
+    assert!(outs.1.content.contains("подожди"), "{}", outs.1.content);
 }
 
 #[tokio::test]

@@ -135,6 +135,9 @@ pub enum Handler {
     Telegram,
     /// The room's journal read back with filters: who wrote what, when.
     TgJournal,
+    /// GitHub issues of this project, one repository from the environment:
+    /// search, read, create, comment.
+    GitHub,
     Agent,
     /// The old three names are kept for the subagent internals, which still
     /// execute one verb each; the app offers `agent` instead.
@@ -164,6 +167,7 @@ impl Handler {
             Handler::ChatReply => "chat_reply",
             Handler::Telegram => "telegram",
             Handler::TgJournal => "tg_journal",
+            Handler::GitHub => "github",
             Handler::Agent => "agent",
             Handler::SpawnAgent => "spawn_agent",
             Handler::SendMessage => "send_message",
@@ -339,6 +343,12 @@ const SKILL_NAME: Param = opt_str("name", "For action run: the skill name, witho
 
 const TASK_ACTION: Param = one_of("action", "list background tasks, read one's output, or stop one.", &["list", "output", "stop"]);
 const TASK_ID: Param = opt_int("task_id", "The id run_shell returned when it started the task.");
+
+const GH_ACTION: Param = one_of(
+    "action",
+    "search — найти существующие issues; get — прочитать один; create — завести новый; comment — дописать комментарий.",
+    &["search", "get", "create", "comment"],
+);
 
 const TG_ACTION: Param = one_of(
     "action",
@@ -673,6 +683,26 @@ pub static TOOLS: &[ToolDef] = &[
         required: &[],
         has_header: true,
         handler: Handler::TgJournal,
+        category: Category::Read,
+        touches: Touches::Nothing,
+        preview: Preview::None,
+        availability: Availability::Serve,
+    },
+    ToolDef {
+        name: "github",
+        description: "Issues репозитория проекта. search ищет существующие по строке — всегда ищи, прежде чем создавать: похожий баг уходит комментарием к готовому issue, а не новым дублем. get читает один issue (number). create заводит новый (title, body — по-русски: что случилось, чего ждал, сборка и шаги). comment пишет комментарий (number, body). Репозиторий один, параметра нет.",
+        params: &[
+            GH_ACTION,
+            opt_str("query", "Для search: слова, которые заведомо есть в похожем issue"),
+            opt_int("number", "Для get/comment: номер issue"),
+            opt_str("title", "Для create: заголовок issue"),
+            opt_str("body", "Для create/comment: текст, по-русски"),
+        ],
+        required: &["action"],
+        has_header: true,
+        handler: Handler::GitHub,
+        // Запись в трекер чужого сервиса: риск ловит общий бюджет мутаций и
+        // один репозиторий из окружения, а не карточка одобрения.
         category: Category::Read,
         touches: Touches::Nothing,
         preview: Preview::None,

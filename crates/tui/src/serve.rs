@@ -1309,6 +1309,10 @@ pub(crate) async fn run_serve(mut config: flashagent_core::AppConfig, opts: Serv
             })
         }
     };
+    // The GitHub issues connection: the room's tracker memory. Optional by
+    // nature — a room without a token runs without the tool, one with a
+    // token gets it.
+    let github = flashagent_tools::GitHubConfig::from_env();
     let tools = Arc::new(flashagent_tools::BuiltinTools::new(flashagent_tools::BuiltinToolsConfig {
         cwd: cwd.clone(),
         brave_api_key: std::env::var("BRAVE_API_KEY").ok().filter(|k| !k.trim().is_empty()),
@@ -1325,6 +1329,7 @@ pub(crate) async fn run_serve(mut config: flashagent_core::AppConfig, opts: Serv
         // `reply` events — the outbox is the feed itself, per session.
         chat_enabled: true,
         tg_bridge,
+        github,
     })?);
     // The same rule the TUI applies: a model the server reports as seeing
     // images gets `read mode=image`; a model it never mentioned is assumed to
