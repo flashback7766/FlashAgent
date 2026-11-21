@@ -37,6 +37,7 @@ impl Project {
                 token: "test".into(),
                 repo: "own/repo".into(),
                 base_url: "http://127.0.0.1:1".into(),
+                allowed_actions: None,
             }),
         )
     }
@@ -470,6 +471,7 @@ async fn a_github_search_finds_the_similar_report() {
         token: "t".into(),
         repo: "own/repo".into(),
         base_url: url,
+        allowed_actions: None,
     });
     let out = project
         .call(
@@ -488,6 +490,7 @@ async fn an_issue_is_filed_through_the_mock_and_names_itself() {
         token: "t".into(),
         repo: "own/repo".into(),
         base_url: url,
+        allowed_actions: None,
     });
     let out = flashagent_tools::scope_turn(async {
         project
@@ -500,6 +503,71 @@ async fn an_issue_is_filed_through_the_mock_and_names_itself() {
     .await;
     assert!(out.contains("заведён issue #7"), "{out}");
     assert!(out.contains("issues/7"), "{out}");
+}
+
+
+#[tokio::test]
+async fn a_close_without_a_reason_is_refused_before_the_network() {
+    // D9: the reason lands in the issue; a silent close is a lost sentence.
+    let url = mock_github().await;
+    let project = Project::with_github(flashagent_tools::GitHubConfig {
+        token: "t".into(),
+        repo: "own/repo".into(),
+        base_url: url,
+        allowed_actions: None,
+    });
+    let out = flashagent_tools::scope_turn(async {
+        project
+            .raw("github", serde_json::json!({"action": "close", "number": 7}))
+            .await
+    })
+    .await;
+    assert!(out.is_error, "{}", out.content);
+    assert!(out.content.contains("close требует comment"), "{}", out.content);
+}
+
+#[tokio::test]
+async fn the_users_profile_cannot_close_an_issue() {
+    // D5: closing is the dev room's word; the tool refuses it outright.
+    let url = mock_github().await;
+    let project = Project::with_github(flashagent_tools::GitHubConfig {
+        token: "t".into(),
+        repo: "own/repo".into(),
+        base_url: url,
+        allowed_actions: Some(vec!["search".into(), "create".into(), "comment".into()]),
+    });
+    let out = project
+        .raw(
+            "github",
+            serde_json::json!({"action": "close", "number": 7, "comment": "готово"}),
+        )
+        .await;
+    assert!(out.is_error, "{}", out.content);
+    assert!(out.content.contains("не разрешено"), "{}", out.content);
+    // The allowed ones still pass the gate (and reach the mock).
+    let search = project
+        .call("github", serde_json::json!({"action": "search", "query": "очередь"}))
+        .await;
+    assert!(search.contains("#7"), "{search}");
+}
+
+#[tokio::test]
+async fn an_edit_with_nothing_to_change_is_refused() {
+    let url = mock_github().await;
+    let project = Project::with_github(flashagent_tools::GitHubConfig {
+        token: "t".into(),
+        repo: "own/repo".into(),
+        base_url: url,
+        allowed_actions: None,
+    });
+    let out = flashagent_tools::scope_turn(async {
+        project
+            .raw("github", serde_json::json!({"action": "edit", "number": 7}))
+            .await
+    })
+    .await;
+    assert!(out.is_error, "{}", out.content);
+    assert!(out.content.contains("title или body"), "{}", out.content);
 }
 
 #[tokio::test]
@@ -519,6 +587,7 @@ async fn github_mutations_share_the_turn_budget_with_telegram() {
             token: "t".into(),
             repo: "own/repo".into(),
             base_url: gh_url,
+            allowed_actions: None,
         }),
     );
     let outs = flashagent_tools::scope_turn(async move {

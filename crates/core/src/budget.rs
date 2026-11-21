@@ -256,24 +256,37 @@ mod tests {
 
 #[cfg(test)]
 mod tg_costs {
-    use super::{tool_cost, Budget};
+    use super::{fit_builtin, tool_cost, Budget};
 
     #[test]
-    fn the_tgbot_toolset_fits_the_floor() {
-        // The tgbot rooms run the full list; the floor allowance must carry
-        // telegram, tg_journal and github, or the model loses its hands and
-        // nobody notices until a room asks for a ban.
-        let names = ["telegram", "tg_journal", "github"];
-        let set = crate::registry::TOOLS
-            .iter()
-            .filter(|d| names.contains(&d.name) || !matches!(d.handler, crate::registry::Handler::Telegram | crate::registry::Handler::TgJournal | crate::registry::Handler::GitHub))
-            .map(|d| d.schema_json())
-            .collect::<Vec<_>>()
-            .join("");
+    fn the_rooms_hands_survive_the_schema_budget() {
+        // The tgbot rooms offer the full list; the fit may drop optional
+        // schemas, but telegram/tg_journal/github are Always and must stay.
         let b = Budget::for_window(None);
         let allowance = b.tool_allowance(b.prompt);
-        let total = tool_cost("deepseek-v4.1-flash", "", &set, "");
-        println!("tgbot toolset: {total} tokens against {allowance}");
-        assert!(total < allowance, "the tgbot toolset {total} exceeds the floor {allowance}");
+        let measured: Vec<(&str, bool, usize)> = crate::registry::TOOLS
+            .iter()
+            .filter(|d| {
+                !matches!(
+                    d.handler,
+                    crate::registry::Handler::Agent
+                        | crate::registry::Handler::SpawnAgent
+                        | crate::registry::Handler::SendMessage
+                        | crate::registry::Handler::ReviewAgent
+                )
+            })
+            .map(|d| {
+                (
+                    d.name,
+                    matches!(d.availability, crate::registry::Availability::Always),
+                    tool_cost("deepseek-v4.1-flash", d.name, d.description, &d.schema_json()),
+                )
+            })
+            .collect();
+        let (kept, dropped) = fit_builtin(measured.into_iter(), allowance);
+        println!("kept {} dropped {}", kept.len(), dropped.len());
+        for hand in ["telegram", "tg_journal", "github"] {
+            assert!(kept.iter().any(|k| *k == hand), "{hand} was dropped by the budget");
+        }
     }
 }

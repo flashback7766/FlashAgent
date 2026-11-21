@@ -346,8 +346,11 @@ const TASK_ID: Param = opt_int("task_id", "The id run_shell returned when it sta
 
 const GH_ACTION: Param = one_of(
     "action",
-    "search — найти существующие issues; get — прочитать один; create — завести новый; comment — дописать комментарий.",
-    &["search", "get", "create", "comment"],
+    "search — найти существующие issues; get — прочитать один; create — завести новый; comment — дописать комментарий; close/reopen — закрыть или переоткрыть (обе требуют комментарий с причиной); edit — поправить заголовок или тело; commits — последние коммиты; file — прочитать файл репозитория; diff — дифф коммита.",
+    &[
+        "search", "get", "create", "comment", "close", "reopen", "edit", "commits",
+        "file", "diff",
+    ],
 );
 
 const TG_ACTION: Param = one_of(
@@ -668,7 +671,10 @@ pub static TOOLS: &[ToolDef] = &[
         category: Category::Read,
         touches: Touches::Nothing,
         preview: Preview::None,
-        availability: Availability::Serve,
+        // Always, not Serve: offering is decided by the wiring filter (no
+        // bridge — no schema), and once offered the schema budget must
+        // never drop the room's hands.
+        availability: Availability::Always,
     },
     ToolDef {
         name: "tg_journal",
@@ -686,17 +692,21 @@ pub static TOOLS: &[ToolDef] = &[
         category: Category::Read,
         touches: Touches::Nothing,
         preview: Preview::None,
-        availability: Availability::Serve,
+        availability: Availability::Always,
     },
     ToolDef {
         name: "github",
-        description: "Issues репозитория проекта. search ищет существующие по строке — всегда ищи, прежде чем создавать: похожий баг уходит комментарием к готовому issue, а не новым дублем. get читает один issue (number). create заводит новый (title, body — по-русски: что случилось, чего ждал, сборка и шаги). comment пишет комментарий (number, body). Репозиторий один, параметра нет.",
+        description: "Issues и код репозитория проекта. search ищет существующие по строке — всегда ищи, прежде чем создавать: похожий баг уходит комментарием, а закрытый — reopen'ом с комментарием. get читает один issue (number). create заводит новый (title, body по-русски, labels). comment пишет комментарий (number, body). close/reopen требуют comment (причина остаётся в issue). edit правит заголовок/тело (number, title?, body?). commits, file (path) и diff (sha) читают код. Репозиторий один, параметра нет.",
         params: &[
             GH_ACTION,
             opt_str("query", "Для search: слова, которые заведомо есть в похожем issue"),
-            opt_int("number", "Для get/comment: номер issue"),
-            opt_str("title", "Для create: заголовок issue"),
-            opt_str("body", "Для create/comment: текст, по-русски"),
+            opt_int("number", "Для get/comment/close/reopen/edit: номер issue"),
+            opt_str("title", "Для create/edit: заголовок issue"),
+            opt_str("body", "Для create/comment/edit/close/reopen: текст, по-русски"),
+            opt_str("comment", "Для close/reopen: причина, она же комментарий в issue"),
+            opt_str("labels", "Для create: метки через запятую (bug, enhancement)"),
+            opt_str("path", "Для file: путь файла в репозитории"),
+            opt_str("sha", "Для diff: хеш коммита (по умолчанию последний)"),
         ],
         required: &["action"],
         has_header: true,
@@ -706,7 +716,7 @@ pub static TOOLS: &[ToolDef] = &[
         category: Category::Read,
         touches: Touches::Nothing,
         preview: Preview::None,
-        availability: Availability::Serve,
+        availability: Availability::Always,
     },
     ToolDef {
         name: "agent",

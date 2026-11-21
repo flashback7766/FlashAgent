@@ -1115,6 +1115,9 @@ pub(crate) struct TgbotProfile {
     pub cross_room: bool,
     /// B5: language and tone, said once here and never glued per turn.
     pub language_directive: &'static str,
+    /// D5: the actions the room's github tool may use; None = all. The
+    /// users' room files and amends, the dev room also closes.
+    pub github_actions: Option<&'static [&'static str]>,
 }
 
 const TG_LANGUAGE: &str = "ЯЗЫК И ТОН КОМНАТЫ: отвечай только по-русски, независимо от языка собеседника. Живой, дружелюбный тон без официоза; эмодзи не используй. На провокации и не по теме — короткий живой юмор, одна-две фразы, без холодных отписок.";
@@ -1131,6 +1134,7 @@ static TG_BOT_DEV: TgbotProfile = TgbotProfile {
     vision: true,
     cross_room: true,
     language_directive: TG_LANGUAGE,
+    github_actions: None,
 };
 
 static TG_BOT_USERS: TgbotProfile = TgbotProfile {
@@ -1169,6 +1173,11 @@ static TG_BOT_USERS: TgbotProfile = TgbotProfile {
     vision: true,
     cross_room: false,
     language_directive: TG_LANGUAGE,
+    // A reporter files, reads and amends; closing an issue is the dev
+    // room's word (D5), and the tool refuses it here.
+    github_actions: Some(&[
+        "search", "get", "create", "comment", "reopen", "edit", "commits", "file", "diff",
+    ]),
 };
 
 /// The profile a `--profile` flag names, or None when it names nothing.
@@ -1327,7 +1336,12 @@ pub(crate) async fn run_serve(mut config: flashagent_core::AppConfig, opts: Serv
     // The GitHub issues connection: the room's tracker memory. Optional by
     // nature — a room without a token runs without the tool, one with a
     // token gets it.
-    let github = flashagent_tools::GitHubConfig::from_env();
+    let github = flashagent_tools::GitHubConfig::from_env().map(|mut cfg| {
+        cfg.allowed_actions = profile
+            .and_then(|p| p.github_actions)
+            .map(|list| list.iter().map(|s| s.to_string()).collect());
+        cfg
+    });
     let tools = Arc::new(flashagent_tools::BuiltinTools::new(flashagent_tools::BuiltinToolsConfig {
         cwd: cwd.clone(),
         brave_api_key: std::env::var("BRAVE_API_KEY").ok().filter(|k| !k.trim().is_empty()),

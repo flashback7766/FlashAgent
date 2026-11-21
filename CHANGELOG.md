@@ -1,5 +1,27 @@
 # Changelog
 
+## b735 — The tracker and the code behind it (tgbot phase 4)
+
+- **The github tool is whole (D1/D13).** Beyond search/read/file/comment it
+  now closes and reopens (both demand a comment with the reason — D9), edits
+  the title or body, lists commits, reads a repository file and prints a
+  commit diff. The room's hands — `telegram`, `tg_journal`, `github` — are
+  `Always` now: the schema budget may drop optional tools, never the ones a
+  room lives by (the budget test pins it).
+- **The rooms differ by right (D5/D14).** The users' serve may search,
+  file, comment, reopen and edit; `close` exists only in the dev profile
+  and the tool refuses it elsewhere — closing is the dev room's word.
+- **The report flow closes the loop (D6/D15/D18/D19).** A duplicate goes as
+  a comment, a closed twin is reopened with the reason, the mapping
+  (`issues.json` + the member profile) feeds `/my`, and the soft five-a-day
+  limit is stated to the model — a genuinely new bug still gets filed. The
+  reporter's screenshots ride the issue body as server paths (`shots/...`):
+  the GitHub API cannot upload files with a PAT, and pretending otherwise
+  would be a lie in the issue (J5, honest version).
+- **The watcher speaks the new path (D11/D17):** a closed issue lands in
+  the dev room with a line saying a repeat report reopens it through the
+  tool.
+
 ## b735 — A room of hundreds stays calm (tgbot phase 3)
 
 - **The bot has its own reflexes.** A brand name or an invite link in a
