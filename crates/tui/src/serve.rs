@@ -1203,9 +1203,9 @@ static TG_BOT_USERS: TgbotProfile = TgbotProfile {
     ],
     disabled: &[
         // I13: the users' room lives on its own tools — the machine's code
-        // and the project's sources are not its business.
+        // and the project's sources are not its business. `read` stays:
+        // screenshots reach the model only through read mode=image.
         "run_shell",
-        "read",
         "search",
         "git",
         "env_info",
