@@ -1204,12 +1204,13 @@ static TG_BOT_USERS: TgbotProfile = TgbotProfile {
     disabled: &[
         // I13: the users' room lives on its own tools — the machine's code
         // and the project's sources are not its business. `read` stays:
-        // screenshots reach the model only through read mode=image.
+        // screenshots reach the model only through read mode=image. `web`
+        // stays on (the owner's call): the room answers with facts checked
+        // against the internet, not from memory.
         "run_shell",
         "search",
         "git",
         "env_info",
-        "web",
         "task",
         "plan",
         "edit",
@@ -1665,6 +1666,27 @@ async fn drain_sessions(
 mod tests {
     use super::*;
     use flashagent_core::permissions::{ApprovalGate, ApprovalRequest};
+
+    #[test]
+    fn the_reporters_room_searches_the_web_but_not_the_machine() {
+        assert!(
+            !TG_BOT_USERS.disabled.contains(&"web"),
+            "the room checks facts against the internet"
+        );
+        assert!(
+            TG_BOT_USERS.allowlist.contains(&"web"),
+            "the gate must let the search through silently"
+        );
+        assert!(
+            TG_BOT_USERS.disabled.contains(&"run_shell")
+                && TG_BOT_USERS.disabled.contains(&"search"),
+            "the machine's code stays out of the users' room"
+        );
+        assert!(
+            !TG_BOT_DEV.disabled.contains(&"web"),
+            "the dev room searches too"
+        );
+    }
 
     #[test]
     fn the_reporters_room_amends_its_text_but_never_closes_the_issue() {
