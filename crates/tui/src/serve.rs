@@ -482,6 +482,14 @@ fn forget_session(
 
 /// The named session a request addresses: the `session` query parameter for
 /// GETs, the `session` body field for POSTs, `main` when nothing is named.
+fn valid_session_key(key: &str) -> bool {
+    !key.is_empty()
+        && key.len() <= 64
+        && key
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '_')
+}
+
 fn session_key_of(query: &str, body: &serde_json::Value) -> String {
     let candidates = [
         query
@@ -624,20 +632,35 @@ impl ServeApp {
                 loop_ = loop_.with_compactor(compactor);
             }
             let state_for_events = state.clone();
+            // A chat_reply call IS the delivery: the stream of the session
+            // carries it as a `reply` with the full text. The text is held
+            // back until the call's ToolFinished says ok — a truncated or
+            // refused call must never post.
+            let mut pending_replies: std::collections::HashMap<String, serde_json::Value> =
+                std::collections::HashMap::new();
             let mut on_event = |event: flashagent_core::LoopEvent| {
                 let mut st = state_for_events.lock().expect("serve state");
-                // A chat_reply call IS the delivery: the event stream of the
-                // session it ran in carries it as a `reply` with the full
-                // text — the bot posts it to that exact message.
-                if let flashagent_core::LoopEvent::ToolStarted { name, args_json, .. } = &event {
-                    if name == "chat_reply" {
-                        if let Some(reply) = chat_reply_event(args_json) {
-                            st.push_event(reply);
+                match &event {
+                    flashagent_core::LoopEvent::ToolStarted { id, name, args_json } => {
+                        if name == "chat_reply" {
+                            if let Some(reply) = chat_reply_event(args_json) {
+                                pending_replies.insert(id.clone(), reply);
+                            }
                         }
                     }
-                }
-                if let flashagent_core::LoopEvent::TurnDelta(text) = &event {
-                    st.text.push_str(text);
+                    flashagent_core::LoopEvent::ToolFinished { id, name, is_error, .. } => {
+                        if name == "chat_reply" {
+                            if let Some(reply) = pending_replies.remove(id) {
+                                if !is_error {
+                                    st.push_event(reply);
+                                }
+                            }
+                        }
+                    }
+                    flashagent_core::LoopEvent::TurnDelta(text) => {
+                        st.text.push_str(text);
+                    }
+                    _ => {}
                 }
                 st.push_event(event_to_json(&event));
             };
@@ -832,10 +855,12 @@ fn steer_answer(state: &SharedState, body: &[u8]) -> (u16, serde_json::Value) {
     }
     let st = state.lock().expect("serve state");
     match st.steer_tx.as_ref() {
-        Some(tx) => {
-            let _ = tx.send(flashagent_core::Steer::text(text));
-            (200u16, serde_json::json!({"ok": true}))
-        }
+        Some(tx) => match tx.send(flashagent_core::Steer::text(text)) {
+            Ok(()) => (200u16, serde_json::json!({"ok": true})),
+            // The turn ended between the busy check and the send: the bot
+            // must start its own turn instead of believing it was accepted.
+            Err(_) => (409u16, serde_json::json!({"error": "no turn is running"})),
+        },
         None => (409u16, serde_json::json!({"error": "no turn is running"})),
     }
 }
@@ -854,7 +879,10 @@ fn threshold_pct_of(compact_at: Option<usize>, configured: usize, capacity: usiz
 /// full text ride in the call's own arguments. `None` when the call does
 /// not name a message — nothing to deliver.
 fn chat_reply_event(args_json: &str) -> Option<serde_json::Value> {
-    let args = serde_json::from_str::<serde_json::Value>(args_json).ok()?;
+    // The tool parses with `effective_args` (it unwraps {"arguments":{...}}
+    // and heals a Python dict); the feed must read the same shape or a
+    // delivered answer never becomes a `reply` event.
+    let args = flashagent_llm::effective_args(args_json, "chat_reply")?;
     let message_id = args.get("message_id").and_then(|v| v.as_i64())?;
     let text = args.get("text").and_then(|v| v.as_str()).unwrap_or_default();
     Some(serde_json::json!({
@@ -916,6 +944,15 @@ async fn handle(
                 .ok()
                 .unwrap_or_default();
             let key = session_key_of(&req.query, &body_value);
+            if !valid_session_key(&key) {
+                // The key becomes part of a file name: a path must not fit.
+                return respond(
+                    stream,
+                    400,
+                    &serde_json::json!({"error": "bad session key"}),
+                )
+                .await;
+            }
             let session = session_for(sessions, base, &key);
             match (req.method.as_str(), req.path.as_str()) {
                 ("GET", "/health") => (
@@ -1165,7 +1202,16 @@ static TG_BOT_USERS: TgbotProfile = TgbotProfile {
         "view_image",
     ],
     disabled: &[
+        // I13: the users' room lives on its own tools — the machine's code
+        // and the project's sources are not its business.
         "run_shell",
+        "read",
+        "search",
+        "git",
+        "env_info",
+        "web",
+        "task",
+        "plan",
         "edit",
         "http_request",
         "skill",
@@ -1183,8 +1229,7 @@ static TG_BOT_USERS: TgbotProfile = TgbotProfile {
     // A reporter files, reads and amends; closing an issue is the dev
     // room's word (D5), and the tool refuses it here.
     github_actions: Some(&[
-        "search", "get", "create", "comment", "reopen", "edit", "attach", "commits", "file",
-        "diff",
+        "search", "get", "create", "comment", "reopen", "attach",
     ]),
 };
 

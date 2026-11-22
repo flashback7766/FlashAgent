@@ -475,22 +475,35 @@ impl GitHub {
             return Ok((full, login));
         }
         let name = full.split('/').next_back().unwrap_or("rx-playa-attachments");
-        self.call_root(
-            reqwest::Method::POST,
-            "/user/repos",
-            Some(serde_json::json!({
-                "name": name,
-                "description": "Screenshots attached to RX Playa issues by the bot",
-                "private": false,
-                "auto_init": true,
-            })),
-        )
-        .await
-        .map_err(|e| {
-            ToolError::Other(format!(
-                "err: не смог создать репо вложений у бот-аккаунта ({e})"
-            ))
-        })?;
+        if let Err(e) = self
+            .call_root(
+                reqwest::Method::POST,
+                "/user/repos",
+                Some(serde_json::json!({
+                    "name": name,
+                    "description": "Screenshots attached to RX Playa issues by the bot",
+                    "private": false,
+                    "auto_init": true,
+                })),
+            )
+            .await
+        {
+            // 422 here usually means a parallel call created it a blink
+            // earlier; probe once more before calling it a failure.
+            let again = self
+                .http
+                .get(&probe)
+                .bearer_auth(&self.cfg.token)
+                .send()
+                .await
+                .map(|r| r.status().is_success())
+                .unwrap_or(false);
+            if !again {
+                return Err(ToolError::Other(format!(
+                    "err: не смог создать репо вложений у бот-аккаунта ({e})"
+                )));
+            }
+        }
         Ok((full, login))
     }
 
@@ -506,26 +519,62 @@ impl GitHub {
             "{}/repos/{}/contents/{}",
             self.cfg.base_url, repo, remote
         );
+        let mut payload = serde_json::json!({
+            "message": message,
+            "content": b64,
+            "branch": "main",
+        });
         let resp = self
             .http
             .put(&url)
             .bearer_auth(&self.cfg.token)
             .header("Accept", "application/vnd.github+json")
-            .json(&serde_json::json!({
-                "message": message,
-                "content": b64,
-                "branch": "main",
-            }))
+            .json(&payload)
             .send()
             .await
             .map_err(|e| ToolError::Other(format!("err: GitHub недоступен ({e})")))?;
-        if !resp.status().is_success() {
-            return Err(ToolError::Other(format!(
-                "err: вложение не залилось (HTTP {}) — проверь права бота в репо вложений",
-                resp.status()
-            )));
+        if resp.status().is_success() {
+            return Ok(());
         }
-        Ok(())
+        if resp.status() == reqwest::StatusCode::UNPROCESSABLE_ENTITY {
+            // The file is already there from a retry: updating it needs the
+            // current blob sha, or GitHub refuses forever.
+            let meta = format!(
+                "{}/repos/{}/contents/{}?ref=main",
+                self.cfg.base_url, repo, remote
+            );
+            if let Ok(existing) = self
+                .http
+                .get(&meta)
+                .bearer_auth(&self.cfg.token)
+                .send()
+                .await
+            {
+                if let Ok(value) = existing.json::<serde_json::Value>().await {
+                    if let Some(sha) = value.get("sha").and_then(serde_json::Value::as_str) {
+                        payload["sha"] = serde_json::json!(sha);
+                        let retry = self
+                            .http
+                            .put(&url)
+                            .bearer_auth(&self.cfg.token)
+                            .header("Accept", "application/vnd.github+json")
+                            .json(&payload)
+                            .send()
+                            .await
+                            .map_err(|e| {
+                                ToolError::Other(format!("err: GitHub недоступен ({e})"))
+                            })?;
+                        if retry.status().is_success() {
+                            return Ok(());
+                        }
+                    }
+                }
+            }
+        }
+        Err(ToolError::Other(format!(
+            "err: вложение не залилось (HTTP {}) — проверь права бота в репо вложений",
+            resp.status()
+        )))
     }
 
     /// A call outside /repos/{project}: the attachments repo and /user.
