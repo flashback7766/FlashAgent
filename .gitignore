@@ -45,3 +45,7 @@ MEMORY.md
 memory/
 __pycache__/
 handoff.md
+
+# The RX Playa Telegram bot lives on this machine only: its prompts, chat
+# wiring and deploy units are the owner's, not the FlashAgent project's.
+bot/
