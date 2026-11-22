@@ -21,6 +21,15 @@
 - **The watcher speaks the new path (D11/D17):** a closed issue lands in
   the dev room with a line saying a repeat report reopens it through the
   tool.
+- **Screenshots are attached, not named (J5, the real version).** A GitHub
+  token cannot upload files to the project repo without push rights there,
+  so the bot keeps its own public attachments repo (`FlashAgent-bot/
+  rx-playa-attachments`, created on first use): every screenshot goes into
+  `issue-<n>/` and the issue gets markdown images that render and download
+  from GitHub. `create images=[...]` does it in one call, `attach` adds
+  more to a filed issue. The project repo is never written to. Every issue
+  body now demands the reporter line — `Репортёр: @ник (Имя)`, nothing
+  else from the profile (D10).
 
 ## b735 — A room of hundreds stays calm (tgbot phase 3)
 
