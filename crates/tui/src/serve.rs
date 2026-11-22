@@ -1226,10 +1226,11 @@ static TG_BOT_USERS: TgbotProfile = TgbotProfile {
     cross_room: false,
     room: "users",
     language_directive: TG_LANGUAGE,
-    // A reporter files, reads and amends; closing an issue is the dev
-    // room's word (D5), and the tool refuses it here.
+    // A reporter files, reads, amends and fixes the text of its issue;
+    // closing an issue is the dev room's word (D5), and the tool refuses
+    // it here.
     github_actions: Some(&[
-        "search", "get", "create", "comment", "reopen", "attach",
+        "search", "get", "create", "comment", "reopen", "edit", "attach",
     ]),
 };
 
@@ -1664,6 +1665,22 @@ async fn drain_sessions(
 mod tests {
     use super::*;
     use flashagent_core::permissions::{ApprovalGate, ApprovalRequest};
+
+    #[test]
+    fn the_reporters_room_amends_its_text_but_never_closes_the_issue() {
+        let actions = TG_BOT_USERS
+            .github_actions
+            .expect("the users profile gates the github tool");
+        assert!(
+            actions.contains(&"edit"),
+            "a report session must be able to fix the issue's own body: {actions:?}"
+        );
+        assert!(actions.contains(&"reopen"), "{actions:?}");
+        assert!(
+            !actions.contains(&"close"),
+            "closing an issue stays the dev room's word: {actions:?}"
+        );
+    }
 
     #[tokio::test]
     async fn an_unanswered_approval_is_denied_when_the_clock_runs_out() {
