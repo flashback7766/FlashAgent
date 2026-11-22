@@ -607,6 +607,69 @@ async fn mock_github_recording() -> (String, std::sync::Arc<std::sync::Mutex<Vec
     (format!("http://{addr}"), log)
 }
 
+
+#[tokio::test]
+async fn an_image_outside_shots_is_refused_before_anything_uploads() {
+    // P0: only the bot's own screenshots may leave the machine; a named
+    // .env or a source file must never reach the public attachments repo.
+    let (url, log) = mock_github_recording().await;
+    let project = Project::with_github(flashagent_tools::GitHubConfig {
+        token: "t".into(),
+        repo: "own/repo".into(),
+        base_url: url,
+        allowed_actions: None,
+        cwd: std::env::temp_dir(),
+        attachments_repo: None,
+    });
+    std::fs::write(project.dir.join(".env"), "SECRET=1").unwrap();
+    std::fs::write(project.dir.join("AGENTS.md"), "rules").unwrap();
+    for name in [".env", "AGENTS.md", "src/main.rs"] {
+        let out = flashagent_tools::scope_turn(async {
+            project
+                .raw(
+                    "github",
+                    serde_json::json!({
+                        "action": "create", "title": "x", "body": "y", "images": [name],
+                    }),
+                )
+                .await
+        })
+        .await;
+        assert!(out.is_error, "{name} must be refused: {}", out.content);
+        assert!(out.content.contains("shots/"), "{}", out.content);
+    }
+    let log = log.lock().unwrap().clone();
+    assert!(
+        !log.iter().any(|l| l.starts_with("POST /repos/own/repo/issues ")),
+        "the issue was never created for a refused image"
+    );
+}
+
+#[tokio::test]
+async fn a_traversal_path_and_a_bad_sha_are_refused() {
+    let (url, _log) = mock_github_recording().await;
+    let project = Project::with_github(flashagent_tools::GitHubConfig {
+        token: "t".into(),
+        repo: "own/repo".into(),
+        base_url: url,
+        allowed_actions: None,
+        cwd: std::env::temp_dir(),
+        attachments_repo: None,
+    });
+    for path in ["../../../victim/private/contents/secret", "a/../../b", "x?y=1"] {
+        let out = project
+            .raw("github", serde_json::json!({"action": "file", "path": path}))
+            .await;
+        assert!(out.is_error, "{path}: {}", out.content);
+        assert!(out.content.contains("обычный путь"), "{}", out.content);
+    }
+    let out = project
+        .raw("github", serde_json::json!({"action": "diff", "sha": "../../user"}))
+        .await;
+    assert!(out.is_error, "{}", out.content);
+    assert!(out.content.contains("хеш"), "{}", out.content);
+}
+
 #[tokio::test]
 async fn an_issue_with_images_uploads_them_and_embeds_the_markdown() {
     let (url, log) = mock_github_recording().await;
@@ -680,7 +743,7 @@ async fn an_image_path_that_escapes_the_project_is_refused() {
     })
     .await;
     assert!(out.is_error, "{}", out.content);
-    assert!(out.content.contains("относительным"), "{}", out.content);
+    assert!(out.content.contains("shots/"), "{}", out.content);
 }
 
 #[tokio::test]

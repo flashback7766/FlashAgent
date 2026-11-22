@@ -307,6 +307,11 @@ impl GitHub {
         labels: Option<&str>,
         images: Option<&[String]>,
     ) -> Result<String, ToolError> {
+        // Images are validated before the issue exists: an orphan issue
+        // with no screenshots and no link is worse than a refused call.
+        if let Some(images) = images.filter(|list| !list.is_empty()) {
+            self.check_images(images)?;
+        }
         let mut payload = serde_json::json!({ "title": title, "body": body });
         if let Some(labels) = labels.map(str::trim).filter(|l| !l.is_empty()) {
             let list: Vec<&str> = labels.split(',').map(str::trim).filter(|l| !l.is_empty()).collect();
@@ -341,6 +346,11 @@ impl GitHub {
         number: i64,
         images: &[String],
     ) -> Result<(String, usize), ToolError> {
+        if images.len() > 5 {
+            return Err(ToolError::Other(
+                "err: не больше 5 картинок за один вызов".into(),
+            ));
+        }
         let (att_repo, _login) = self.attachments_target().await?;
         let mut lines = Vec::new();
         let mut uploaded = 0;
@@ -349,21 +359,35 @@ impl GitHub {
             if local.is_empty() {
                 continue;
             }
-            // Project-relative only: the model names the file the journal
-            // named; an absolute path is not this tool's business.
-            if std::path::Path::new(local).is_absolute() || local.contains("..") {
+            // Only the room's own screenshots leave this machine: the
+            // journal names them `shots/...`, and nothing else is a picture
+            // the bot took. An arbitrary project file (.env, keys, sources)
+            // must never reach a public repo through a model call.
+            let shown = std::path::Path::new(local);
+            if shown.is_absolute()
+                || local.contains("..")
+                || !local.starts_with("shots/")
+                || shown.components().count() < 2
+            {
                 return Err(ToolError::Other(format!(
-                    "err: картинка '{path}' — путь должен быть относительным путём проекта"
+                    "err: картинка '{path}' — прикладывать можно только скрины из shots/"
                 )));
             }
-            let bytes = std::fs::read(self.cfg.cwd.join(local)).map_err(|e| {
-                ToolError::Other(format!("err: картинка '{path}' не читается ({e})"))
-            })?;
-            if bytes.len() > 5_000_000 {
+            let full = self.cfg.cwd.join(local);
+            let size = std::fs::metadata(&full).map(|m| m.len()).unwrap_or(0);
+            if size == 0 {
+                return Err(ToolError::Other(format!(
+                    "err: картинка '{path}' не читается"
+                )));
+            }
+            if size > 5_000_000 {
                 return Err(ToolError::Other(format!(
                     "err: картинка '{path}' больше 5 МБ — GitHub API это не примет"
                 )));
             }
+            let bytes = std::fs::read(&full).map_err(|e| {
+                ToolError::Other(format!("err: картинка '{path}' не читается ({e})"))
+            })?;
             let name = std::path::Path::new(local)
                 .file_name()
                 .and_then(|n| n.to_str())
@@ -380,6 +404,40 @@ impl GitHub {
             return Ok((String::new(), 0));
         }
         Ok((format!("\n\n{}", lines.join("\n")), uploaded))
+    }
+
+    /// Every image the call names: exists, inside shots/, small enough.
+    fn check_images(&self, images: &[String]) -> Result<(), ToolError> {
+        if images.len() > 5 {
+            return Err(ToolError::Other(
+                "err: не больше 5 картинок за один вызов".into(),
+            ));
+        }
+        for path in images {
+            let local = path.trim().trim_start_matches("./");
+            let shown = std::path::Path::new(local);
+            if local.is_empty()
+                || shown.is_absolute()
+                || local.contains("..")
+                || !local.starts_with("shots/")
+                || shown.components().count() < 2
+            {
+                return Err(ToolError::Other(format!(
+                    "err: картинка '{path}' — прикладывать можно только скрины из shots/"
+                )));
+            }
+            let full = self.cfg.cwd.join(local);
+            let size = std::fs::metadata(&full).map(|m| m.len()).unwrap_or(0);
+            if size == 0 {
+                return Err(ToolError::Other(format!("err: картинка '{path}' не читается")));
+            }
+            if size > 5_000_000 {
+                return Err(ToolError::Other(format!(
+                    "err: картинка '{path}' больше 5 МБ — GitHub API это не примет"
+                )));
+            }
+        }
+        Ok(())
     }
 
     /// The attachments repo, created on first use: `{bot}/rx-playa-attachments`,
@@ -539,8 +597,20 @@ impl GitHub {
     }
 
     async fn read_file(&self, path: &str) -> Result<String, ToolError> {
+        let clean = path.trim_start_matches('/');
+        if clean.is_empty()
+            || clean.contains("..")
+            || clean.contains('?')
+            || clean.contains('#')
+            || clean.contains('\\')
+            || clean.contains("//")
+        {
+            return Err(ToolError::Other(format!(
+                "err: file: путь '{path}' — обычный путь в репозитории, без .. и ?"
+            )));
+        }
         let value = self
-            .call(reqwest::Method::GET, &format!("/contents/{}", path.trim_start_matches('/')), None)
+            .call(reqwest::Method::GET, &format!("/contents/{clean}"), None)
             .await?;
         let content = value
             .get("content")
@@ -555,7 +625,17 @@ impl GitHub {
 
     async fn diff(&self, sha: Option<&str>) -> Result<String, ToolError> {
         let sha = match sha.map(str::trim).filter(|s| !s.is_empty()) {
-            Some(s) => s.to_string(),
+            Some(s) => {
+                let hexlike = s.len() >= 6
+                    && s.len() <= 40
+                    && s.chars().all(|c| c.is_ascii_hexdigit());
+                if !hexlike {
+                    return Err(ToolError::Other(format!(
+                        "err: diff: '{s}' — не похоже на хеш коммита"
+                    )));
+                }
+                s.to_string()
+            }
             None => {
                 let value = self
                     .call(reqwest::Method::GET, "/commits?per_page=1", None)

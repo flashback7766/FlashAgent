@@ -923,18 +923,19 @@ async fn handle(
                     serde_json::json!({"ok": true, "version": flashagent_svc::updater::current_version()}),
                 ),
                 ("GET", "/status") => {
-                    let (running, events_len, text_chars, turns_done, last_error, session_id, model) = {
+                    let (running, events_len, text_chars, turns_done, last_error) = {
                         let st = session.state.lock().expect("serve state");
-                        let app = session.app.lock().expect("serve app");
                         (
                             st.running,
                             st.total_events(),
                             st.text.chars().count(),
                             st.turns_done,
                             st.last_error.clone(),
-                            app.session_id.clone(),
-                            app.model.clone(),
                         )
+                    };
+                    let (session_id, model) = {
+                        let app = session.app.lock().expect("serve app");
+                        (app.session_id.clone(), app.model.clone())
                     };
                     let total = sessions.lock().expect("serve sessions").len();
                     let tool_names: Vec<String> =
@@ -1229,8 +1230,9 @@ pub(crate) async fn run_serve(mut config: flashagent_core::AppConfig, opts: Serv
         config.prompt_detail = p.prompt_detail.to_string();
     }
     if let Some(mode) = &opts.mode {
-        config.permission_mode = parse_mode(mode)
-            .unwrap_or(flashagent_core::PermissionMode::AcceptEdits);
+        config.permission_mode = parse_mode(mode).ok_or_else(|| {
+            anyhow::anyhow!("неизвестный --mode '{mode}': бывают planning, manual, accept, bypass")
+        })?;
     } else if let Some(p) = profile {
         config.permission_mode = parse_mode(p.permission_mode)
             .unwrap_or(flashagent_core::PermissionMode::AcceptEdits);
@@ -1394,13 +1396,17 @@ pub(crate) async fn run_serve(mut config: flashagent_core::AppConfig, opts: Serv
     // flag: the users' room carries an allowlist gate (its own tools pass,
     // the rest is refused without a card — B1), and the dev room's bypass
     // never asks, so the deny-all gate only catches the blacklisted shell.
-    let approval_gate: Arc<dyn flashagent_core::permissions::ApprovalGate> = if profile
-        .is_some_and(|p| p.permission_mode == "planning")
+    let effective_planning =
+        matches!(config.permission_mode, flashagent_core::PermissionMode::Planning);
+    let approval_gate: Arc<dyn flashagent_core::permissions::ApprovalGate> = if effective_planning
+        && profile.is_some_and(|p| !p.allowlist.is_empty())
     {
         Arc::new(flashagent_core::permissions::AllowlistGate::new(
             profile.unwrap().allowlist,
         ))
-    } else if opts.no_ask || profile.is_some() {
+    } else if opts.no_ask || (profile.is_some() && opts.mode.is_none()) {
+        // A profile without an explicit --mode override never shows cards;
+        // an explicit mode is the operator's word and may ask.
         Arc::new(flashagent_core::permissions::DenyAllGate)
     } else {
         gate.clone()

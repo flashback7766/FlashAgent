@@ -348,8 +348,8 @@ const GH_ACTION: Param = one_of(
     "action",
     "search — найти существующие issues; get — прочитать один; create — завести новый; comment — дописать комментарий; close/reopen — закрыть или переоткрыть (обе требуют комментарий с причиной); edit — поправить заголовок или тело; commits — последние коммиты; file — прочитать файл репозитория; diff — дифф коммита.",
     &[
-        "search", "get", "create", "comment", "close", "reopen", "edit", "commits",
-        "file", "diff",
+        "search", "get", "create", "comment", "close", "reopen", "edit", "attach",
+        "commits", "file", "diff",
     ],
 );
 
