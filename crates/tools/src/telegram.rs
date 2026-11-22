@@ -21,6 +21,10 @@ pub struct TgBridgeConfig {
     pub base_url: String,
     pub token: String,
     pub cross_room: bool,
+    /// The room this serve IS (`dev` / `users`): the bot defaults every
+    /// action and journal read to it. Without it a users' serve read the
+    /// dev room's journal and aimed its verdicts at the wrong chat.
+    pub room: Option<String>,
 }
 
 /// How many mutating calls one turn may make, and how fast they may follow
@@ -268,6 +272,9 @@ impl TgBridge {
         }
 
         let mut body = serde_json::json!({ "action": action });
+        if let Some(room) = self.cfg.room.as_deref().filter(|r| !r.is_empty()) {
+            body["room"] = serde_json::json!(room);
+        }
         for (key, value) in [
             ("target", a.target),
             ("text", a.text),
@@ -300,6 +307,9 @@ impl TgBridge {
     pub async fn journal(&self, args_json: &str) -> Result<String, ToolError> {
         let a: TgJournalArgs = parse_args(args_json, "tg_journal")?;
         let mut body = serde_json::json!({ "action": "journal" });
+        if let Some(room) = self.cfg.room.as_deref().filter(|r| !r.is_empty()) {
+            body["room"] = serde_json::json!(room);
+        }
         if let Some(v) = a.minutes {
             body["minutes"] = serde_json::json!(v);
         }
@@ -335,6 +345,7 @@ mod tests {
             base_url: "http://127.0.0.1:1".into(),
             token: "test".into(),
             cross_room: false,
+            room: Some("users".into()),
         })
         .unwrap()
     }

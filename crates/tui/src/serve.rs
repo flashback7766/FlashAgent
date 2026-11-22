@@ -1114,6 +1114,9 @@ pub(crate) struct TgbotProfile {
     pub vision: bool,
     /// A13: only the dev session acts outside its own room.
     pub cross_room: bool,
+    /// The room this serve is (`dev` / `users`): the bot defaults every
+    /// bridge action to it.
+    pub room: &'static str,
     /// B5: language and tone, said once here and never glued per turn.
     pub language_directive: &'static str,
     /// D5: the actions the room's github tool may use; None = all. The
@@ -1134,6 +1137,7 @@ static TG_BOT_DEV: TgbotProfile = TgbotProfile {
     compact_at: None,
     vision: true,
     cross_room: true,
+    room: "dev",
     language_directive: TG_LANGUAGE,
     github_actions: None,
 };
@@ -1173,6 +1177,7 @@ static TG_BOT_USERS: TgbotProfile = TgbotProfile {
     compact_at: Some(200_000),
     vision: true,
     cross_room: false,
+    room: "users",
     language_directive: TG_LANGUAGE,
     // A reporter files, reads and amends; closing an issue is the dev
     // room's word (D5), and the tool refuses it here.
@@ -1332,6 +1337,7 @@ pub(crate) async fn run_serve(mut config: flashagent_core::AppConfig, opts: Serv
                 base_url,
                 token,
                 cross_room: p.cross_room,
+                room: Some(p.room.to_string()),
             })
         }
     };

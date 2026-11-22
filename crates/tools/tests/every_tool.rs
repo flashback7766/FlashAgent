@@ -32,6 +32,7 @@ impl Project {
                 base_url: "http://127.0.0.1:1".into(),
                 token: "test".into(),
                 cross_room: true,
+                room: Some("dev".into()),
             }),
             Some(flashagent_tools::GitHubConfig {
                 token: "test".into(),
@@ -364,6 +365,7 @@ async fn a_telegram_reply_travels_the_bridge() {
         base_url: url,
         token: "test-token".into(),
         cross_room: true,
+        room: None,
     });
     let out = project
         .call(
@@ -382,6 +384,7 @@ async fn a_pin_outside_a_turn_scope_is_refused() {
         base_url: url,
         token: "t".into(),
         cross_room: false,
+        room: None,
     });
     let out = project
         .raw("telegram", serde_json::json!({"action": "pin", "msg_id": 5}))
@@ -400,6 +403,7 @@ async fn mutations_in_one_turn_are_charged_and_throttled() {
         base_url: url,
         token: "t".into(),
         cross_room: false,
+        room: None,
     });
     let outs = flashagent_tools::scope_turn(async move {
         let mut outs = Vec::new();
@@ -761,6 +765,7 @@ async fn github_mutations_share_the_turn_budget_with_telegram() {
             base_url: tg_url,
             token: "t".into(),
             cross_room: false,
+            room: Some("users".into()),
         }),
         Some(flashagent_tools::GitHubConfig {
             token: "t".into(),
@@ -796,6 +801,7 @@ async fn tg_journal_reads_through_the_bridge() {
         base_url: url,
         token: "t".into(),
         cross_room: false,
+        room: None,
     });
     let out = project
         .call(

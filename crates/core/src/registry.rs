@@ -652,11 +652,11 @@ pub static TOOLS: &[ToolDef] = &[
     },
     ToolDef {
         name: "telegram",
-        description: "Действия в Telegram через бот-мост. reply — ответ на сообщение (msg_id, text, HTML); delete — удалить (msg_id); ban/unban/mute/unmute берут user (id или @ник), длительность мута решай сам (minutes); pin/unpin/react (emoji) берут msg_id; room_info — состав, муты, активность за сутки; resolve — @ник в id и имя; publish — пост в канал по согласованному драфту. Чужая комната — только через target и если разрешено. Публичный вердикт модерации формулируешь сам через reply. Мутирующие действия: не больше 8 за ход, раз в 2 секунды.",
+        description: "Действия в Telegram через бот-мост. reply — ответ на сообщение (msg_id, text, HTML); delete — удалить (msg_id); ban/unban/mute/unmute берут user (id или @ник), длительность мута решай сам (minutes); pin/unpin/react (emoji) берут msg_id — число после msg:, не id автора; reaction — лёгкий жест: ставь часто, без заголовка и без строки в ответе. room_info — состав, муты, активность за сутки; resolve — @ник в id и имя; publish — пост в канал по согласованному драфту. Чужая комната — только через target и если разрешено. Публичный вердикт модерации формулируешь сам через reply. Мутирующие действия: не больше 8 за ход, раз в 2 секунды.",
         params: &[
             TG_ACTION,
             opt_str("target", "Чужая комната для действия: users или channel; без него действие идёт в свою комнату"),
-            opt_int("msg_id", "Telegram id сообщения для reply/delete/pin/unpin/react"),
+            opt_int("msg_id", "Номер сообщения (msg:N) для reply/delete/pin/unpin/react — не id участника"),
             opt_str("text", "Текст для reply или publish; Telegram HTML разрешён"),
             opt_str("user", "Кого касается ban/unban/mute/unmute/forget_user: числовой id или @ник"),
             opt_int("minutes", "Длительность мута в минутах (решение модели)"),
