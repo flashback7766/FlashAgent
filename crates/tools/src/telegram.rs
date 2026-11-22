@@ -235,9 +235,9 @@ impl TgBridge {
             }
             "delete" | "pin" | "unpin" | "react" => {
                 need_msg(a.msg_id)?;
-                if action == "react" {
-                    need("emoji", &a.emoji)?;
-                }
+                // react without an emoji is fine: the bot applies the room's
+                // default reaction (heart on fire); the model overrides it
+                // when the case calls for another.
             }
             "ban" | "unban" | "unmute" | "forget_user" => {
                 need("user", &a.user)?;

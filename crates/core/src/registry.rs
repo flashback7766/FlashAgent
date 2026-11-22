@@ -661,7 +661,7 @@ pub static TOOLS: &[ToolDef] = &[
             opt_str("user", "Кого касается ban/unban/mute/unmute/forget_user: числовой id или @ник"),
             opt_int("minutes", "Длительность мута в минутах (решение модели)"),
             opt_str("reason", "Причина бана для аудита; необязательно, но аудит всё запишет"),
-            opt_str("emoji", "Реакция для react"),
+            opt_str("emoji", "Реакция для react; по умолчанию ❤‍🔥 (сердце в огне) — переопределяй по случаю"),
         ],
         required: &["action"],
         has_header: true,
